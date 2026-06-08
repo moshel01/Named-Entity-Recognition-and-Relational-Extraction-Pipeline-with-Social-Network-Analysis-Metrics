@@ -81,7 +81,7 @@ number; report the others to show the effect of inference.
 ## Interpreting results
 
 - **Entity recall low?** GLiNER labels/threshold or (for German) you're still on
-  the English GLiNER model - switch to `urchade/gliner_multi-v2.1`.
+  an English-only GLiNER model - switch to `fastino/gliner2-multi-v1`.
 - **Relation recall low in `python_only`?** Expected - the rule backend is
   precision-oriented. Compare against `api`/`ollama` modes.
 - **Relation precision low in `full` but fine in `conservative`?** The inference

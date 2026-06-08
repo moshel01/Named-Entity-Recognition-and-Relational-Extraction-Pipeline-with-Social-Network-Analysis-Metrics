@@ -46,8 +46,9 @@ python -m spacy download de_core_news_lg       # German (for the nazi_era domain
 
 # GLiNER, sentence-transformers, and fastcoref weights all download
 # automatically from Hugging Face on first run - no manual step. The GLiNER
-# model is chosen in config: gliner_large-v2.1 (English) or
-# gliner_multi-v2.1 (multilingual / German).
+# model is chosen in config: fastino/gliner2-large-v1 (English) or
+# fastino/gliner2-multi-v1 (multilingual / German). Backend (GLiNER vs
+# GLiNER2) is auto-detected from the model name.
 ```
 
 > Full step-by-step model install (incl. GPU, offline caching, and what each

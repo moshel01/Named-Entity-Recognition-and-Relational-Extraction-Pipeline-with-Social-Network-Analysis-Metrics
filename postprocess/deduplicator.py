@@ -147,11 +147,12 @@ class Deduplicator:
 
     # Merge helper
     @staticmethod
-    def _merge_into(primary: Entity, other: Entity) -> None:
+    def _merge_into(primary: Entity, other: Entity, keep_primary_name: bool = False) -> None:
         names = {primary.canonical_name, *primary.aliases,
                  other.canonical_name, *other.aliases}
-        # Keep the higher-mention name as canonical.
-        if other.mention_count > primary.mention_count:
+        # Keep the higher-mention name as canonical, unless the caller pins it
+        # (e.g. folding a bare first name into a full name keeps the full name).
+        if not keep_primary_name and other.mention_count > primary.mention_count:
             primary.canonical_name = other.canonical_name
         names.discard(primary.canonical_name)
         primary.aliases = sorted(names)
@@ -187,6 +188,48 @@ class Deduplicator:
                     self._merge_into(winner, e)
             out.append(winner)
         return out
+
+    # Fold bare first/last names into a unique full name.
+    def _fold_partial_persons(self, entities: list[Entity]) -> list[Entity]:
+        """Merge a single-token PERSON into the one full name it belongs to.
+
+        Surname-initial bucketing keeps "Eleanor" and "Eleanor Vance" in different
+        buckets, so they never fuzzy-merge. Here we fold each bare single-token
+        person into a multi-token person whose FIRST or LAST token matches it -
+        but ONLY when that target is unambiguous (exactly one candidate). An
+        ambiguous bare name ("Robert" with both "Robert Chen" and "Robert Downey")
+        is left as its own node. Author/narrator nodes are never folded.
+        """
+        persons = [e for e in entities if e.label == "PERSON"]
+        if len(persons) < 2:
+            return entities
+        multi = [e for e in persons
+                 if len(normalize_name(e.canonical_name).split()) >= 2]
+        singles = [e for e in persons
+                   if len(normalize_name(e.canonical_name).split()) == 1]
+        if not multi or not singles:
+            return entities
+
+        token_index: dict[str, list[Entity]] = defaultdict(list)
+        for e in multi:
+            toks = normalize_name(e.canonical_name).split()
+            for t in {toks[0], toks[-1]}:
+                token_index[t].append(e)
+
+        alive = {id(e) for e in multi}
+        folded: set[int] = set()
+        for s in singles:
+            if s.attributes.get("is_author") or s.attributes.get("narrator"):
+                continue
+            cands = [c for c in token_index.get(normalize_name(s.canonical_name), [])
+                     if id(c) in alive and not self._blocked(c, s)]
+            if len(cands) == 1:
+                self._merge_into(cands[0], s, keep_primary_name=True)
+                folded.add(id(s))
+
+        if not folded:
+            return entities
+        return [e for e in entities if id(e) not in folded]
 
     # Main resolve
     def resolve(
@@ -246,6 +289,10 @@ class Deduplicator:
 
         if self.config.resolve_cross_type:
             canonical = self._resolve_cross_type(canonical)
+
+        # Fold bare first/last names into their unique full name (after fuzzy,
+        # which can't cross surname-initial buckets).
+        canonical = self._fold_partial_persons(canonical)
 
         # Recompute stable ids and build name -> id index.
         name_to_id: dict[str, str] = {}

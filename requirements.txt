@@ -1,6 +1,7 @@
 # ── Foundation layer (always required) ───────────────────────────────────────
 spacy>=3.7
-gliner>=0.2
+gliner>=0.2          # original GLiNER (urchade/*) - still supported
+gliner2>=1.3         # GLiNER2 (fastino/*): multi-task, multilingual (default)
 python-dateutil>=2.9
 chardet>=5.2
 # GLiNER (m)deberta tokenizers: sentencepiece is the real path, tiktoken is the

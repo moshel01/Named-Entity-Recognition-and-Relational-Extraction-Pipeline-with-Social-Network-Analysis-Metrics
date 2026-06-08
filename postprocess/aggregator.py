@@ -22,6 +22,16 @@ _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s&.-]")
 
 
+def clean_surface(text: str) -> str:
+    """Collapse internal whitespace/newlines in a display name.
+
+    Entity spans can straddle a line break in the source ("Robert\\nChen"), which
+    would otherwise become the canonical label and a separate alias. Used for the
+    stored display name; ``normalize_name`` handles grouping/matching separately.
+    """
+    return _WS_RE.sub(" ", text).strip()
+
+
 def normalize_name(name: str) -> str:
     """Cheap normalization for exact grouping (NOT fuzzy)."""
     n = name.strip()
@@ -59,7 +69,7 @@ def aggregate(extractions: list[DocumentExtraction]) -> AggregateResult:
             mentions.append(m)
             key = (normalize_name(m.text), m.label)
             buf = by_key[key]
-            buf["surface"][m.text.strip()] += 1
+            buf["surface"][clean_surface(m.text)] += 1
             buf["docs"].add(m.doc_id)
             buf["count"] += 1
             buf["conf"] = max(buf["conf"], m.confidence)

@@ -50,10 +50,12 @@ python -m spacy download de_core_news_lg        # German (for the NSDAP domain)
 # Other languages, e.g.: fr_core_news_lg, es_core_news_lg, it_core_news_lg
 ```
 
-**(b) GLiNER** - automatic on first run; chosen by `foundation.gliner_model`:
+**(b) GLiNER** - automatic on first run; chosen by `foundation.gliner_model`.
+The backend (original GLiNER vs GLiNER2) is auto-detected from the name:
 ```text
-English only ............ urchade/gliner_large-v2.1
-Multilingual / German ... urchade/gliner_multi-v2.1   (set in the NSDAP config)
+English only ............ fastino/gliner2-large-v1   (GLiNER2, default)
+Multilingual / German ... fastino/gliner2-multi-v1   (GLiNER2, 100+ langs; NSDAP config)
+Legacy fallback ......... urchade/gliner_large-v2.1 / urchade/gliner_multi-v2.1
 ```
 
 **(c) sentence-transformers** - automatic; only used by `mode: python_only`.
@@ -182,7 +184,7 @@ io:
   input_path: "./data/sample_en"
 foundation:
   spacy_model: "en_core_web_trf"
-  gliner_model: "urchade/gliner_large-v2.1"
+  gliner_model: "fastino/gliner2-large-v1"
   gliner_labels: ["person", "organization", "location", "event"]
 coreference:
   languages: ["en"]
@@ -469,7 +471,7 @@ take proportionally longer; use `--limit` while tuning.
 ### b) A different language
 - Set `foundation.spacy_model` to that language's spaCy model
   (e.g. `fr_core_news_lg`), and install it.
-- Set `foundation.gliner_model: "urchade/gliner_multi-v2.1"`.
+- Set `foundation.gliner_model: "fastino/gliner2-multi-v1"` (100+ languages).
 - Add the language's first-person pronouns: extend `_FIRST_PERSON` in
   [core/coreference.py](core/coreference.py) and add the code to
   `coreference.languages`.
@@ -538,7 +540,7 @@ python -m evaluation.evaluate --gold gold.json --run-dir output/abel_papers --ed
 | Symptom | Fix |
 |---------|-----|
 | `OSError: [E050] Can't find model 'de_core_news_lg'` | `python -m spacy download de_core_news_lg` (or set `spacy_model: de_core_news_sm`). It also auto-falls back to `en_core_web_sm`/blank. |
-| Very few German entities | You're on the English GLiNER. Set `gliner_model: urchade/gliner_multi-v2.1`. |
+| Very few German entities | You're on an English-only GLiNER. Set `gliner_model: fastino/gliner2-multi-v1`. |
 | `Env var ANTHROPIC_API_KEY is not set` | Export the key, or switch `--mode python_only`. |
 | `Could not reach Ollama` | `ollama serve` running? `ollama pull <model>` done? Check `host`. |
 | `No module named 'polars'` | `pip install -r requirements.txt`. CSV export falls back to stdlib; Parquet needs polars. |

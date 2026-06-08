@@ -1,7 +1,10 @@
-# GLiNER zero-shot NER. Windows long chunks; returns doc-absolute spans.
+# GLiNER zero-shot NER. Supports both the original GLiNER (urchade/*) and
+# GLiNER2 (fastino/*). Windows long chunks; returns doc-absolute spans.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 from typing import Optional
 
@@ -24,8 +27,18 @@ def _resolve_device(device: str) -> str:
     return "cpu"
 
 
+def _pick_backend(backend: str, model_name: str) -> str:
+    """Decide whether a model name is GLiNER (v1) or GLiNER2."""
+    if backend in ("gliner", "gliner2"):
+        return backend
+    name = model_name.lower()
+    if "gliner2" in name or name.startswith("fastino/"):
+        return "gliner2"
+    return "gliner"
+
+
 class GlinerEngine:
-    """Wrapper around a GLiNER model for zero-shot entity extraction."""
+    """Wrapper around a GLiNER / GLiNER2 model for zero-shot entity extraction."""
 
     def __init__(
         self,
@@ -36,6 +49,7 @@ class GlinerEngine:
         label_map: Optional[dict[str, str]] = None,
         window_chars: int = 2000,
         window_overlap: int = 200,
+        backend: str = "auto",
     ) -> None:
         self.model_name = model_name
         self.labels = labels or ["person", "organization", "location", "event"]
@@ -44,10 +58,18 @@ class GlinerEngine:
         self.window_chars = window_chars
         self.window_overlap = window_overlap
         self.device = _resolve_device(device)
-        self.model = self._load(model_name, self.device)
+        self.backend = _pick_backend(backend, model_name)
+        self.model = self._load(model_name, self.device, self.backend)
+
+    # Model loading
+    @staticmethod
+    def _load(model_name: str, device: str, backend: str):
+        if backend == "gliner2":
+            return GlinerEngine._load_v2(model_name, device)
+        return GlinerEngine._load_v1(model_name, device)
 
     @staticmethod
-    def _load(model_name: str, device: str):
+    def _load_v1(model_name: str, device: str):
         from gliner import GLiNER
         logger.info("Loading GLiNER model '%s' on %s ...", model_name, device)
         try:
@@ -68,6 +90,37 @@ class GlinerEngine:
             logger.debug("Could not move GLiNER to %s; staying on CPU.", device)
         return model
 
+    @staticmethod
+    def _load_v2(model_name: str, device: str):
+        try:
+            from gliner2 import GLiNER2
+        except ImportError as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"GLiNER2 model '{model_name}' requested but the 'gliner2' package "
+                "is not installed. Fix: pip install gliner2"
+            ) from exc
+        logger.info("Loading GLiNER2 model '%s' on %s ...", model_name, device)
+        # GLiNER2 prints a banner with emoji during init; on a cp1252 Windows
+        # console that raises UnicodeEncodeError. Swallow stdout during load.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                model = GLiNER2.from_pretrained(model_name)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Failed to load GLiNER2 '{model_name}': {exc}\n"
+                "Fix: pip install gliner2 ; then clear a partial download:\n"
+                f"  rmdir /s %USERPROFILE%\\.cache\\huggingface\\hub\\models--"
+                f"{model_name.replace('/', '--')}\nand re-run."
+            ) from exc
+        for obj in (model, getattr(model, "model", None)):
+            try:
+                if obj is not None and hasattr(obj, "to"):
+                    obj.to(device)
+                    break
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not move GLiNER2 to %s; staying on CPU.", device)
+        return model
+
     def _canon(self, gliner_label: str) -> str:
         return self.label_map.get(gliner_label.lower(), gliner_label.upper())
 
@@ -83,6 +136,32 @@ class GlinerEngine:
             pos += step
         return windows
 
+    # Prediction (normalized to a list of {text,label,start,end,score} dicts)
+    def _predict(self, text: str) -> list[dict]:
+        if self.backend == "gliner2":
+            return self._predict_v2(text)
+        return self.model.predict_entities(text, self.labels, threshold=self.threshold)
+
+    def _predict_v2(self, text: str) -> list[dict]:
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = self.model.extract_entities(
+                text, self.labels, include_spans=True, include_confidence=True
+            )
+        out: list[dict] = []
+        for label, items in (res.get("entities") or {}).items():
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                start, end = it.get("start"), it.get("end")
+                if not isinstance(start, int) or not isinstance(end, int):
+                    continue
+                score = float(it.get("confidence", 0.0))
+                if score < self.threshold:
+                    continue
+                out.append({"text": it.get("text", ""), "label": label,
+                            "start": start, "end": end, "score": score})
+        return out
+
     def extract(
         self,
         text: str,
@@ -94,9 +173,7 @@ class GlinerEngine:
         seen: dict[tuple[int, int], EntityMention] = {}
         for win_offset, win_text in self._windows(text):
             try:
-                preds = self.model.predict_entities(
-                    win_text, self.labels, threshold=self.threshold
-                )
+                preds = self._predict(win_text)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GLiNER prediction failed on a window: %s", exc)
                 continue

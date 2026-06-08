@@ -4,6 +4,30 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## GLiNER2 + dedup/whitespace fixes
+
+- **GLiNER2 is now the default foundation NER.** `core/gliner_engine.py` supports
+  both the original GLiNER (`urchade/*`) and GLiNER2 (`fastino/*`); the backend is
+  auto-detected from the model name. Defaults: `fastino/gliner2-large-v1`
+  (English) and `fastino/gliner2-multi-v1` (multilingual / German, mDeBERTa,
+  100+ langs). Legacy `urchade/*` models still load unchanged. Added `gliner2` to
+  requirements.
+  - **Windows guard**: GLiNER2 prints an emoji banner on load that crashes a
+    cp1252 console (`UnicodeEncodeError`); the loader/predict paths redirect
+    stdout so it runs without any `PYTHONUTF8` workaround. Verified on EN + DE.
+- **Dedup: bare first/last names now fold into their full name.** Surname-initial
+  bucketing kept "Eleanor" and "Eleanor Vance" in different buckets, so they never
+  merged - fragmenting people into two nodes (masked in the curated German domain
+  by the alias list). New `_fold_partial_persons` merges a single-token PERSON into
+  the *unique* full name whose first/last token matches (ambiguous bare names left
+  alone; authors/narrators never folded). Verified: 23->19 entities on the EN test.
+- **Whitespace in entity names.** A span straddling a line break became the label
+  ("Robert\\nChen") and a phantom alias. `aggregator.clean_surface` collapses
+  internal whitespace in the stored display name.
+- **Known limitation surfaced**: `python_only` mode yields ~0 interpersonal
+  *interaction* edges (rule SVO can't capture conjoined/reciprocal/pronominal
+  ties like "Eleanor and Marcus met"). Rich interpersonal SNA needs `api`/`ollama`.
+
 ## Generalization + Wikidata + temporal
 
 - **Generic domain hardened** so any unstructured text (books, articles, scraped

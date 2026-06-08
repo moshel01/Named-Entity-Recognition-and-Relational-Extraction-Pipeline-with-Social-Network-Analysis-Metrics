@@ -23,6 +23,12 @@ io:
   urls: []                       # Web pages / PDFs to fetch, e.g. ["https://..."]
   urls_file: ""                  # Path to a newline-delimited list of URLs
   request_timeout: 30            # Per-URL fetch timeout (seconds)
+  # Structure-aware ingestion via Docling (layout + tables -> markdown, OCR for
+  # scanned PDFs). Best for research papers / complex PDFs / images. Heavy
+  # (downloads torch models on first use) and opt-in; falls back to the
+  # lightweight extractors if Docling isn't installed or a file fails.
+  # Requires: pip install docling
+  use_docling: false
 
 # Chunking
 chunking:
@@ -152,6 +158,10 @@ domain:
 export:
   formats: ["csv", "json", "gexf"] # subset of csv|parquet|json|gexf|jsonl
   gephi: true
+  # Precompute SNA metrics Gephi can't: Burt's constraint/effective_size
+  # (structural-hole brokerage), bridges, articulation points, + a graph-health
+  # QA report (graph_report.json). Standard centrality/community: let Gephi do it.
+  graph_metrics: true
 
 # Checkpointing
 checkpoint:

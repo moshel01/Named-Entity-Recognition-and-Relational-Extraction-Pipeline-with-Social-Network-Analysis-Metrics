@@ -4,6 +4,30 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Docling + LangExtract + NetworkX metrics; GLiNER v1 deprecated
+
+(feature branch: `feature/docling-langextract-networkx`)
+
+- **GLiNER v1 deprecated - GLiNER2 only.** `core/gliner_engine.py` is now
+  GLiNER2-only (`fastino/*`); the dual-backend dispatch and `urchade/*` path are
+  gone. Dropped the explicit `gliner` dep (still pulled transitively by gliner2;
+  its `transformers<5.2` pin is a harmless warning since we don't use v1).
+- **NetworkX SNA metrics Gephi can't compute** (`postprocess/graph_metrics.py`,
+  `export.graph_metrics`, default off; on in the generic template): Burt's
+  constraint + effective_size (structural-hole brokerage), bridges, articulation
+  points, and a graph-health QA report (`graph_report.json`). Fail-soft. Adds node
+  cols `sna_constraint`/`sna_effective_size`/`sna_is_articulation`, edge `is_bridge`.
+  Standard centrality/community stay Gephi's job.
+- **Docling structure-aware ingestion** (`io.use_docling`, default off): routes
+  PDF/DOCX/PPTX/images through Docling (tables/reading-order/OCR -> markdown) with
+  fail-soft fallback to the lightweight extractors. Best for papers/complex PDFs.
+  Heavy; upgrades `transformers` to 5.x (fine for GLiNER2).
+- **LangExtract mode** (`mode: langextract`): a new extraction backend
+  (`intelligence/langextract_backend.py`) that drives Ollama/Gemini/OpenAI via
+  Google LangExtract with few-shot examples + char-level source grounding. An
+  *alternative* to the ollama/api backends to A/B, not a replacement. Foundation
+  GLiNER2 entities are always kept; LangExtract adds grounded entities + relations.
+
 ## GLiNER2 + dedup/whitespace fixes
 
 - **GLiNER2 is now the default foundation NER.** `core/gliner_engine.py` supports

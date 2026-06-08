@@ -67,6 +67,37 @@ def _extract_html(path: Path, encoding: str) -> str:
     return _clean_html(raw)
 
 
+# Optional Docling structure-aware ingestion (layout + tables + OCR -> markdown).
+# Heavy (torch models) and opt-in; everything fail-soft so a missing package or a
+# failed conversion falls back to the lightweight extractors above.
+_DOCLING_EXTS = {".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"}
+_DOCLING_CONVERTER = None  # cached; DocumentConverter is expensive to build
+
+
+def _docling_converter():
+    global _DOCLING_CONVERTER
+    if _DOCLING_CONVERTER is None:
+        # Windows blocks the symlinks HuggingFace uses to populate its model
+        # cache unless Developer Mode/admin is on, raising WinError 1314 mid
+        # download. Force copies instead. Must be set before huggingface_hub is
+        # imported; ingestion runs before the GLiNER2/HF import, so this holds.
+        import os
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+        from docling.document_converter import DocumentConverter
+        _DOCLING_CONVERTER = DocumentConverter()
+    return _DOCLING_CONVERTER
+
+
+def _extract_docling(path: Path) -> Optional[str]:
+    """Convert a document with Docling and return Markdown, or None on failure."""
+    try:
+        result = _docling_converter().convert(str(path))
+        return result.document.export_to_markdown()
+    except Exception as exc:  # noqa: BLE001 - fail soft, caller falls back
+        logger.warning("Docling failed on %s (%s); using fallback extractor.", path, exc)
+        return None
+
+
 def normalize_text(text: str) -> str:
     """Normalize whitespace and line endings without destroying structure."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -86,9 +117,19 @@ def normalize_text(text: str) -> str:
     return "\n".join(out).strip()
 
 
-def extract_text(path: Path, encoding: str = "auto") -> str:
-    """Extract plaintext from a single file based on its extension."""
+def extract_text(path: Path, encoding: str = "auto", use_docling: bool = False) -> str:
+    """Extract plaintext from a single file based on its extension.
+
+    When ``use_docling`` is set and the type is one Docling handles, try Docling
+    first (preserves tables/reading order, OCRs scanned PDFs) and fall back to the
+    lightweight extractor if it fails or yields nothing.
+    """
     suffix = path.suffix.lower()
+    if use_docling and suffix in _DOCLING_EXTS:
+        md = _extract_docling(path)
+        if md and md.strip():
+            return normalize_text(md)
+        # else: fall through to the standard extractors below
     if suffix == ".pdf":
         text = _extract_pdf(path)
     elif suffix == ".docx":
@@ -102,7 +143,8 @@ def extract_text(path: Path, encoding: str = "auto") -> str:
     return normalize_text(text)
 
 
-def iter_input_files(input_path: str | Path, glob: str = "**/*") -> Iterator[Path]:
+def iter_input_files(input_path: str | Path, glob: str = "**/*",
+                     use_docling: bool = False) -> Iterator[Path]:
     """Yield candidate input files from a file or directory path."""
     p = Path(input_path)
     if p.is_file():
@@ -110,26 +152,28 @@ def iter_input_files(input_path: str | Path, glob: str = "**/*") -> Iterator[Pat
         return
     if not p.exists():
         raise FileNotFoundError(f"Input path does not exist: {p}")
+    # With Docling on, image/pptx types it can read are no longer "unsupported".
+    skip = _SKIP_SUFFIXES - _DOCLING_EXTS if use_docling else _SKIP_SUFFIXES
     for child in sorted(p.glob(glob)):
         if not child.is_file():
             continue
-        if child.suffix.lower() in _SKIP_SUFFIXES:
+        if child.suffix.lower() in skip:
             logger.debug("Skipping unsupported binary file: %s", child)
             continue
         yield child
 
 
 def load_documents(input_path: str | Path, glob: str = "**/*",
-                   encoding: str = "auto") -> list[Document]:
+                   encoding: str = "auto", use_docling: bool = False) -> list[Document]:
     """Ingest all input files into :class:`Document` objects.
 
     Files that raise during extraction are skipped with a warning so a single
     corrupt file never aborts the run.
     """
     docs: list[Document] = []
-    for fp in iter_input_files(input_path, glob):
+    for fp in iter_input_files(input_path, glob, use_docling=use_docling):
         try:
-            text = extract_text(fp, encoding)
+            text = extract_text(fp, encoding, use_docling=use_docling)
         except Exception as exc:  # noqa: BLE001 - fail soft per file
             logger.warning("Failed to extract %s: %s", fp, exc)
             continue
@@ -241,6 +285,7 @@ def gather_documents(
     urls_file: str | Path | None = None,
     text: Optional[str] = None,
     timeout: int = 30,
+    use_docling: bool = False,
 ) -> list[Document]:
     """Collect documents from every supported source into one list.
 
@@ -258,7 +303,7 @@ def gather_documents(
         if is_url(str(input_path)):
             all_urls.append(str(input_path))
         else:
-            docs.extend(load_documents(input_path, glob, encoding))
+            docs.extend(load_documents(input_path, glob, encoding, use_docling=use_docling))
     if urls_file:
         all_urls.extend(read_urls_file(urls_file))
     if all_urls:

@@ -49,6 +49,9 @@ def build_backend(config: Config, foundation: FoundationLayer, domain=None) -> I
         from intelligence.python_backend import PythonBackend
         # Reuse the foundation's loaded spaCy engine to avoid a second load.
         return PythonBackend(config, spacy_engine=foundation.spacy, domain=domain)
+    if mode == "langextract":
+        from intelligence.langextract_backend import LangExtractBackend
+        return LangExtractBackend(config, domain=domain)
     raise ValueError(f"Unknown mode: {mode}")
 
 
@@ -138,6 +141,7 @@ class Pipeline:
             urls_file=urls_file or (io.urls_file or None),
             text=text or None,
             timeout=io.request_timeout,
+            use_docling=io.use_docling,
         )
         if limit and limit > 0:
             documents = documents[:limit]
@@ -271,6 +275,22 @@ class Pipeline:
         tables = builder.build(entities, relationships, agg.timeline, manifest=manifest,
                                period_fn=self.domain.temporal_period)
 
+        # 6b. Optional NetworkX SNA metrics Gephi can't compute (brokerage,
+        # bridges, articulation) + graph-health QA. Fail-soft; opt-in.
+        if self.config.export.graph_metrics:
+            from postprocess import graph_metrics
+            report = graph_metrics.enrich(tables)
+            if report:
+                import json as _json
+                (self.run_dir / "graph_report.json").write_text(
+                    _json.dumps(report, indent=2), encoding="utf-8")
+                qa = report.get("qa_substantive", {})
+                console.print(
+                    f"[cyan]Graph QA (substantive): {qa.get('nodes',0)} nodes, "
+                    f"{qa.get('components',0)} components, giant {qa.get('largest_cc_pct',0)}%, "
+                    f"{report.get('bridges',0)} bridges, "
+                    f"{report.get('articulation_points',0)} articulation points.[/cyan]")
+
         # 7. Export.
         exporter = Exporter(
             self.run_dir, self.config.export.formats, gephi=self.config.export.gephi
@@ -390,7 +410,7 @@ class Pipeline:
               default="all", show_default=True, help="Which stage(s) to run.")
 @click.option("--resume", is_flag=True, default=False,
               help="Resume from existing checkpoint, skipping completed documents.")
-@click.option("--mode", type=click.Choice(["api", "python_only", "ollama"]), default=None,
+@click.option("--mode", type=click.Choice(["api", "python_only", "ollama", "langextract"]), default=None,
               help="Override the execution mode from the config.")
 @click.option("--limit", type=int, default=0,
               help="Process only the first N documents (handy for quick test runs).")

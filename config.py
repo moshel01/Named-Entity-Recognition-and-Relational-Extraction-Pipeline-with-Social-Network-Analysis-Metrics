@@ -19,6 +19,7 @@ class IOConfig(BaseModel):
     urls_file: str = ""                       # path to a newline-delimited URL list
     request_timeout: int = 30
     metadata_file: str = ""                   # xlsx of per-doc metadata, keyed by letter_id
+    use_docling: bool = False                 # structure-aware ingestion (PDF tables/OCR); fail-soft
 
 
 class ChunkingConfig(BaseModel):
@@ -96,10 +97,25 @@ class PythonOnlyConfig(BaseModel):
     embedding_similarity_threshold: float = 0.55
 
 
+class LangExtractConfig(BaseModel):
+    # LangExtract orchestrates an LLM (Ollama / Gemini / OpenAI) with few-shot
+    # examples + char-level source grounding. An alternative to the ollama/api
+    # backends - same underlying model, different extraction machinery. A/B it.
+    provider: Literal["ollama", "gemini", "openai"] = "ollama"
+    model_id: str = "qwen2.5:7b-instruct"
+    model_url: str = "http://localhost:11434"   # Ollama server (ignored for cloud)
+    api_key_env: str = ""                        # env var for gemini/openai
+    temperature: float = 0.0
+    extraction_passes: int = 1                   # >1 improves recall (re-runs + merges)
+    max_workers: int = 4
+    max_char_buffer: int = 6000
+
+
 class IntelligenceConfig(BaseModel):
     api: ApiConfig = Field(default_factory=ApiConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     python_only: PythonOnlyConfig = Field(default_factory=PythonOnlyConfig)
+    langextract: LangExtractConfig = Field(default_factory=LangExtractConfig)
 
 
 class DedupConfig(BaseModel):
@@ -184,6 +200,9 @@ class DomainConfig(BaseModel):
 class ExportConfig(BaseModel):
     formats: list[str] = Field(default_factory=lambda: ["csv", "json", "gexf"])
     gephi: bool = True
+    # Precompute SNA metrics Gephi can't (Burt's constraint/effective_size,
+    # bridges, articulation points) + a graph-health QA report. Fail-soft.
+    graph_metrics: bool = False
 
 
 class CheckpointConfig(BaseModel):
@@ -196,7 +215,7 @@ class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     run_name: str = "default_run"
-    mode: Literal["api", "python_only", "ollama"] = "python_only"
+    mode: Literal["api", "python_only", "ollama", "langextract"] = "python_only"
     io: IOConfig
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     foundation: FoundationConfig = Field(default_factory=FoundationConfig)

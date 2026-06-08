@@ -9,9 +9,15 @@ The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
 
 | Mode | Foundation | Intelligence Tier | Relationships | Network? |
 |------|-----------|-------------------|---------------|----------|
-| `api`         | GLiNER + spaCy | Claude / OpenAI / Bedrock | LLM, structured prompts | none |
-| `python_only` | GLiNER + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
-| `ollama`      | GLiNER + spaCy | local LLM (llama3.1, qwen2.5, ...) | LLM, same prompts as `api` | local |
+| `api`         | GLiNER2 + spaCy | Claude / OpenAI / Bedrock | LLM, structured prompts | none |
+| `python_only` | GLiNER2 + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
+| `ollama`      | GLiNER2 + spaCy | local LLM (llama3.1, qwen2.5, ...) | LLM, same prompts as `api` | local |
+| `langextract` | GLiNER2 + spaCy | LangExtract over Ollama/Gemini/OpenAI | LLM + char-level source grounding | local/cloud |
+
+> **Optional add-ons:** `io.use_docling` for structure-aware PDF/DOCX/OCR
+> ingestion; `export.graph_metrics` for SNA metrics Gephi can't compute
+> (Burt's constraint/brokerage, bridges, articulation points + a `graph_report.json`
+> health check). Both off by default. NER is **GLiNER2** (`fastino/*`); GLiNER v1 is deprecated.
 
 ---
 

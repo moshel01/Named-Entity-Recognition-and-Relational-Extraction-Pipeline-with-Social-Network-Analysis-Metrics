@@ -1,0 +1,141 @@
+# Pre-built pipeline config for the Nazi-era domain (Theodore Abel Papers,
+# SS biograms, and similar Weimar/Nazi-era primary sources).
+#
+#   python main.py --config domain/nazi_era/config_nazi_era.yaml
+#
+# Set `mode: api` (and an API key env var) or `mode: ollama` for LLM-based
+# relationship extraction; `python_only` runs fully offline.
+
+run_name: "abel_papers"
+mode: "python_only"
+
+io:
+  input_path: "./data/abel_papers"   # directory of autobiography text files
+  input_glob: "**/*"
+  output_dir: "./output"
+  encoding: "auto"
+  metadata_file: "./data/abel_papers/Nazi metadata.xlsx"   # merged onto author nodes by letter_id
+
+chunking:
+  max_chars: 5000
+  overlap_chars: 500
+  respect_sentences: true
+
+foundation:
+  # German text: the German transformer/large model is preferred if installed;
+  # falls back automatically to en_core_web_sm / blank if unavailable.
+  spacy_model: "de_core_news_lg"
+  spacy_disable: []
+  # MULTILINGUAL GLiNER - required for German. gliner_large-v2.1 is English-only
+  # and badly under-recalls German text. gliner_multi-v2.1 handles DE/EN/+.
+  gliner_model: "urchade/gliner_multi-v2.1"
+  gliner_threshold: 0.40
+  # NOTE: gliner_labels / label_map below are OVERRIDDEN by the nazi_era domain
+  # (24 labels in domain/nazi_era/gliner_labels.py). Kept here as documentation.
+  gliner_labels: ["person", "organization", "location", "event"]
+  label_map:
+    person: "PERSON"
+    organization: "ORG"
+    location: "LOCATION"
+    event: "EVENT"
+  use_spacy_ner: true
+  device: "auto"
+
+coreference:
+  enabled: true
+  # First-person narration -> a per-document "Narrator [file]" author node.
+  # Critical for the first-person Abel autobiographies and the basis for the
+  # "authors_only" mandatory-membership scope below.
+  narrator_resolution: true
+  # fastcoref third-person pronoun resolution (English-oriented; optional).
+  pronoun_resolution: false
+  model: "biu-nlp/f-coref"
+  device: "auto"
+  max_narrator_mentions_per_chunk: 40
+  languages: ["de", "en"]
+
+intelligence:
+  api:
+    provider: "anthropic"
+    model: "claude-opus-4-8"
+    api_key_env: "ANTHROPIC_API_KEY"
+    max_tokens: 4096
+    temperature: 0.0
+    max_retries: 4
+    request_timeout: 120
+    aws_region: "us-east-1"
+  ollama:
+    host: "http://localhost:11434"
+    model: "qwen2.5:7b-instruct"
+    temperature: 0.0
+    request_timeout: 180
+    num_ctx: 8192
+  python_only:
+    embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    cooccurrence_window: "sentence"
+    min_relationship_confidence: 0.30
+    embedding_similarity_threshold: 0.55
+
+dedup:
+  fuzzy_thresholds:
+    PERSON: 0.85
+    ORG: 0.72
+    LOCATION: 0.82
+    EVENT: 0.92
+    RANK: 0.88
+    INSTITUTION: 0.80
+    DATE: 0.95
+  block_family_merges: true
+  block_year_mismatch_events: true
+  block_location_substring: true
+  llm_assist: true        # LLM proposes extra merges (ollama/api only)
+
+enrichment:
+  enabled: true           # LLM subtype/rank/office for resolved entities
+  batch_size: 40
+
+quality:
+  enabled: true
+  min_entity_mentions: 1
+  min_edge_weight: 1
+  llm_review: "auto"
+
+inference:
+  enable_cooccurrence_edges: true
+  cooccurrence_min_shared_docs: 2
+  # Turn on evidence-based membership + structural edges for this corpus.
+  enable_canonical_inference: true
+  # Mandatory NSDAP membership assumption (documents are NSDAP autobiographies):
+  #   authors_only - only the detected narrator/author of each document (DEFAULT,
+  #                  defensible; requires coreference.narrator_resolution: true)
+  #   all          - every PERSON (legacy; over-connects, tags mentioned third
+  #                  parties like Marx/Lenin as members - not recommended)
+  #   off          - no mandatory edges; NSDAP only via textual evidence
+  mandatory_membership: "authors_only"
+
+ontology:
+  enabled: true                    # uses nazi_era RELATION_ONTOLOGY (member_of, fought_in, ...)
+  fuzzy_threshold: 0.82
+  drop_unmapped: false
+  relations: null                  # null => use the domain ontology
+
+# Wikidata linking - off by default. Flip enabled:true to add wikidata_qid to the
+# well-known figures/places (Hitler->Q352, Berlin->Q64). German lang for matching.
+linking:
+  enabled: false
+  min_mentions: 3
+  max_entities: 500
+  types: ["PERSON", "ORG", "LOCATION"]
+  lang: "de"
+  request_timeout: 8
+
+domain:
+  name: "nazi_era"
+
+export:
+  formats: ["csv", "json", "gexf", "jsonl"]
+  gephi: true
+
+checkpoint:
+  enabled: true
+  flush_every: 1

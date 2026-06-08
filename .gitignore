@@ -1,0 +1,68 @@
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+secrets.yaml
+secrets.yml
+credentials.json
+
+# Source data and generated output (copyright + PII: real names, birth dates).
+# Keep these out of the repo. To share a non-sensitive sample, force-add it:
+#   git add -f data/sample_en/somefile.txt
+data/
+output/
+validation.json
+*.report.json
+*.report.*.json
+*.gexf
+*.gephi
+benchmarks/
+
+# Local scratch / probe scripts
+_*.py
+scratch/
+tmp/
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ML model weights / caches (should live in ~/.cache, not the repo)
+models/
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.onnx
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,278 @@
+# NER + SNA Extraction Pipeline
+
+A modular, pipeline that turns any unstructured text corpus
+into **structured entities, relationship graphs, timelines, and Gephi-ready
+network exports**.
+
+The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
+*always* runs. Three interchangeable "intelligence tiers" sit on top:
+
+| Mode | Foundation | Intelligence Tier | Relationships | Network? |
+|------|-----------|-------------------|---------------|----------|
+| `api`         | GLiNER + spaCy | Claude / OpenAI / Bedrock | LLM, structured prompts | none |
+| `python_only` | GLiNER + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
+| `ollama`      | GLiNER + spaCy | local LLM (llama3.1, qwen2.5, ...) | LLM, same prompts as `api` | local |
+
+---
+
+## Why GLiNER + spaCy is always the base
+
+1. **GLiNER** catches entities an LLM misses - a dedicated zero-shot NER model
+   that accepts your custom labels at inference time.
+2. **spaCy** supplies linguistic structure - sentence boundaries, dependency
+   trees, POS tags, noun chunks, statistical NER.
+3. **Consistency** - the same entity candidates feed every intelligence tier.
+4. **Speed** - the foundation pre-filters so the LLM/rules only reason over
+   confirmed spans.
+5. **Validation** - entities found by *both* GLiNER and spaCy get a confidence
+   boost.
+
+---
+
+## Installation
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate     |  *nix: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Foundation models** (download what your corpus needs):
+
+```bash
+# spaCy (pick per language)
+python -m spacy download en_core_web_trf      # English (best); en_core_web_sm = lighter
+python -m spacy download de_core_news_lg       # German (for the nazi_era domain)
+
+# GLiNER, sentence-transformers, and fastcoref weights all download
+# automatically from Hugging Face on first run - no manual step. The GLiNER
+# model is chosen in config: gliner_large-v2.1 (English) or
+# gliner_multi-v2.1 (multilingual / German).
+```
+
+> Full step-by-step model install (incl. GPU, offline caching, and what each
+> mode/language needs) is in [INSTRUCTIONS.md §1](INSTRUCTIONS.md#1-install).
+
+Mode-specific extras:
+
+- **`api`** - set the relevant key, e.g. `setx ANTHROPIC_API_KEY "sk-..."`
+  (PowerShell) and configure `intelligence.api` in the YAML.
+- **`ollama`** - install [Ollama](https://ollama.com), run `ollama serve`, and
+  `ollama pull llama3.1:8b`.
+- **`python_only`** - no network needed; sentence-transformers downloads its
+  embedding model on first use.
+- **coreference** - narrator resolution needs nothing extra; the optional
+  third-person `pronoun_resolution` needs `pip install fastcoref`.
+
+## Inputs: any unstructured text
+
+The pipeline ingests, in any combination:
+
+| Source | How |
+|--------|-----|
+| Text / Markdown files | `.txt`, `.md` in `io.input_path` (file or directory) |
+| Books / documents | `.pdf` (PyMuPDF), `.docx`, `.rtf` |
+| Saved web pages | `.html` / `.htm` (boilerplate stripped) |
+| **Live web pages / PDFs** | `--url https://...` (repeatable), or `io.urls` / `io.urls_file` |
+| **Direct / pasted text** | `--text "..."` |
+
+```bash
+python main.py --config config.yaml --url https://en.wikipedia.org/wiki/Weimar_Republic
+python main.py --config config.yaml --text "Hitler met Goebbels in Munich in 1926."
+```
+
+Large books are chunked automatically. **Limits:** web ingestion fetches the
+given page(s) - it does not crawl/follow links; and PDFs must contain a real text
+layer (scanned/image-only PDFs need OCR first, which is not bundled).
+
+---
+
+## Quick start
+
+```bash
+cp config_template.yaml config.yaml      # then edit: input_path, mode, labels
+python main.py --config config.yaml
+```
+
+Outputs land in `output/<run_name>/`:
+
+| File | Description |
+|------|-------------|
+| `documents.csv` | Per-doc manifest: `doc_id, letter_id, author, filename` (join key to external metadata). |
+| `gephi_nodes.csv` | Nodes with `type`, `mention_count`, `doc_count`, `first_year`/`last_year`, a degree split by tie class (`deg_interaction`, `deg_affiliation`, ...), `tag_*`, `attr_*` (incl. `attr_wikidata_qid` when linking is on). Standard centralities are **not** precomputed — Gephi computes those on whichever view you load. |
+| `gephi_edges.csv` | Edges with `tie_class`, `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. |
+| `network.gexf` | Full single-file graph for Gephi / Cytoscape. |
+| `network_dynamic.gexf` | Same graph with `start` years on nodes/edges for Gephi's timeline (when datable). |
+| `graph_interaction.gexf` | **Interpersonal social network** (person↔person ties only) — the headline SNA. |
+| `graph_affiliation.gexf` | Two-mode membership/biography network (person→org/event/place). |
+| `graph_discourse.gexf` | Stance + co-occurrence layer (attitudes, co-presence). |
+| `timeline.csv` | Chronological dated events (`letter_id` included). |
+| `entities.json` | Full resolved entity records with aliases, tags, attributes. |
+| `raw_extractions.jsonl` | Per-document extractions (provenance). |
+| `checkpoints/` | Resumable progress (JSONL). |
+
+Import `graph_interaction.gexf` for social-structure analysis, `network.gexf` for
+everything, or load the two CSVs via the Data Laboratory (nodes first, then edges)
+and filter on the `tie_class` column.
+
+> **A mention is not a social tie.** In a corpus of NSDAP autobiographies almost
+> everyone *co-occurs with* and *expresses an attitude toward* Hitler, but few
+> actually knew him. Edges are therefore labelled by `tie_class` and headline
+> centrality (`int_*`) is computed on the **interaction** layer only, so hubs
+> reflect documented social relationships rather than the corpus topic. Public
+> figures carry `attr_reference_figure=true` so you can include or exclude them.
+> Run Gephi's Statistics on `graph_interaction.gexf` to get centrality/community
+> computed on the social layer alone.
+
+> **Full operating guide:** see [INSTRUCTIONS.md](INSTRUCTIONS.md) for the three
+> modes, English vs German runs, coreference, the mandatory-membership
+> assumption, evidentiary tiers, evaluation, and adapting to new inputs.
+> **Validate output:** see [evaluation/README.md](evaluation/README.md).
+
+---
+
+## CLI
+
+```bash
+python main.py --config config.yaml                 # run everything
+python main.py --config config.yaml --resume        # resume after a crash
+python main.py --config config.yaml --stage extract # extraction only
+python main.py --config config.yaml --stage analyze # re-run analysis on checkpoint
+python main.py --config config.yaml --mode api      # override mode
+python main.py --config config.yaml -v              # debug logging
+```
+
+Stages: `ingest` -> `extract` -> `analyze`. `--stage analyze` reuses the
+checkpoint so you can re-tune dedup/quality/export without re-extracting.
+
+---
+
+## Architecture
+
+```
+Input docs
+  └─ core/preprocessor   PDF/DOCX/RTF/HTML/TXT -> normalized plaintext
+  └─ core/chunker        sentence-aligned overlapping chunks
+  └─ core/foundation     [ALWAYS] spaCy + GLiNER -> merge -> coref -> dates
+        └─ core/spacy_engine, gliner_engine, entity_merger, coreference, date_extractor
+  └─ intelligence/       [MODE] relationships + refined entities + timeline
+        ├─ api_backend       (Claude/OpenAI/Bedrock)   prompts.py + json_repair.py
+        ├─ ollama_backend    (local LLM)               prompts.py + json_repair.py
+        └─ python_backend    relationship_patterns.py + embedding_utils.py
+  └─ checkpoint/manager  crash-safe append-only JSONL, resumable
+  └─ postprocess/
+        ├─ aggregator         per-doc -> corpus tables
+        ├─ deduplicator       3-layer: aliases -> exact -> bucketed fuzzy
+        ├─ llm_dedup          [api/ollama, optional] LLM merges rules missed
+        ├─ ontology           relation-type alignment (domain/config)
+        ├─ enricher           [api/ollama, optional] subtype + attributes
+        ├─ quality_review     rules (+ optional LLM)
+        ├─ canonical_inference co-occurrence + domain edges
+        ├─ tagger             scope / relevance_tier / connection_quality
+        ├─ gephi_builder      NetworkX metrics -> node/edge tables
+        └─ exporter           CSV / Parquet / JSON / GEXF / JSONL
+  └─ domain/               pluggable knowledge (aliases, inference rules)
+```
+
+LLM is called only in **extraction** (per chunk) and these **opt-in** analyze
+passes: `llm_dedup`, `enrichment`, and `quality_review` (when `llm_review` is on).
+Dedup itself is rule-based; the LLM passes are additive and gated by config.
+Change history: [CHANGELOG.md](CHANGELOG.md).
+
+### Deduplication
+
+Three layers, in order:
+
+1. **Known aliases** - `domain/<name>/aliases.py` (`alias -> canonical`).
+2. **Exact** - identical normalized name + label.
+3. **Bucketed fuzzy** - Levenshtein ratio within `(label, initial)` buckets,
+   gated by per-type thresholds (`PERSON 0.85`, `ORG 0.72`, `LOCATION 0.82`,
+   `EVENT 0.92`).
+
+**Blocking rules** prevent over-merging: family members (shared surname, different
+given name), events with mismatched years, and substring locations
+(`Paris` ≠ `Paris, Texas`).
+
+### Analytical tags
+
+- **`entity_scope`** - `macro` (broad hubs / high reach) vs `specific`.
+- **`relevance_tier`** - `core` / `secondary` / `peripheral` (blended mention
+  frequency, document spread, degree).
+- **`connection_quality`** (edges) - `direct` (text evidence), `structural`
+  (inferred / canonical), `ideological` (affinity relations).
+
+### Edge origins
+
+- `extracted` - asserted in the text (LLM or dependency parse).
+- `inferred` - co-occurrence across documents.
+- `canonical` - added by domain inference rules.
+
+---
+
+## Adding a domain
+
+Copy `domain/generic/` to `domain/<yourname>/`, fill in `aliases.py`,
+`entity_config.py`, and (optionally) `inference_rules.infer_edges`, then set
+`domain.name: <yourname>` in the config. No core code changes needed.
+
+A domain package may also export, and the pipeline will automatically use:
+
+| Module / attribute | Effect |
+|--------------------|--------|
+| `gliner_labels.LABELS` + `LABEL_TO_TYPE_MAP` | Override the zero-shot NER labels and their canonical-type mapping. |
+| `spacy_patterns.PATTERNS` | EntityRuler patterns merged into the spaCy pipeline before statistical NER. |
+| `prompts_*.SYSTEM_EXTRACTION` / `SYSTEM_QUALITY_REVIEW` | Replace the LLM system prompts (api/ollama modes). |
+| `inference_rules.infer_edges(entities, edges)` | Add `origin="canonical"` edges. |
+
+### Bundled domain: `nazi_era`
+
+`domain/nazi_era/` is a worked example for **Weimar/Nazi-era German primary
+sources (1919-1945)**, e.g. the Theodore Abel Papers (1934 NSDAP
+autobiographies). It ships:
+
+- **523 aliases** (German↔English, abbreviations, name variants),
+- **24 GLiNER labels** + 209 spaCy EntityRuler patterns (ranks, units, events),
+- full **SA / SS / Wehrmacht rank ladders** with an `identify_rank_org` resolver,
+- **German NLP** (noble particles, umlaut transliteration, name parsing),
+- **historical validation** (organization existence windows / anachronism flags),
+- a **4-tier evidence membership-inference engine** (`canonical_inference.py`).
+
+Run it with the pre-built config:
+
+```bash
+python main.py --config domain/nazi_era/config_nazi_era.yaml
+```
+
+### Academic sensitivity analysis (`edge_source`)
+
+Every edge in `gephi_edges.csv` / `network.gexf` carries an `edge_source` so you
+can rebuild the network at progressively looser evidentiary thresholds:
+
+| Network | Includes edge_source |
+|---------|----------------------|
+| **Conservative** | `llm_extracted`, `gliner_extracted`, `rule_extracted` (stated in text) |
+| **Moderate** | + `sna_inferred`, `rule_cooccurrence` (co-occurrence) |
+| **Full** | + `pipeline_inferred` (mandatory), `canonical_inferred` (evidence-based) |
+
+The pipeline extracts what the documents state and never fabricates claims;
+inferred edges are labeled so they can be included or excluded explicitly.
+
+---
+
+## Robustness
+
+- **JSON repair** - 5 escalating levels recover malformed LLM output.
+- **Checkpointing** - append-only JSONL; `--resume` skips completed docs; a
+  truncated final line from a crash is detected and discarded.
+- **Fail-soft** - an unreadable file or a failed chunk logs a warning and falls
+  back to foundation-only output instead of aborting the run.
+- **Model fallbacks** - missing `en_core_web_trf` falls back to `en_core_web_sm`
+  then a blank sentencizer; missing sentence-transformers degrades to neutral
+  similarity scores.
+```
+
+---
+
+## License
+
+[MIT](LICENSE) - Copyright (c) 2026 moshel01

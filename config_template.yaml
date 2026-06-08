@@ -1,0 +1,156 @@
+# NER + SNA Extraction Pipeline - Configuration Template
+# Copy to config.yaml and edit. Every field documented inline.
+# Run:  python main.py --config config.yaml
+
+# Run identity
+run_name: "default_run"          # Used for output subdir + checkpoint namespace
+
+# Execution mode
+# api         -> Mode 1: GLiNER + spaCy + cloud LLM (Claude/OpenAI/Bedrock)
+# python_only -> Mode 2: GLiNER + spaCy + rules/embeddings (no network)
+# ollama      -> Mode 3: GLiNER + spaCy + local LLM via Ollama
+mode: "python_only"
+
+# Input / output
+# Inputs may be ANY combination of: a file, a directory (recursive glob), an
+# http(s) URL, a list of URLs, and/or raw text passed on the CLI (--text).
+# Supported file types: .txt .md .pdf .docx .rtf .html/.htm
+io:
+  input_path: "./data/input"     # File, directory, OR an http(s) URL
+  input_glob: "**/*"             # Glob applied when input_path is a directory
+  output_dir: "./output"         # All artifacts written under output_dir/run_name
+  encoding: "auto"               # "auto" (chardet) or explicit e.g. "utf-8"
+  urls: []                       # Web pages / PDFs to fetch, e.g. ["https://..."]
+  urls_file: ""                  # Path to a newline-delimited list of URLs
+  request_timeout: 30            # Per-URL fetch timeout (seconds)
+
+# Chunking
+chunking:
+  max_chars: 6000                # Soft cap per chunk
+  overlap_chars: 400             # Sentence-aligned overlap between chunks
+  respect_sentences: true        # Never split mid-sentence when possible
+
+# Foundation layer
+foundation:
+  spacy_model: "en_core_web_trf"   # Falls back to en_core_web_sm if unavailable
+  spacy_disable: []                # e.g. ["lemmatizer"] to speed up
+  # English: urchade/gliner_large-v2.1
+  # Non-English / mixed (e.g. German): urchade/gliner_multi-v2.1  <-- use this!
+  gliner_model: "urchade/gliner_large-v2.1"
+  gliner_threshold: 0.45           # Min GLiNER confidence to keep a span
+  gliner_labels:                   # Zero-shot labels - edit per corpus
+    - "person"
+    - "organization"
+    - "location"
+    - "event"
+  # Map GLiNER labels (lowercase) to canonical entity types used downstream
+  label_map:
+    person: "PERSON"
+    organization: "ORG"
+    location: "LOCATION"
+    event: "EVENT"
+  use_spacy_ner: true              # Merge spaCy's statistical NER with GLiNER
+  restrict_to_label_types: true    # Drop entities whose type isn't in label_map
+  # spaCy NER labels to ignore. NORP (nationalities/adjectives: "American",
+  # "German") maps to ORG and is the #1 ORG false-positive source - keep excluded
+  # unless you specifically want nationality nodes. (German spaCy has no NORP, so
+  # this is a no-op there.)
+  exclude_spacy_labels: ["NORP"]
+  device: "auto"                   # "auto" | "cpu" | "cuda" | "mps"
+
+# Coreference
+coreference:
+  enabled: true
+  narrator_resolution: true        # First-person narration -> per-doc author node
+  pronoun_resolution: false        # fastcoref third-person resolution (optional)
+  model: "biu-nlp/f-coref"
+  device: "auto"
+  max_narrator_mentions_per_chunk: 40
+  languages: ["en"]                # add "de" for German first-person pronouns
+
+# Intelligence tier
+intelligence:
+  # Mode 1: api
+  api:
+    provider: "anthropic"          # "anthropic" | "openai" | "bedrock"
+    model: "claude-opus-4-8"       # anthropic/openai model id, or bedrock model id
+    api_key_env: "ANTHROPIC_API_KEY"   # Env var holding the key (not the key!)
+    max_tokens: 4096
+    temperature: 0.0
+    max_retries: 4
+    request_timeout: 120
+    # Bedrock only:
+    aws_region: "us-east-1"
+  # Mode 3: ollama
+  ollama:
+    host: "http://localhost:11434"
+    model: "llama3.1:8b"
+    temperature: 0.0
+    request_timeout: 180
+    num_ctx: 8192
+  # Mode 2: python_only
+  python_only:
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    cooccurrence_window: "sentence"   # "sentence" | "chunk"
+    min_relationship_confidence: 0.30
+    embedding_similarity_threshold: 0.55
+
+# Deduplication
+dedup:
+  fuzzy_thresholds:
+    PERSON: 0.85
+    ORG: 0.72
+    LOCATION: 0.82
+    EVENT: 0.92
+  block_family_merges: true        # Don't merge entities that look like kin
+  block_year_mismatch_events: true # Don't merge events with different years
+  block_location_substring: true   # Don't merge "Paris" into "Paris, Texas"
+
+# Quality review
+quality:
+  enabled: true
+  min_entity_mentions: 1           # Drop entities seen fewer times than this
+  min_edge_weight: 1               # Drop edges with weight below this
+  llm_review: "auto"               # "auto" (LLM in api/ollama modes), true, false
+
+# Inference / canonical edges
+inference:
+  enable_cooccurrence_edges: true
+  cooccurrence_min_shared_docs: 2
+  enable_canonical_inference: false   # Domain rules add membership edges
+  # Domain mandatory-membership assumption: authors_only | all | off
+  mandatory_membership: "authors_only"
+
+# Relation ontology
+# Normalize extracted relation types onto a canonical vocabulary and (in LLM
+# modes) constrain extraction to it. If `relations` is null the ontology comes
+# from the active domain; generic domain has none, so this is a no-op by default.
+ontology:
+  enabled: true
+  fuzzy_threshold: 0.82
+  drop_unmapped: false             # true = drop edges that match no canonical type
+  relations: null                  # dict{canonical:[synonyms]} | list[str] | null
+
+# Optional Wikidata entity linking (adds attr_wikidata_qid/url/label). Off by
+# default - it makes network calls. Bounded and fail-soft (never breaks a run).
+linking:
+  enabled: false
+  min_mentions: 2                  # only link entities seen at least this often
+  max_entities: 400                # hard cap on lookups per run
+  types: ["PERSON", "ORG", "LOCATION"]
+  lang: "en"                       # Wikidata search language
+  request_timeout: 8
+
+# Domain plugin
+domain:
+  name: "generic"                  # Folder under domain/ to load
+
+# Export
+export:
+  formats: ["csv", "json", "gexf"] # subset of csv|parquet|json|gexf|jsonl
+  gephi: true
+
+# Checkpointing
+checkpoint:
+  enabled: true
+  flush_every: 1                   # Flush checkpoint after every N documents

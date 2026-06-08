@@ -1,0 +1,128 @@
+# Mode 3: local LLM via Ollama. Same prompts/mapping as the API backend.
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import requests
+
+from config import Config
+from core.schema import EntityMention, Relationship, TimelineEvent
+
+from .api_backend import _map_extraction, _parse_enrichment, _parse_merges
+from .base import IntelligenceBackend
+from .json_repair import repair_json
+from .prompts import (
+    ENRICHMENT_SYSTEM,
+    EXTRACTION_SYSTEM,
+    MERGE_SYSTEM,
+    build_enrichment_prompt,
+    build_extraction_prompt,
+    build_merge_prompt,
+    build_quality_review_prompt,
+    coerce_extraction,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class OllamaBackend(IntelligenceBackend):
+    """LLM-backed extraction via a locally hosted Ollama server."""
+
+    name = "ollama"
+
+    def __init__(self, config: Config, domain=None) -> None:
+        super().__init__(config, domain=domain)
+        self.cfg = config.intelligence.ollama
+        self._endpoint = self.cfg.host.rstrip("/") + "/api/chat"
+        self._verify_server()
+
+    def _verify_server(self) -> None:
+        try:
+            resp = requests.get(self.cfg.host.rstrip("/") + "/api/tags", timeout=5)
+            resp.raise_for_status()
+            models = {m.get("name", "") for m in resp.json().get("models", [])}
+            if self.cfg.model not in models and models:
+                logger.warning(
+                    "Ollama model '%s' not found in installed models %s. "
+                    "Pull it with: ollama pull %s",
+                    self.cfg.model, sorted(models), self.cfg.model,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not reach Ollama at %s (%s). Is `ollama serve` running?",
+                self.cfg.host, exc,
+            )
+
+    def _complete(self, system: str, user: str) -> str:
+        payload = {
+            "model": self.cfg.model,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": self.cfg.temperature,
+                "num_ctx": self.cfg.num_ctx,
+            },
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        resp = requests.post(
+            self._endpoint, json=payload, timeout=self.cfg.request_timeout
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("message", {}).get("content", "")
+
+    def extract_chunk(
+        self,
+        chunk_text: str,
+        candidates: list[EntityMention],
+        sentences: list[str],
+        chunk_id: str,
+        doc_id: str,
+        chunk_start: int = 0,
+        author_name: str = "",
+    ) -> tuple[list[EntityMention], list[Relationship], list[TimelineEvent]]:
+        prompt = build_extraction_prompt(chunk_text, candidates, self.label_types,
+                                         relation_types=self.relation_types or None,
+                                         author_name=author_name)
+        try:
+            raw = self._complete(self.extraction_system, prompt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ollama call failed for chunk %s: %s", chunk_id, exc)
+            return list(candidates), [], []
+        obj = repair_json(raw)
+        if obj is None:
+            return list(candidates), [], []
+        data = coerce_extraction(obj)
+        return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,
+                               *self._date_vocab)
+
+    def review(self, entities_summary: str, edges_summary: str) -> dict[str, Any] | None:
+        system, user = build_quality_review_prompt(entities_summary, edges_summary)
+        try:
+            raw = self._complete(system, user)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ollama quality review failed: %s", exc)
+            return None
+        obj = repair_json(raw)
+        return obj if isinstance(obj, dict) else None
+
+    def enrich(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        try:
+            raw = self._complete(ENRICHMENT_SYSTEM, build_enrichment_prompt(rows))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ollama enrichment failed: %s", exc)
+            return {}
+        return _parse_enrichment(repair_json(raw))
+
+    def suggest_merges(self, entity_type: str, names: list[str]) -> list[dict[str, Any]]:
+        try:
+            raw = self._complete(MERGE_SYSTEM, build_merge_prompt(entity_type, names))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ollama merge suggestion failed: %s", exc)
+            return []
+        return _parse_merges(repair_json(raw))

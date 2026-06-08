@@ -1,0 +1,31 @@
+{
+  "documents": [
+    {
+      "doc_id": "abel_0001",
+      "entities": [
+        {"name": "Hans Müller", "type": "PERSON"},
+        {"name": "Adolf Hitler", "type": "PERSON"},
+        {"name": "SA", "type": "ORG"},
+        {"name": "NSDAP", "type": "ORG"},
+        {"name": "Munich", "type": "LOCATION"},
+        {"name": "Beer Hall Putsch", "type": "EVENT"}
+      ],
+      "relations": [
+        {"source": "Hans Müller", "target": "SA", "type": "joined"},
+        {"source": "Hans Müller", "target": "NSDAP", "type": "member_of"},
+        {"source": "Hans Müller", "target": "Beer Hall Putsch", "type": "participated_in"}
+      ]
+    },
+    {
+      "doc_id": "abel_0002",
+      "entities": [
+        {"name": "Friedrich Schmidt", "type": "PERSON"},
+        {"name": "SPD", "type": "ORG"},
+        {"name": "Berlin", "type": "LOCATION"}
+      ],
+      "relations": [
+        {"source": "Friedrich Schmidt", "target": "SPD", "type": "opposed"}
+      ]
+    }
+  ]
+}

@@ -162,6 +162,14 @@ class Pipeline:
         # 1. Aggregate.
         agg = aggregate(extractions)
 
+        # 1a0. Resolve first-person narrator placeholders into the real person the
+        # document names ("Narrator [doc] is Jane Doe"), merging the two nodes and
+        # dropping the identity edge. Critical for corpora without author metadata.
+        from postprocess.identity_resolution import resolve_narrator_identities
+        agg.entities, agg.relationships = resolve_narrator_identities(
+            agg.entities, agg.relationships
+        )
+
         # 1a. Enforce configured entity types at analyze time too. This lets an
         # already-extracted checkpoint benefit from restrict_to_label_types
         # (dropping spaCy's off-target DATE/EVENT/etc.) without re-extraction.
@@ -196,14 +204,23 @@ class Pipeline:
         # 2a1. Drop alias_of leftovers - a dedup artifact, not a social edge.
         relationships = [r for r in relationships if r.rel_type != "alias_of"]
 
-        # 2a2. Membership edges must point at an org/institution. Drops LLM noise
-        # like "member_of <profession>" and reversed "<org> member_of <person>".
+        # 2a2. Membership edges should point at an org/institution. A
+        # "member_of <profession>" or reversed "<org> member_of <person>" is
+        # suspect - TAG it (suspect_membership) so it's filterable in Gephi rather
+        # than silently dropped. Only delete if drop_nonorg_membership is set.
+        org_ids = {e.entity_id for e in entities if e.label in ("ORG", "INSTITUTION")}
+        mem = {"member_of", "joined", "served_in"}
+        suspect = 0
+        for r in relationships:
+            if r.rel_type in mem and r.target not in org_ids:
+                r.attributes["suspect_membership"] = True
+                suspect += 1
+        if suspect:
+            console.print(f"[cyan]Tagged {suspect} non-org membership edges (suspect_membership).[/cyan]")
         if self.config.inference.drop_nonorg_membership:
-            org_ids = {e.entity_id for e in entities if e.label in ("ORG", "INSTITUTION")}
-            mem = {"member_of", "joined", "served_in"}
             before = len(relationships)
             relationships = [r for r in relationships
-                             if r.rel_type not in mem or r.target in org_ids]
+                             if not (r.rel_type in mem and r.target not in org_ids)]
             if before != len(relationships):
                 console.print(f"[cyan]Dropped {before - len(relationships)} non-org membership edges.[/cyan]")
 
@@ -243,13 +260,7 @@ class Pipeline:
             if before != len(entities):
                 console.print(f"[cyan]Dropped {before - len(entities)} isolated nodes.[/cyan]")
 
-        # 5. Tagging (+ flag public/historical reference figures).
-        tagger = Tagger()
-        entities, relationships = tagger.tag(
-            entities, relationships, reference_figures=self.domain.reference_figures()
-        )
-
-        # 5b. Stamp author nodes with their letter_id (home doc where the narrator
+        # 5a. Stamp author nodes with their letter_id (home doc where the narrator
         # was detected), even when the author is also mentioned in other letters.
         for e in entities:
             if e.attributes.get("is_author"):
@@ -258,11 +269,19 @@ class Pipeline:
                 if info and info["letter_id"]:
                     e.attributes["letter_id"] = info["letter_id"]
 
-        # 5c. Merge spreadsheet metadata onto author nodes + materialize verified
+        # 5b. Merge spreadsheet metadata onto author nodes + materialize verified
         # edges from it (born_in / resided_in / member_of with membership data).
         if self.config.io.metadata_file:
             meta = self.domain.load_metadata(self.config.io.metadata_file)
             entities, relationships = self._apply_metadata(entities, relationships, meta)
+
+        # 5c. Tagging (+ flag public/historical reference figures). Runs AFTER the
+        # metadata merge so metadata-derived edges are also tagged and counted in
+        # degree.
+        tagger = Tagger()
+        entities, relationships = tagger.tag(
+            entities, relationships, reference_figures=self.domain.reference_figures()
+        )
 
         # 5e. Directedness follows tie semantics: reciprocal ties (met_with,
         # family_of, co_occurs_with) undirected, the rest directed.
@@ -425,11 +444,13 @@ class Pipeline:
                    "the precision/recall trade at analyze time with no re-extraction.")
 @click.option("--ollama-model", default="", help="Override intelligence.ollama.model.")
 @click.option("--metadata", "metadata_file", default="", help="Override io.metadata_file (xlsx).")
+@click.option("--run-name", "run_name", default="", help="Override run_name (output subdir), "
+              "e.g. to A/B models without overwriting each other.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose (DEBUG) logging.")
 def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         limit: int, urls: tuple[str, ...], urls_file: str, direct_text: str,
         min_entity_confidence: Optional[float], ollama_model: str, metadata_file: str,
-        verbose: bool) -> None:
+        run_name: str, verbose: bool) -> None:
     """Run the NER + SNA extraction pipeline."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -455,6 +476,9 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.intelligence.ollama.model = ollama_model
     if metadata_file:
         config.io.metadata_file = metadata_file
+    if run_name:
+        config.run_name = run_name
+        console.print(f"[cyan]Override: run_name = {run_name}[/cyan]")
 
     console.rule(f"[bold]NER + SNA Pipeline - run '{config.run_name}' (mode={config.mode})")
     pipeline = Pipeline(config)

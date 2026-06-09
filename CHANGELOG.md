@@ -4,6 +4,100 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Audit fixes: LLM-review guard, tag-not-drop membership, ontology, run-name
+
+Found in a comprehensive pass over the analyze-critical path.
+
+- **LLM quality-review drop guard** (`quality_review.py`): the LLM reviewer's
+  `drop_entities`/`drop_edges` list was applied unguarded (only authors exempt) -
+  a weak model could drop salient entities. Now: a batch asking to drop >50% of
+  its entities is ignored, and salient entities (author / reference_figure /
+  mention_count>=5 / >=3 docs) are never dropped on the LLM's say-so. Mirrors the
+  llm_dedup guards.
+- **Non-org membership: tag, don't delete** (`main.py`, `config.InferenceConfig`,
+  `gephi_builder`): `member_of`/`joined`/`served_in` edges pointing at a non-org
+  are now TAGGED `suspect_membership=true` (a Gephi-filterable edge column) and
+  KEPT. `drop_nonorg_membership` defaults to False; set it True to delete instead.
+- **Ontology matching hardened** (`ontology.py`): substring match replaced with
+  whole-token containment, and fuzzy match now skips canonical keys shorter than
+  5 chars - so `led` no longer captures `fled`/`settled`. Real terms still align.
+- **Metadata edges now tagged**: tagging moved to run AFTER the metadata merge, so
+  metadata-derived edges get `connection_quality` and count toward degree.
+- **`--run-name` CLI override**: A/B different models into separate output dirs
+  without overwriting (e.g. `--run-name abel_gemma4_26b`).
+
+---
+
+## German text-repair + interaction-layer precision + LLM-dedup guard (20-doc Abel pilot audit)
+
+- **LLM-dedup over-merge guard** (`llm_dedup.py`): a weak local model (qwen-7B)
+  can hallucinate a catastrophic merge group - in the pilot it proposed merging
+  **238** unrelated orgs/places/dates into `NSDAP`, collapsing ORG nodes 153->27
+  and making NSDAP a garbage magnet. Added: drop any suggestion group larger than
+  16 aliases (a hallucinated mega-merge), cap accepted merges at 8 per canonical
+  node, and reject numeric/date-like aliases. Verified: the 238-alias group is now
+  dropped, NSDAP keeps only its 16 real variants, ORG count restored to 159. This
+  is essential resilience for the full-corpus run. A second 15-doc run reproduced
+  the failure mode (qwen proposed 105 items into `1930`) - guard held.
+  - Plus a **plausibility guard**: the LLM can't merge string-dissimilar names
+    (e.g. `Deutsches Reich` the state into `NSDAP` the party) - a merge needs a
+    shared content word, an acronym relationship, or moderate fuzzy similarity.
+    Legit acronym<->full-name pairs are covered by the domain alias dict.
+- **Final-layer name repair**: `gephi_builder` also runs `_repair_text` on node
+  labels / aliases / edge endpoints, so any mojibake that slips past ingestion
+  (one `Alt D√∂bern` survived in the pilot) is still clean in the exported graph.
+
+
+- **Umlaut mojibake + soft-hyphen repair** (`aggregator._repair_text`, applied in
+  `clean_surface`, `normalize_name`, and `core.preprocessor.normalize_text`):
+  misread RTF codepages produced names like `Bruno Th√ºrling` / `Stallup√∂nen`
+  and hyphenation left soft hyphens (`Kaisers­lautern`), which corrupted labels
+  and split dedup. Now repaired (`√º`->`ü`, ...) and zero-width/soft-hyphens
+  stripped - both at ingestion (future runs) and analyze (existing checkpoints).
+- **Interaction layer no longer inflated by mis-typed entities**: the
+  person<->person promotion now fires only for genuinely interpersonal relations
+  (`_PERSON_TO_PERSON`: led/commanded/recruited/mentored/appointed_by/...). A
+  place/role/org mis-tagged PERSON with `located_in`/`studied_at`/`promoted_to`
+  keeps its biographical/affiliation class instead of polluting `interaction`.
+  Free-form person<->person verbs are still caught by the unknown-relation fallback.
+
+## SNA-correctness fixes (12-doc EN + Abel pilot audit)
+
+Found by auditing 12-doc pilots in both modes. All in the analyze stage; the
+generic (no-ontology) path benefited most. Nothing filtered - noise stays tagged
+for Gephi.
+
+- **Narrator/author de-fragmentation** (the big generic-path fix): a first-person
+  author was appearing twice - as `Narrator [doc]` (first-person ties) and as their
+  named self (third-person mentions). Three coordinated changes now collapse them
+  into one clean node:
+  1. **Author-name detection from the text** (`core/foundation._detect_author_from_text`):
+     reads the name from the opening ("The Memoir of X", "I am X", "I, X,",
+     German "Ich bin X"/"Mein Name ist X") so the narrator node is a real person,
+     not a placeholder. Case-sensitive name capture; no false hits on "I am sure..."
+     or third-person prose.
+  2. **Author-mention fold** (`deduplicator._fold_author_mentions`): a non-author
+     PERSON merges into the same-named author when unambiguous (so the six "Emil"
+     authors are never collapsed).
+  3. **Identity-edge merge** (`postprocess/identity_resolution.py`): consumes any
+     `is`/`self_reference` edges the LLM emits ("Narrator [doc] is Jane Doe") to
+     merge + then drops them (incl. the wrong "narrator is narrator" hallucinations).
+  Plus: a `Narrator [doc]` placeholder can never win canonical over a real name in
+  a dedup merge. Verified on the 12-doc EN pilot: 0 placeholders, 13 clean person
+  nodes (1 central figure + 12 unified authors), no splits. Abel unaffected (named
+  via metadata).
+- **Free-form relation polarity/symmetry** (`tie_classes.py`): the curated
+  polarity/`SYMMETRIC` sets only covered the domain-normalized vocabulary, so
+  open-vocabulary LLM relations (generic path) got wrong signs/directedness.
+  Added substring heuristics: `dislikes`/`undermines`/`disagreed_with` -> negative;
+  `partner_of`/`colleague_of`/`reached_agreement_with`/`*_with` -> symmetric
+  (undirected). EN negative edges 0->6, Abel 23->41.
+- **Opposition is a stance, not membership**: a person who `opposes`/`is against`
+  an org/group was classed `affiliation` (looked like a member). Now -> `stance`.
+- **Person<->person structural verbs -> interaction**: `promoted_to`/`led`
+  between two PEOPLE were `biographical`/`affiliation`; now `interaction`
+  (Abel interaction edges 13->19).
+
 ## Docling + LangExtract + NetworkX metrics; GLiNER v1 deprecated
 
 (feature branch: `feature/docling-langextract-networkx`)

@@ -60,6 +60,10 @@ class OllamaBackend(IntelligenceBackend):
             "model": self.cfg.model,
             "stream": False,
             "format": "json",
+            # Disable "thinking" so reasoning models (Qwen3, etc.) emit clean JSON
+            # instead of <think> traces that break parsing. Ignored by models that
+            # don't support it.
+            "think": False,
             "options": {
                 "temperature": self.cfg.temperature,
                 "num_ctx": self.cfg.num_ctx,

@@ -13,6 +13,13 @@ from .aggregator import normalize_name
 
 logger = logging.getLogger(__name__)
 
+# Guards on the LLM reviewer's drop list (a weak model can hallucinate a huge
+# or wrong drop set). Salient entities are never dropped on the LLM's say-so, and
+# a batch asking to drop too much is ignored wholesale.
+_LLM_DROP_BATCH_FRACTION = 0.5    # ignore a batch's drops if it exceeds this share
+_LLM_PROTECT_MENTIONS = 5         # protect entities mentioned at least this often
+_LLM_PROTECT_DOCS = 3             # protect entities spanning at least this many docs
+
 # Generic terms that are almost never useful standalone entities.
 _STOP_NAMES = {
     "the", "a", "an", "he", "she", "they", "it", "we", "i", "you",
@@ -132,16 +139,30 @@ class QualityReviewer:
             result = backend.review(ent_summary, edge_summary)
             if not result:
                 continue
-            drop_ent |= {normalize_name(n) for n in result.get("drop_entities", [])}
+            batch_drop = {normalize_name(n) for n in result.get("drop_entities", [])}
+            # A batch that wants to drop most of its entities is hallucinating.
+            if len(batch_drop) > _LLM_DROP_BATCH_FRACTION * max(1, len(batch)):
+                logger.warning("LLM review: ignoring oversized drop list (%d/%d) for a batch.",
+                               len(batch_drop), len(batch))
+                batch_drop = set()
+            drop_ent |= batch_drop
             drop_edge |= set(result.get("drop_edges", []))
 
         if not drop_ent and not drop_edge:
             return entities, edges
 
+        # Never let the LLM drop a salient entity (author / reference figure /
+        # well-attested). Junk it should drop is low-mention by definition.
+        protected = {
+            normalize_name(e.canonical_name) for e in entities
+            if e.attributes.get("is_author") or e.attributes.get("reference_figure")
+            or e.mention_count >= _LLM_PROTECT_MENTIONS or len(e.doc_ids) >= _LLM_PROTECT_DOCS
+        }
         kept_entities = [
             e for e in entities
             if e.attributes.get("is_author")
             or normalize_name(e.canonical_name) not in drop_ent
+            or normalize_name(e.canonical_name) in protected
         ]
         kept_ids = {e.entity_id for e in kept_entities}
 

@@ -16,6 +16,7 @@ from typing import Any, Callable
 from core.schema import Entity, Relationship, TimelineEvent, stable_id
 
 from . import tie_classes
+from .aggregator import _repair_text
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,11 @@ def _aggregate_edges(
                 "source": s, "target": t, "rel_type": r.rel_type,
                 "n_mentions": 0, "directed": r.directed, "doc_ids": set(),
                 "origins": set(), "edge_sources": set(), "confidence": 0.0,
-                "evidence": r.evidence, "year": None,
+                "evidence": r.evidence, "year": None, "suspect_membership": False,
             }
             agg[key] = bucket
+        if r.attributes.get("suspect_membership"):
+            bucket["suspect_membership"] = True
         bucket["n_mentions"] += 1
         for d in (r.doc_id or "").split(";"):
             if d:
@@ -144,11 +147,11 @@ class GephiBuilder:
             yrs = node_years.get(e.entity_id, [])
             nodes.append({
                 "Id": e.entity_id,
-                "Label": e.canonical_name,
+                "Label": _repair_text(e.canonical_name),
                 "type": e.label,
                 "mention_count": e.mention_count,
                 "doc_count": len(e.doc_ids),
-                "aliases": "; ".join(e.aliases),
+                "aliases": "; ".join(_repair_text(a) for a in e.aliases),
                 "first_year": min(yrs) if yrs else None,
                 "last_year": max(yrs) if yrs else None,
                 # Degree split by tie class (Gephi computes plain centrality itself).
@@ -180,13 +183,14 @@ class GephiBuilder:
                 "n_mentions": b["n_mentions"],         # raw supporting mentions
                 "n_sources": b["n_sources"],           # distinct letters
                 "reciprocal": b["reciprocal"],
+                "suspect_membership": b.get("suspect_membership", False),
                 "period": b["period"],
                 "year": b["year"],
                 "origin": ";".join(sorted(b["origins"])),
                 "edge_source": ";".join(sorted(b["edge_sources"])),
                 "confidence": round(b["confidence"], 3),
-                "source_name": id_to_name.get(s, s),
-                "target_name": id_to_name.get(t, t),
+                "source_name": _repair_text(id_to_name.get(s, s)),
+                "target_name": _repair_text(id_to_name.get(t, t)),
                 "letter_id": letter_of(doc0),
                 "evidence": (b["evidence"] or "")[:500],
             })

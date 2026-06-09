@@ -100,6 +100,10 @@ def _extract_docling(path: Path) -> Optional[str]:
 
 def normalize_text(text: str) -> str:
     """Normalize whitespace and line endings without destroying structure."""
+    # Strip hyphenation soft hyphens and repair umlaut mojibake from misread RTF
+    # codepages, so GLiNER/spaCy see clean German words ("Kaiserslautern", "Thürling").
+    from postprocess.aggregator import _repair_text
+    text = _repair_text(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ").replace("​", "")
     lines = [ln.rstrip() for ln in text.split("\n")]

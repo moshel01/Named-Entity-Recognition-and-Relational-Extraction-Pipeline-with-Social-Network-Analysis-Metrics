@@ -152,8 +152,14 @@ class Deduplicator:
                  other.canonical_name, *other.aliases}
         # Keep the higher-mention name as canonical, unless the caller pins it
         # (e.g. folding a bare first name into a full name keeps the full name).
-        if not keep_primary_name and other.mention_count > primary.mention_count:
-            primary.canonical_name = other.canonical_name
+        # A "Narrator [doc]" placeholder must never win over a real name.
+        if not keep_primary_name:
+            prim_ph = primary.canonical_name.lower().startswith("narrator [")
+            oth_ph = other.canonical_name.lower().startswith("narrator [")
+            if prim_ph and not oth_ph:
+                primary.canonical_name = other.canonical_name
+            elif not oth_ph and other.mention_count > primary.mention_count:
+                primary.canonical_name = other.canonical_name
         names.discard(primary.canonical_name)
         primary.aliases = sorted(names)
         primary.mention_count += other.mention_count
@@ -231,6 +237,34 @@ class Deduplicator:
             return entities
         return [e for e in entities if id(e) not in folded]
 
+    # Fold third-person mentions of an author into the author node.
+    def _fold_author_mentions(self, entities: list[Entity]) -> list[Entity]:
+        """Merge a non-author PERSON into the author of the same name.
+
+        Once an author is named (filename/metadata or detected from the text), the
+        same person mentioned in third person elsewhere is a separate node that the
+        author-blocking rule keeps apart. Fold the mention into the author when the
+        name maps to exactly one author (so distinct same-first-name authors - the
+        six "Emil"s - are never collapsed).
+        """
+        authors: dict[str, list[Entity]] = defaultdict(list)
+        for e in entities:
+            if e.attributes.get("is_author") and e.label == "PERSON":
+                authors[normalize_name(e.canonical_name)].append(e)
+        if not authors:
+            return entities
+        folded: set[int] = set()
+        for e in entities:
+            if e.attributes.get("is_author") or e.label != "PERSON":
+                continue
+            cands = authors.get(normalize_name(e.canonical_name))
+            if cands and len(cands) == 1:
+                self._merge_into(cands[0], e, keep_primary_name=True)
+                folded.add(id(e))
+        if not folded:
+            return entities
+        return [e for e in entities if id(e) not in folded]
+
     # Main resolve
     def resolve(
         self, entities: list[Entity], relationships: list[Relationship]
@@ -293,6 +327,9 @@ class Deduplicator:
         # Fold bare first/last names into their unique full name (after fuzzy,
         # which can't cross surname-initial buckets).
         canonical = self._fold_partial_persons(canonical)
+
+        # Fold third-person mentions of a named author into the author node.
+        canonical = self._fold_author_mentions(canonical)
 
         # Recompute stable ids and build name -> id index.
         name_to_id: dict[str, str] = {}

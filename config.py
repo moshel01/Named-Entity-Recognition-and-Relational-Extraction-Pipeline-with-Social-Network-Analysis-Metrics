@@ -166,9 +166,10 @@ class InferenceConfig(BaseModel):
     # that implement one (e.g. nazi_era NSDAP). "authors_only" is the defensible
     # default; "all" over-connects; "off" disables it (evidence-based only).
     mandatory_membership: Literal["authors_only", "all", "off"] = "authors_only"
-    # Drop member_of/joined/served_in edges whose target isn't an ORG/INSTITUTION
-    # (kills "member_of <profession/common noun>" LLM noise and reversed edges).
-    drop_nonorg_membership: bool = True
+    # member_of/joined/served_in edges whose target isn't an ORG/INSTITUTION are
+    # always TAGGED `suspect_membership` (filterable in Gephi). Set this True to
+    # also delete them outright; default keeps them (tag, don't filter).
+    drop_nonorg_membership: bool = False
 
 
 class OntologyConfig(BaseModel):

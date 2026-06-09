@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from config import Config
 
@@ -15,6 +16,45 @@ from .schema import Chunk, Document, FoundationResult
 from .spacy_engine import SpacyEngine
 
 logger = logging.getLogger(__name__)
+
+# Detect the author's own name from a first-person document's opening, so the
+# narrator node becomes a real person ("Johann Alff") instead of a generic
+# "Narrator [doc]" placeholder. Name capture is case-sensitive (must be
+# Titlecase); only the lead-in phrase is case-insensitive.
+# Inter-token spacing is [ \t]+ (never newlines, so a title doesn't bleed into the
+# body); no "." in the class so "Brandt." doesn't glue onto the next word.
+_NAME_RE = r"([A-ZÄÖÜ][A-Za-zäöüßÄÖÜ'\-]+(?:[ \t]+[A-ZÄÖÜ][A-Za-zäöüßÄÖÜ'\-]+){0,2})"
+_AUTHOR_PATTERNS = [
+    re.compile(r"(?i:\b(?:memoir|diary|diaries|autobiography|recollections?|"
+               r"testimony|account)\s+of\s+)" + _NAME_RE),
+    re.compile(r"(?i:\bI\s+am\s+)" + _NAME_RE),
+    re.compile(r"(?i:\bI,\s*)" + _NAME_RE + r"\s*,"),
+    re.compile(r"(?i:\bmy\s+name\s+is\s+)" + _NAME_RE),
+    re.compile(r"(?i:\bich\s+bin\s+)" + _NAME_RE),
+    re.compile(r"(?i:\bmein\s+name\s+ist\s+)" + _NAME_RE),
+    re.compile(r"(?i:\bich,\s*)" + _NAME_RE + r"\s*,"),
+]
+_NAME_STOP = {"the", "memoir", "diary", "i", "my", "name", "is", "am", "of",
+              "ich", "bin", "mein", "ist", "a", "an", "we"}
+
+
+def _detect_author_from_text(text: str) -> str:
+    """Best-effort author name from a document's opening; '' if none confident."""
+    head = (text or "")[:400]
+    for pat in _AUTHOR_PATTERNS:
+        m = pat.search(head)
+        if not m:
+            continue
+        name = " ".join(m.group(1).split()).strip(" ,.;:")
+        toks = name.split()
+        if not (1 <= len(toks) <= 3):
+            continue
+        if any(t.lower() in _NAME_STOP for t in toks):
+            continue
+        if len(toks) == 1 and len(toks[0]) < 3:
+            continue
+        return name
+    return ""
 
 
 class FoundationLayer:
@@ -173,6 +213,10 @@ class FoundationLayer:
             name = self.domain.narrator_name(fn, document.doc_id)
             if name:
                 return name
+        # No domain/filename author name (generic path): read it from the text.
+        detected = _detect_author_from_text(document.text)
+        if detected:
+            return detected
         stem = fn.rsplit(".", 1)[0] if "." in fn else fn
         return f"Narrator [{stem}]"
 

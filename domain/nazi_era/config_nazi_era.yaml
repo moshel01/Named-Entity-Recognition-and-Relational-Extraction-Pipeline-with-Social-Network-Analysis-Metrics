@@ -67,9 +67,11 @@ intelligence:
     aws_region: "us-east-1"
   ollama:
     host: "http://localhost:11434"
-    model: "qwen2.5:7b-instruct"
+    # qwen3:8b is the verified upgrade over qwen2.5:7b (richer interaction layer).
+    # Override per machine, e.g. --ollama-model gemma4:26b / qwen3.6:27b.
+    model: "qwen3:8b"
     temperature: 0.0
-    request_timeout: 180
+    request_timeout: 600     # large models (26B/27B) are slower; avoid timeouts
     num_ctx: 8192
   python_only:
     embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -136,6 +138,7 @@ domain:
 export:
   formats: ["csv", "json", "gexf", "jsonl"]
   gephi: true
+  graph_metrics: true      # brokerage/bridges/articulation + graph_report.json
 
 checkpoint:
   enabled: true

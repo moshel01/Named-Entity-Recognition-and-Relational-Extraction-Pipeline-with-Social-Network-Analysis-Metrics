@@ -21,20 +21,41 @@ logger = logging.getLogger(__name__)
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s&.-]")
 
+# Common UTF-8-as-MacRoman mojibake of German umlauts (e.g. an RTF whose codepage
+# was misread): "Th√ºrling" -> "Thürling", "Stallup√∂nen" -> "Stallupönen".
+_MOJIBAKE = {
+    "√º": "ü", "√∂": "ö", "√§": "ä", "√ú": "Ü", "√ñ": "Ö", "√Ñ": "Ä", "√ü": "ß",
+    "√©": "é", "√®": "è", "√°": "á", "√¥": "ô", "√¢": "â",
+}
+# Zero-width / formatting characters that corrupt names: soft hyphen (hyphenation
+# artifact "Kaisers­lautern"), zero-width space, BOM.
+_ZW_CHARS = ("­", "​", "‌", "‍", "﻿")
+
+
+def _repair_text(text: str) -> str:
+    """Fix umlaut mojibake and strip zero-width/soft-hyphen artifacts."""
+    for bad, good in _MOJIBAKE.items():
+        if bad in text:
+            text = text.replace(bad, good)
+    for ch in _ZW_CHARS:
+        if ch in text:
+            text = text.replace(ch, "")
+    return text
+
 
 def clean_surface(text: str) -> str:
-    """Collapse internal whitespace/newlines in a display name.
+    """Collapse internal whitespace/newlines + repair encoding artifacts.
 
-    Entity spans can straddle a line break in the source ("Robert\\nChen"), which
-    would otherwise become the canonical label and a separate alias. Used for the
-    stored display name; ``normalize_name`` handles grouping/matching separately.
+    Entity spans can straddle a line break ("Robert\\nChen") or carry soft hyphens
+    and umlaut mojibake from the source RTF; this yields the clean display name.
+    ``normalize_name`` applies the same repair so grouping stays consistent.
     """
-    return _WS_RE.sub(" ", text).strip()
+    return _WS_RE.sub(" ", _repair_text(text)).strip()
 
 
 def normalize_name(name: str) -> str:
     """Cheap normalization for exact grouping (NOT fuzzy)."""
-    n = name.strip()
+    n = _repair_text(name).strip()
     n = _PUNCT_RE.sub("", n)
     n = _WS_RE.sub(" ", n)
     return n.strip().lower()

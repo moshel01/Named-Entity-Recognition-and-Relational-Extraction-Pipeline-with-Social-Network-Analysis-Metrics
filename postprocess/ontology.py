@@ -68,11 +68,17 @@ class OntologyAligner:
             return None
         if n in self.index:                                  # 1. exact
             return self.index[n]
-        for key, canon in self.index.items():                # 2. substring
-            if key and (key in n or n in key):
+        nt = set(n.split())                                  # 2. whole-token
+        for key, canon in self.index.items():                #    containment
+            kt = set(key.split())                            #    (avoids led->fled)
+            if kt and (kt <= nt or nt <= kt):
                 return canon
         best, best_r = None, 0.0                             # 3. fuzzy
         for key, canon in self.index.items():
+            # Skip very short keys: fuzzy ratio on 3-4 char strings is unreliable
+            # ("fled"~"led" = 0.86). Short canonicals must match exactly/by synonym.
+            if len(key) < 5:
+                continue
             r = SequenceMatcher(None, n, key).ratio()
             if r > best_r:
                 best, best_r = canon, r

@@ -28,14 +28,16 @@ PY=python
 TAG=$(echo "$MODEL" | tr ':/.' '___')
 LOG="run_${TAG}.log"
 echo "[2/3] Running $MODEL on $LIMIT docs -> output/abel_${TAG}/ (log: $LOG)..."
+# --resume is a no-op on a fresh run; on a rerun it skips already-extracted
+# docs (the checkpoint is per run-name, so it never mixes models).
 PYTHONUTF8=1 "$PY" main.py --config domain/nazi_era/config_nazi_era.yaml \
   --mode ollama --ollama-model "$MODEL" --run-name "abel_${TAG}" --limit "$LIMIT" \
-  > "$LOG" 2>&1
+  --resume > "$LOG" 2>&1
 echo "    exit code: $?"
 
 echo "[3/3] === SUMMARY ($MODEL) ==="
 grep -aiE "Aggregated|oversized|Built graph|Graph QA|Done|Error" "$LOG" | grep -av compatible | tail -6
-PYTHONUTF8=1 "$PY" - "output/abel_${TAG}/abel_${TAG}/" <<'PY'
+PYTHONUTF8=1 "$PY" - "output/abel_${TAG}/" <<'PY'
 import csv, collections, sys, os
 d = sys.argv[1]
 if not os.path.exists(d+'gephi_nodes.csv'):

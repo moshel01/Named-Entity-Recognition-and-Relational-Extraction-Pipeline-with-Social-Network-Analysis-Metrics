@@ -40,11 +40,10 @@ chunking:
 foundation:
   spacy_model: "en_core_web_trf"   # Falls back to en_core_web_sm if unavailable
   spacy_disable: []                # e.g. ["lemmatizer"] to speed up
-  # GLiNER backend is auto-detected from the name: "fastino/*" -> GLiNER2,
-  # "urchade/*" -> original GLiNER. GLiNER2 is the newer multi-task model.
+  # NER backend is GLiNER2 (fastino/* models). The original GLiNER (urchade/*)
+  # is deprecated and no longer loads.
   #   English (best):        fastino/gliner2-large-v1   <-- default
   #   Non-English / mixed:   fastino/gliner2-multi-v1   (100+ langs, mDeBERTa)
-  #   Legacy:                urchade/gliner_large-v2.1 / urchade/gliner_multi-v2.1
   gliner_model: "fastino/gliner2-large-v1"
   gliner_threshold: 0.45           # Min GLiNER confidence to keep a span
   gliner_labels:                   # Zero-shot labels - edit per corpus

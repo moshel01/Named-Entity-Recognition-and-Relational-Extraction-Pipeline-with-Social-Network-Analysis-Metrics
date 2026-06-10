@@ -11,7 +11,7 @@ The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
 |------|-----------|-------------------|---------------|----------|
 | `api`         | GLiNER2 + spaCy | Claude / OpenAI / Bedrock | LLM, structured prompts | none |
 | `python_only` | GLiNER2 + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
-| `ollama`      | GLiNER2 + spaCy | local LLM (llama3.1, qwen2.5, ...) | LLM, same prompts as `api` | local |
+| `ollama`      | GLiNER2 + spaCy | local LLM (qwen3, gemma4, ...) | LLM, same prompts as `api` | local |
 | `langextract` | GLiNER2 + spaCy | LangExtract over Ollama/Gemini/OpenAI | LLM + char-level source grounding | local/cloud |
 
 > **Optional add-ons:** `io.use_docling` for structure-aware PDF/DOCX/OCR

@@ -17,13 +17,14 @@ validation.json
 *.report.*.json
 *.gexf
 *.gephi
-benchmarks/
 
 # Local scratch / probe scripts
 _*.py
 scratch/
 tmp/
 *.tmp
+AGENTS.md
+CLAUDE.md
 
 # Python
 __pycache__/

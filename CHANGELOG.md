@@ -4,6 +4,34 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Benchmark + evaluation path repaired and verified
+
+The one area the earlier audits hadn't covered. Three real problems found:
+
+- **`benchmarks/` was never in git**: `.gitignore` listed `benchmarks/`
+  (meant for outputs, which actually live in `data/bench/` and were already
+  covered by `data/`), so the whole source package - runner + 4 dataset
+  adapters - was silently excluded. Anyone cloning the repo had no benchmarks.
+  Removed from `.gitignore`.
+- **Stale GLiNER v1 defaults**: `config.py`, `benchmarks/common.py`, and
+  `run_benchmark.py` still defaulted to `urchade/gliner_large-v2.1`, which the
+  GLiNER2-only engine can no longer load - any config omitting `gliner_model`
+  (all benchmark-generated configs) would crash at model load. Defaults are now
+  `fastino/gliner2-large-v1`; ollama defaults bumped `qwen2.5:7b-instruct` ->
+  `qwen3:8b`. Doc claims of a "legacy urchade fallback" removed
+  (config_template, nazi config, INSTRUCTIONS, README).
+- **`run_ollama_test.sh` now passes `--resume`**: no-op on a fresh run; an
+  interrupted multi-hour big-model run no longer restarts from zero.
+
+Verified end to end: scorer hand-checked against a synthetic prediction with
+planted FP/FN (every tp/fp/fn matched expectation, tier filter drops
+`sna_inferred` edges); full `redocred --limit 3 --run --eval` loop produced
+zero-shot entity F1 0.816 (PERSON 1.000) and per-tier reports. Typed-relation
+F1 on Re-DocRED is 0 by design for `python_only` (gold labels are Wikidata
+P-codes; use `--constrain-relations` with ollama/api for comparable numbers).
+
+---
+
 ## Audit fixes: LLM-review guard, tag-not-drop membership, ontology, run-name
 
 Found in a comprehensive pass over the analyze-critical path.

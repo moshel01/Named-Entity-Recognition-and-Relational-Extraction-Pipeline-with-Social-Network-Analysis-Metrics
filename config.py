@@ -46,7 +46,7 @@ class CoreferenceConfig(BaseModel):
 class FoundationConfig(BaseModel):
     spacy_model: str = "en_core_web_trf"
     spacy_disable: list[str] = Field(default_factory=list)
-    gliner_model: str = "urchade/gliner_large-v2.1"
+    gliner_model: str = "fastino/gliner2-large-v1"
     gliner_threshold: float = 0.45
     gliner_labels: list[str] = Field(
         default_factory=lambda: ["person", "organization", "location", "event"]
@@ -84,7 +84,7 @@ class ApiConfig(BaseModel):
 
 class OllamaConfig(BaseModel):
     host: str = "http://localhost:11434"
-    model: str = "llama3.1:8b"
+    model: str = "qwen3:8b"
     temperature: float = 0.0
     request_timeout: int = 180
     num_ctx: int = 8192
@@ -102,7 +102,7 @@ class LangExtractConfig(BaseModel):
     # examples + char-level source grounding. An alternative to the ollama/api
     # backends - same underlying model, different extraction machinery. A/B it.
     provider: Literal["ollama", "gemini", "openai"] = "ollama"
-    model_id: str = "qwen2.5:7b-instruct"
+    model_id: str = "qwen3:8b"
     model_url: str = "http://localhost:11434"   # Ollama server (ignored for cloud)
     api_key_env: str = ""                        # env var for gemini/openai
     temperature: float = 0.0

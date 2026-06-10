@@ -26,9 +26,8 @@ foundation:
   # falls back automatically to en_core_web_sm / blank if unavailable.
   spacy_model: "de_core_news_lg"
   spacy_disable: []
-  # MULTILINGUAL GLiNER - required for German. English-only models badly
-  # under-recall German. GLiNER2-multi (mDeBERTa, 100+ langs) is the default;
-  # legacy fallback is urchade/gliner_multi-v2.1. Backend auto-detected by name.
+  # MULTILINGUAL GLiNER2 - required for German. English-only models badly
+  # under-recall German. GLiNER2-multi (mDeBERTa, 100+ langs) is the default.
   gliner_model: "fastino/gliner2-multi-v1"
   gliner_threshold: 0.40
   # NOTE: gliner_labels / label_map below are OVERRIDDEN by the nazi_era domain

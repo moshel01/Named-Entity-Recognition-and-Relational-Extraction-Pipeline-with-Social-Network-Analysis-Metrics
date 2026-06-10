@@ -50,12 +50,11 @@ python -m spacy download de_core_news_lg        # German (for the NSDAP domain)
 # Other languages, e.g.: fr_core_news_lg, es_core_news_lg, it_core_news_lg
 ```
 
-**(b) GLiNER** - automatic on first run; chosen by `foundation.gliner_model`.
-The backend (original GLiNER vs GLiNER2) is auto-detected from the name:
+**(b) GLiNER2** - automatic on first run; chosen by `foundation.gliner_model`.
+The original GLiNER (urchade/*) is deprecated and no longer loads:
 ```text
-English only ............ fastino/gliner2-large-v1   (GLiNER2, default)
-Multilingual / German ... fastino/gliner2-multi-v1   (GLiNER2, 100+ langs; NSDAP config)
-Legacy fallback ......... urchade/gliner_large-v2.1 / urchade/gliner_multi-v2.1
+English only ............ fastino/gliner2-large-v1   (default)
+Multilingual / German ... fastino/gliner2-multi-v1   (100+ langs; NSDAP config)
 ```
 
 **(c) sentence-transformers** - automatic; only used by `mode: python_only`.
@@ -160,7 +159,7 @@ Set `mode:` in the config, or override with `--mode`.
   ```powershell
   # install Ollama from ollama.com, then:
   ollama serve
-  ollama pull llama3.1:8b        # or qwen2.5, mixtral, ...
+  ollama pull qwen3:8b           # or gemma4:12b, llama3.1, ...
   ```
   Config: `intelligence.ollama.model` + `host`.
 - **Best for:** LLM quality without sending data out.
@@ -244,8 +243,8 @@ NSDAP with membership#/join date, `member_of` -> prior party), tagged
 
 ## Scaling up (larger test -> full corpus)
 
-Extraction is the cost (ollama qwen2.5:7b on CPU is ~60-75 s/letter, so ~540
-letters is roughly 10-12 h). It is checkpointed per document, so:
+Extraction is the cost (ollama qwen3:8b on an 8 GB GPU is ~75 s/letter, so ~540
+letters is roughly 11-12 h). It is checkpointed per document, so:
 
 ```powershell
 # 1) larger smoke test first

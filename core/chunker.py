@@ -60,6 +60,18 @@ def chunk_document(
         # Treat the whole doc as one "sentence stream" split on hard boundaries.
         sent_spans = _fallback_sentences(text)
 
+    # Pathological inputs (scraped pages, OCR dumps) can yield a "sentence" far
+    # longer than max_chars with no boundary at all - hard-split those so no
+    # chunk ever exceeds the cap (an oversize chunk silently overflows the LLM
+    # context window downstream).
+    bounded: list[tuple[int, int]] = []
+    for s_start, s_end in sent_spans:
+        while s_end - s_start > max_chars:
+            bounded.append((s_start, s_start + max_chars))
+            s_start += max_chars - overlap_chars
+        bounded.append((s_start, s_end))
+    sent_spans = bounded
+
     chunks: list[Chunk] = []
     cur_start = sent_spans[0][0]
     cur_end = cur_start

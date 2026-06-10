@@ -25,6 +25,12 @@ Found in a comprehensive pass over the analyze-critical path.
   metadata-derived edges get `connection_quality` and count toward degree.
 - **`--run-name` CLI override**: A/B different models into separate output dirs
   without overwriting (e.g. `--run-name abel_gemma4_26b`).
+- **Chunker hard-split for boundary-less text** (`core/chunker.py`): a single
+  "sentence" longer than `max_chars` (scraped nav junk, OCR dumps, minified
+  pages) produced one unbounded chunk that silently overflowed the LLM context.
+  Oversize spans are now hard-split with overlap so no chunk exceeds the cap.
+  Verified: 30k-char boundary-less input -> 6 bounded chunks; normal text
+  unchanged. Matters most for the generalized any-input path.
 
 ---
 

@@ -241,6 +241,44 @@ isn't just node attributes: each author also gets verified edges
 NSDAP with membership#/join date, `member_of` -> prior party), tagged
 `edge_source=metadata` - the most authoritative tier for filtering in Gephi.
 
+## Direct commands (live progress bars)
+
+Run these in a plain terminal (no `> log` redirect) to watch the rich progress
+bars: per-document extraction rate, stage banners, and the final summary table.
+The bash wrappers in `scripts/` log to a file instead - use these when you want
+to *see* the run. `--run-name` keeps each model's output in its own directory;
+`--resume` is always safe (no-op on a fresh run, continues an interrupted one).
+
+```powershell
+$env:PYTHONUTF8 = 1
+
+# Abel pilot, choose the model (qwen3:8b fits an 8 GB GPU; gemma4:12b will
+# spill and run ~5x slower but extracts richer stance/polarity edges)
+python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
+  --ollama-model qwen3:8b   --run-name abel_qwen3_8b   --limit 25 --resume
+python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
+  --ollama-model gemma4:12b --run-name abel_gemma4_12b --limit 25 --resume
+
+# bigger machine (16 GB+ VRAM): same command, bigger model
+python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
+  --ollama-model gemma4:26b  --run-name abel_gemma4_26b  --limit 20 --resume
+python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
+  --ollama-model qwen3.6:27b --run-name abel_qwen3_6_27b --limit 20 --resume
+
+# re-run post-processing only (dedup/quality/export tweaks; no re-extraction)
+python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
+  --run-name abel_qwen3_8b --stage analyze
+
+# score a run against gold annotations (entity/relation P/R/F1 by tier)
+python -m evaluation.evaluate --gold evaluation/gold_template.json `
+  --run-dir output/abel_qwen3_8b --edge-sources conservative
+
+# public IE benchmark: prepares inputs+gold, runs the pipeline, scores it
+python -m benchmarks.run_benchmark --dataset redocred --limit 25 --run --eval
+python -m benchmarks.run_benchmark --dataset redocred --limit 10 --mode ollama `
+  --ollama-model qwen3:8b --run --eval
+```
+
 ## Scaling up (larger test -> full corpus)
 
 Extraction is the cost (ollama qwen3:8b on an 8 GB GPU is ~75 s/letter, so ~540

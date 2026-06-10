@@ -87,6 +87,25 @@ class QualityReviewer:
                 and normalize_name(e.canonical_name) not in self.stopwords
                 and _strip_determiner(normalize_name(e.canonical_name)) not in self.stopwords)
         ]
+
+        # POS gate: a PERSON spaCy never tags as a proper noun across all its
+        # mentions is a category word ("Monsieur", "der Vater"), not a person.
+        # Language-general - no per-corpus stopword list needed. Borderline
+        # entities are tagged suspect_common_noun (Gephi-filterable) and kept.
+        if getattr(self.config, "pos_gate", True):
+            gated: list[Entity] = []
+            for e in kept_entities:
+                ratio = e.attributes.get("propn_ratio")
+                if ratio is None or e.attributes.get("is_author"):
+                    gated.append(e)
+                    continue
+                if e.label == "PERSON" and ratio == 0.0 and e.mention_count >= 2:
+                    continue
+                if ratio < 0.5:
+                    e.attributes["suspect_common_noun"] = True
+                gated.append(e)
+            kept_entities = gated
+
         kept_ids = {e.entity_id for e in kept_entities}
 
         # Edge weight = number of supporting relationships for an unordered pair+type.

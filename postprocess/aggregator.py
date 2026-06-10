@@ -104,6 +104,11 @@ def aggregate(extractions: list[DocumentExtraction]) -> AggregateResult:
                     buf["attrs"]["is_author"] = buf["attrs"].get("is_author", False) or bool(av)
                     if av:
                         buf["attrs"].setdefault("author_doc", m.doc_id)  # author's home letter
+                elif ak == "propn_ratio":
+                    # Averaged over mentions, not first-wins: one parse can
+                    # mis-tag, the corpus-level mean is the signal.
+                    buf["propn_sum"] = buf.get("propn_sum", 0.0) + float(av)
+                    buf["propn_n"] = buf.get("propn_n", 0) + 1
                 else:
                     buf["attrs"].setdefault(ak, av)
         relationships.extend(ex.relationships)
@@ -116,6 +121,8 @@ def aggregate(extractions: list[DocumentExtraction]) -> AggregateResult:
         canonical = max(surfaces, key=lambda s: (surfaces[s], len(s)))
         aliases = sorted(s for s in surfaces if s != canonical)
         attrs = dict(buf["attrs"])
+        if buf.get("propn_n"):
+            attrs["propn_ratio"] = round(buf["propn_sum"] / buf["propn_n"], 3)
         if buf["evidence"]:
             attrs["evidence"] = buf["evidence"]
             attrs["evidence_doc"] = buf["evidence_doc"]

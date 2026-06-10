@@ -27,6 +27,15 @@ STOPWORDS: set[str] = {
     "fire", "light", "hand", "hands", "head", "eye", "eyes", "face", "feet",
     "heart", "voice", "name", "word", "words", "story", "book", "letter",
     "group", "side", "part", "end", "kind", "sort", "number", "people",
+    # Bare honorifics/titles: as standalone PERSON nodes they conflate many
+    # distinct referents into one (a "Monsieur" node is not a person). Exact
+    # match only - "M. Myriel" / "Father Madeleine" keep their title.
+    "mr", "mrs", "ms", "miss", "dr", "doctor", "professor", "reverend",
+    "bishop", "priest", "pastor", "monsignor", "captain", "colonel",
+    "sergeant", "lieutenant", "monsieur", "madame", "mademoiselle",
+    "monseigneur", "cure", "curé", "abbe", "abbé", "comte", "comtesse",
+    "marquis", "marquise", "duc", "duchesse", "baron", "baroness",
+    "herr", "frau", "fraulein", "fräulein", "graf", "gräfin",
 }
 
 # General-purpose subtype vocabulary handed to the LLM enricher as a controlled

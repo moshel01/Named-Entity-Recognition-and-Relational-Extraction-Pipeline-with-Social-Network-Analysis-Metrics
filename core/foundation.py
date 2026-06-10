@@ -57,6 +57,27 @@ def _detect_author_from_text(text: str) -> str:
     return ""
 
 
+def _annotate_propn_ratio(spacy_doc, mentions, offset: int) -> None:
+    """Tag each mention with the share of its tokens spaCy tags PROPN.
+
+    Language-general common-noun signal: an entity that is never a proper noun
+    anywhere in the corpus ("Monsieur", "der Vater") is a category word, not a
+    name - regardless of capitalization conventions (German capitalizes all
+    nouns). Averaged per entity in aggregation; consumed by the quality POS
+    gate. No-op for pipelines without a POS tagger (blank fallback models).
+    """
+    if not spacy_doc.has_annotation("POS"):
+        return
+    for m in mentions:
+        span = spacy_doc.char_span(
+            m.start_char - offset, m.end_char - offset, alignment_mode="expand"
+        )
+        if span is None or not len(span):
+            continue
+        propn = sum(1 for t in span if t.pos_ == "PROPN")
+        m.attributes["propn_ratio"] = round(propn / len(span), 3)
+
+
 class FoundationLayer:
     """Always-on NER + linguistic analysis foundation.
 
@@ -177,6 +198,8 @@ class FoundationLayer:
         # such as DATE/EVENT/ORDINAL when those weren't configured).
         if self.allowed_types is not None:
             merged = [m for m in merged if m.label in self.allowed_types]
+
+        _annotate_propn_ratio(spacy_doc, merged, offset)
 
         # Coreference: narrator + (optional) pronoun resolution. Appended after
         # merge so resolved spans (e.g. first-person pronouns) become candidates

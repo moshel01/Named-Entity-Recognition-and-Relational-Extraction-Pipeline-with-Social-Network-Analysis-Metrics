@@ -4,6 +4,66 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Language-general POS gate + book gold benchmark
+
+- **POS gate replaces per-corpus stopword curation** (`core/foundation.py`,
+  `aggregator.py`, `quality_review.py`, `config.quality.pos_gate`): each
+  mention now records the share of its tokens spaCy tags PROPN
+  (`propn_ratio`, averaged per entity, exported as `attr_propn_ratio`).
+  A PERSON that is never a proper noun across >=2 mentions ("Monsieur",
+  "der Vater", "the soldier") is dropped as a category word; borderline
+  entities (<0.5) are tagged `suspect_common_noun` and kept. Works for any
+  spaCy language regardless of capitalization conventions (German nouns),
+  authors immune, no-op without a POS tagger and on pre-gate checkpoints.
+  Verified: EN+DE unit test (Vater/Soldat/Lehrer/Mutter dropped, names and
+  authors kept) and an end-to-end sample run (28/29 nodes carry the ratio,
+  junk "My cousin" tagged 0.333). The static stopword lists remain as a fast
+  precision layer - spaCy tags capitalized foreign honorifics PROPN in
+  English text, so the two layers catch different failure classes.
+- **`scripts/book_bench.py`**: run + score the pipeline on any book against
+  gold annotations (entity/relation P/R/F1 at all three evidentiary tiers).
+  Tolerant chapter splitting with single-document fallback, fiction config
+  switches applied, gold validated before the run. Gold format documented in
+  the header; scoring is corpus-level so whole-book gold in one document works.
+- DWIE benchmark adapter verified loadable (HF download, readable relation
+  labels - the right target for `--constrain-relations` typed-relation F1).
+- Verified no growing-context bug in the ollama backend: every request is
+  stateless (system + one chunk), `num_ctx` is pinned from config, chunks are
+  hard-capped - per-request context cannot grow over a run. Long big-model
+  runs slow down from VRAM/RAM spill, not from the pipeline.
+
+---
+
+## Three-run audit (lesmis x2 + 25-doc Abel): honorific stopwords, fiction config
+
+Audited the lesmis_python_only (60 ch), lesmis_ollama (30 ch, qwen3:8b) and
+abel_qwen3_8b (25 docs) outputs end to end.
+
+- **Bare honorifics dropped as entities** (`domain/generic/entity_config.py`):
+  "Monsieur" / "Madame" / "Bishop" / "Herr" / "Captain" etc. were surviving as
+  PERSON nodes - a bare-title node conflates many distinct referents, which is
+  an entity-resolution error, not Gephi-filterable noise (one even ranked as a
+  reference figure). Added French/German/English/clerical honorifics to the
+  existing generic STOPWORDS (exact normalized-name match; "M. Myriel",
+  "Father Madeleine", "Bishop of D" all verified kept).
+- **Fiction needs two config switches, not code changes** (book test script):
+  `coreference.narrator_resolution: false` (a novel's authorial "I" is not a
+  character; with it on, 28-59 per-chapter Narrator nodes appear and one was
+  mis-merged into Monseigneur Bienvenu) and `dedup.llm_assist: true` (off by
+  default; without it Myriel stayed split across 7 title variants).
+- Abel 25-doc run verified clean: 24/25 named authors with letter_ids, all 12
+  reference figures genuine historical figures, NSDAP aliases uncontaminated,
+  0 mojibake, full edge provenance (`edge_source` on 1817/1817; the 56
+  evidence-less edges are all `edge_source=metadata`, correct - spreadsheet
+  facts have no source sentence), SNA columns populated (523 constraint,
+  32 articulation, 462 bridge-tagged edges). Both LLM guards fired correctly
+  against qwen3 (oversized merge groups; two >50% review drop lists ignored).
+- INSTRUCTIONS: new "Direct commands (live progress bars)" section - plain
+  `python main.py ... --run-name X --resume` invocations per model, plus
+  evaluation/benchmark commands, instead of the log-redirecting bash wrappers.
+
+---
+
 ## Benchmark + evaluation path repaired and verified
 
 The one area the earlier audits hadn't covered. Three real problems found:

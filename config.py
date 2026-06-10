@@ -153,6 +153,11 @@ class QualityConfig(BaseModel):
     # A floor around 0.5 trims low-confidence single-source spans and lifts
     # precision on noisy types (e.g. ORG) at some cost to recall.
     min_entity_confidence: float = 0.0
+    # Drop a PERSON entity that spaCy never tags as a proper noun across all
+    # its mentions ("Monsieur", "der Vater") - a language-general common-noun
+    # gate that needs no per-corpus stopword list. Borderline entities are
+    # tagged suspect_common_noun and kept.
+    pos_gate: bool = True
     llm_review: Any = "auto"        # "auto" | True | False
     review_batch_size: int = 150    # entities per LLM review call (large corpora)
     drop_isolated_nodes: bool = False   # drop degree-0 nodes from the final graph

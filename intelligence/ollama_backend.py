@@ -103,7 +103,7 @@ class OllamaBackend(IntelligenceBackend):
             return list(candidates), [], []
         data = coerce_extraction(obj)
         return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,
-                               *self._date_vocab)
+                               *self._date_vocab, chunk_text=chunk_text)
 
     def review(self, entities_summary: str, edges_summary: str) -> dict[str, Any] | None:
         system, user = build_quality_review_prompt(entities_summary, edges_summary)

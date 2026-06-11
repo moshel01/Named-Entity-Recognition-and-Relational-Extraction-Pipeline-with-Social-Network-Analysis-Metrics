@@ -9,7 +9,8 @@ from difflib import SequenceMatcher
 from core.schema import Entity, Relationship
 
 from .aggregator import normalize_name
-from .deduplicator import Deduplicator, _acronym_form, _content_tokens
+from .deduplicator import (Deduplicator, _acronym_form, _content_tokens,
+                           _function_word_name)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,12 @@ def _is_numeric_alias(name: str) -> bool:
 def _plausible_alias(canon: str, alias: str) -> bool:
     """A light string check so the LLM can't merge unrelated entities (e.g.
     'Deutsches Reich' the state into 'NSDAP' the party). Accepts a shared content
-    word, an acronym relationship, or moderate fuzzy similarity. Legit but
+    word, an acronym relationship, or strong fuzzy similarity. Legit but
     string-dissimilar variants (acronym<->full name) are left to the alias dict."""
+    # A conjunction/preposition name is a bad NER span, not a merge canon
+    # ("Bofur and Bombur" must not absorb "Bofur").
+    if _function_word_name(canon) or _function_word_name(alias):
+        return False
     ca, aa = _acronym_form(canon), _acronym_form(alias)
     if ca and aa:                      # two acronyms: only the same one
         return ca == aa
@@ -44,8 +49,10 @@ def _plausible_alias(canon: str, alias: str) -> bool:
         return True
     if aa and aa.lower() in ct:
         return True
+    # 0.75: distinct short names score deceptively high on SequenceMatcher
+    # (Beorn~Bear 0.67, Thror~Thorin 0.73 - different characters).
     return SequenceMatcher(None, normalize_name(canon),
-                           normalize_name(alias)).ratio() >= 0.5
+                           normalize_name(alias)).ratio() >= 0.75
 
 
 def apply_llm_merges(

@@ -25,6 +25,10 @@ STOPWORDS: set[str] = {
     # Salutations and generic school types (named schools survive exact match).
     "heil hitler", "volksschule", "gymnasium", "realschule", "oberrealschule",
     "hochschule", "universität", "bürgerschule", "mittelschule",
+    # Sentence-initial adverbs/verbs the German tagger marks PROPN, which NER
+    # then promotes to PERSON ("Heran kamen...", "Kehrte ich zurück...").
+    "heran", "kehrte", "schlagartig", "straffes", "schwer", "hierauf",
+    "daraufhin", "alsdann", "sodann", "nunmehr",
 }
 
 # Fine-grained subtypes for analysis/interpretation (informational).

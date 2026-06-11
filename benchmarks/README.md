@@ -33,7 +33,7 @@ yourself.
 | Flag | Effect |
 |------|--------|
 | `--types PERSON,ORG,LOCATION` | Score only these entity types (default per dataset). Trims both the GLiNER labels the pipeline is given **and** the gold, so the metric is apples-to-apples. Dropping noisy types (NUM/MISC/DATE) raises the headline F1. |
-| `--constrain-relations` | Inject the dataset's relation inventory as an ontology so the **LLM** emits those exact labels. Makes **typed** relation F1 comparable. Meaningful only with `--mode ollama`/`api` and readable labels (DWIE good; Re-DocRED uses opaque `Pxxx` codes, so skip it there). |
+| `--constrain-relations` | Inject the dataset's relation inventory as an ontology so the **LLM** emits those exact labels. Makes **typed** relation F1 comparable. Meaningful only with `--mode ollama`/`api`. All adapters now expose readable labels (Re-DocRED `Pxxx` codes are mapped to names via `REL_INFO`, e.g. `p17 -> country`). |
 | `--mode ollama --ollama-model qwen2.5:7b-instruct` | Use a local LLM for relation extraction. |
 
 ## ACE 2005 / TACRED (local, licensed)
@@ -70,12 +70,13 @@ that would add non-gold nodes/edges and depress precision here.
 - **Entity P/R/F1** - directly comparable to published numbers. Matching is
   alias-aware and entity-linking-based (gold mention clusters -> one node). Look
   at `entities` (typed) and the per-type table.
-- **Relations - use the UNTYPED metric for cross-system comparison.** Re-DocRED
-  labels are Wikidata property ids (`P17`, `P131`...) and DWIE/ACE/TACRED use their
-  own inventories; the pipeline emits free-text / dependency relation types, so
-  **typed** relation F1 against these datasets is *not* meaningful unless you
-  constrain extraction to the dataset's label set (LLM mode + a custom prompt).
-  `relations_untyped` measures whether the right entity *pairs* are connected.
+- **Relations - use the UNTYPED metric for cross-system comparison.** Each
+  dataset has its own relation inventory; the unconstrained pipeline emits
+  free-text / dependency relation types, so **typed** relation F1 is *not*
+  meaningful unless you run with `--constrain-relations` (LLM mode), which
+  injects the dataset's labels as the extraction ontology. Without it expect
+  typed F1 near zero by construction. `relations_untyped` measures whether the
+  right entity *pairs* are connected.
 - **Tiers** - `conservative` (text-stated edges only) is the precision-oriented
   headline; `moderate` adds co-occurrence (higher recall, lower precision);
   `full` adds inference. Compare all three.

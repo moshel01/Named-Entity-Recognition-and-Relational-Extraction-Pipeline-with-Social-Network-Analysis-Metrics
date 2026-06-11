@@ -56,10 +56,13 @@ def _aggregate_edges(
                 "n_mentions": 0, "directed": r.directed, "doc_ids": set(),
                 "origins": set(), "edge_sources": set(), "confidence": 0.0,
                 "evidence": r.evidence, "year": None, "suspect_membership": False,
+                "evidence_unverified": False,
             }
             agg[key] = bucket
         if r.attributes.get("suspect_membership"):
             bucket["suspect_membership"] = True
+        if r.attributes.get("evidence_unverified"):
+            bucket["evidence_unverified"] = True
         bucket["n_mentions"] += 1
         for d in (r.doc_id or "").split(";"):
             if d:
@@ -184,6 +187,7 @@ class GephiBuilder:
                 "n_sources": b["n_sources"],           # distinct letters
                 "reciprocal": b["reciprocal"],
                 "suspect_membership": b.get("suspect_membership", False),
+                "evidence_unverified": b.get("evidence_unverified", False),
                 "period": b["period"],
                 "year": b["year"],
                 "origin": ";".join(sorted(b["origins"])),

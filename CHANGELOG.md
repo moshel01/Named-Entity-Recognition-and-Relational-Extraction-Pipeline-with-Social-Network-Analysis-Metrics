@@ -4,6 +4,130 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Hobbit ollama audit: dedup kill chain fixed, span hygiene, verbatim segments
+
+Audited the hobbit_ollama (19 ch, qwen3.5:9b) output against the mentor gold.
+Conservative-tier relation recall 0.25 vs python_only's 0.028 - the LLM reads
+narrative ties the dependency rules can't. But four bug classes surfaced:
+
+- **Salient characters silently deleted (kill chain of three bugs).** Beorn
+  (66 mentions), Gloin, Nori, Thror vanished from the graph. Chain:
+  (1) `llm_dedup._plausible_alias` accepted any fuzzy ratio >= 0.5, letting
+  qwen merge distinct characters (Beorn~bear 0.67, Thror~Thorin 0.73);
+  (2) `Deduplicator._merge_into` let the absorbed junk OVERWRITE the canon's
+  attributes, poisoning `propn_ratio` to 0.0; (3) the POS gate then silently
+  hard-dropped the poisoned PERSON, destroying the alias trace. Fixes: fuzzy
+  floor raised to 0.75 with a comment documenting the collision pairs,
+  `_merge_into` now only fills attribute gaps (primary's signals win), and
+  the POS gate warns when dropping a PERSON with >= 20 mentions so the
+  failure class can never be invisible again. Verified on the same
+  checkpoint: all eight probe characters survive as their own nodes; entity
+  recall 0.667 -> 0.759, moderate relation recall 0.433 -> 0.633.
+- **Conjunction/preposition NER spans become dedup attractors.** "Bofur and
+  Bombur" (GLiNER span) swallowed Bofur + Bombur as aliases; "in Fili"
+  swallowed Fili via the partial-person fold (last-token match +
+  keep_primary_name). Fixes: `entity_merger.repair_spans` strips leading/
+  trailing prepositions+conjunctions and splits two-name PERSON conjunctions
+  ("Marie und Adolf Spanku" -> two mentions; "Thorin and Company" kept -
+  generic conjunct blocklist; articles NOT stripped, "The Shire"/"Der
+  Stahlhelm" are real names); `_fold_partial_persons` and llm_dedup refuse
+  function-word names as fold/merge targets. Wired into foundation, so fresh
+  extractions are clean; the dedup guards also protect old checkpoints.
+- **Evidence verbatim check: 62% false-flag rate.** qwen stitches multiple
+  verbatim spans with "..." - legitimate compression, not paraphrase. The
+  check now folds unicode punctuation (curly quotes, dashes) and verifies
+  each ellipsis-separated segment independently: unverified rate 62% -> 3%,
+  and the remaining 3% are genuinely corrupt spans. Tag carries signal now.
+- **book_bench `--constrain-relations`**: injects the gold's relation labels
+  as the extraction ontology (same as run_benchmark) so typed relation F1 is
+  meaningful against the mentor's 8-label codebook.
+- hobbit.txt: trimmed 2.9k chars of publisher back matter (HarperCollins
+  nodes were leaking into the graph).
+- Regression check: redocred benchmark re-scored byte-identical after the
+  dedup changes.
+
+---
+
+## Codebook export + Hobbit gold benchmark + qwen3.5:9b results
+
+- **qwen3.5:9b benchmarked under the new code** (constrained, conservative
+  tier): DWIE untyped relation F1 0.410 (qwen3:8b was 0.261; gemma4:12b 0.436
+  on the older prompt), typed 0.163. Re-DocRED untyped 0.253, and the first
+  meaningful typed score on that dataset (0.161) now that the P-code mapping
+  feeds --constrain-relations. A 9B model on the 8 GB card is now within ~6%%
+  of gemma4:12b on relations - the 540-doc corpus no longer requires the
+  friend's machine.
+- **`codebook.xlsx` auto-generated for every run** (`postprocess/codebook.py`,
+  `export.codebook: true`): standard SNA codebook so outsiders can read the
+  data - boundary specification, definition of every node/edge column actually
+  present, entity types with subtype inventories, the tie-class taxonomy with
+  this run's counts, the full relation inventory with example evidence, and
+  the evidence-tier table. Modeled on the mentor's Hobbit codebook (Node List /
+  Edge List / Code Book) extended with provenance + value inventories.
+  Fail-soft; wired into the analyze stage after export.
+- **The Hobbit gold benchmark prepared** (`data/hobbit.txt` +
+  `data/hobbit.gold.json`): mentor's codebook xlsx converted to the
+  evaluation gold schema (58 entities: 43 PERSON / 14 LOCATION / 1 ORG; 190
+  undirected relations across 8 tie types, no orphan endpoints). Book PDF
+  extracted to text (front matter/TOC cut, hyphenation repaired, 19 chapters
+  detected by book_bench's splitter). Run via `python scripts/book_bench.py
+  --book data/hobbit.txt --gold data/hobbit.gold.json [--mode ollama]`.
+  book_bench input glob tightened to `ch_*.txt` - a stray .txt in the input
+  dir (e.g. the book itself) was ingested as a 20th document and OOM'd the
+  transformer on 123k tokens.
+- **python_only Hobbit baseline:** entity recall 0.69 (typed). Precision is
+  not meaningful against this gold - the mentor's boundary includes only
+  tie-linked nodes (58), not every named entity, so most pipeline "FPs" are
+  out-of-boundary, not wrong. Untyped relation recall 0.028 conservative ->
+  0.578 moderate: dependency rules barely fire on narrative fiction; the
+  mentor's dominant "Associate" ties behave like co-presence and are caught
+  by the cooccurrence layer. Gold has two type slips to flag upstream
+  (Elrond typed Place, Dale typed Group/Man).
+
+---
+
+## Two-machine A/B audit (qwen3:8b vs gemma4:12b): eval fixes, provenance, evidence guard
+
+Compared identical runs (Re-DocRED 25, DWIE 15 constr, Abel 25) across the
+8 GB machine (qwen3:8b) and the 16 GB machine (gemma4:12b). Gold files and
+foundation outputs matched across machines; entity F1 within 0.003 (entities
+come from the foundation, not the LLM). gemma4:12b is clearly stronger on
+relations: DWIE untyped F1 0.436 vs 0.261, typed 0.217 vs 0.127; Re-DocRED
+untyped 0.239 vs 0.196 at higher precision with fewer edges. On Abel, gemma
+emitted half the llm edges (377 vs 755) with far fewer suspect_membership
+hits (8 vs 29) - precision-leaning profile, consistent with the benchmarks.
+
+- **Re-DocRED relation labels mapped to readable names** (`benchmarks/
+  redocred.py` `REL_INFO`): gold relations carried opaque Wikidata codes
+  (`p131`, `p17`), so typed relation F1 was 0.0 by construction on every run.
+  Codes now map to snake_case names (`country`, `member_of`, ...) from the
+  DocRED rel_info inventory, making `--constrain-relations` usable for this
+  dataset. Existing unconstrained runs re-scored: untyped metrics unchanged.
+- **Eval reports print names, not internal ids** (`evaluation/scorer.py`):
+  relation FP/FN lists showed `g55` / `p::x` keys; now resolved to entity
+  names so error analysis is possible without code spelunking.
+- **`run_meta.json` written into every run dir** (`main.py`): run name, mode,
+  model, stage, limit, timestamp, full effective config. Motivated by a run
+  named `abel_gemma4_12b` that actually used qwen3:8b - outputs were not
+  traceable to the model that produced them.
+- **Evidence verbatim guard** (`api_backend._map_extraction`, gephi_builder):
+  LLM relationship evidence that is not a whitespace-normalized substring of
+  the source chunk is tagged `evidence_unverified` (kept, Gephi-filterable).
+  gemma4:12b was observed inserting bracketed paraphrases into evidence.
+  Prompt now also forbids translating entity names/evidence (qwen emitted
+  "Seizure of Power (1933)" for a German passage).
+- **suspect_common_noun restricted to proper-name types**
+  (`quality_review.py`): the tag fired on DATE/EVENT/RANK nodes (134/146
+  DATEs), which legitimately consist of common nouns; it now applies only to
+  PERSON/ORG/LOCATION/GPE/INSTITUTION so the Gephi filter carries signal.
+- German stopwords: sentence-initial adverbs/verbs the tagger marks PROPN and
+  NER promotes to PERSON ("Heran", "Kehrte", ...) added to the nazi_era list.
+- Known cross-machine nit: doc_ids hash the full source path, so Windows/mac
+  runs of the same corpus get different ids (path separator). Compare by
+  filename, not doc_id. Not changed - new ids would orphan checkpoints.
+
+---
+
 ## Language-general POS gate + book gold benchmark
 
 - **POS gate replaces per-corpus stopword curation** (`core/foundation.py`,

@@ -316,6 +316,15 @@ class Pipeline:
         )
         written = exporter.export(tables, entities, extractions, manifest=manifest)
 
+        # 7b. Codebook: variable definitions + this run's value inventories.
+        if self.config.export.codebook:
+            from postprocess.codebook import write_codebook
+            mode_cfg = getattr(self.config.intelligence, self.config.mode, None)
+            cb = write_codebook(self.run_dir, tables, self.config, domain=self.domain,
+                                model=getattr(mode_cfg, "model", ""))
+            if cb:
+                written["codebook"] = str(cb)
+
         self._print_summary(entities, tables, written)
         return written
 
@@ -388,9 +397,31 @@ class Pipeline:
             files.add_row(name, path)
         console.print(files)
 
+    def _write_run_meta(self, stage: str, resume: bool, limit: int) -> None:
+        """Snapshot the effective config into the run dir so every output is
+        traceable to the exact model/mode/settings that produced it."""
+        import json
+        from datetime import datetime, timezone
+
+        mode_cfg = getattr(self.config.intelligence, self.config.mode, None)
+        meta = {
+            "run_name": self.config.run_name,
+            "mode": self.config.mode,
+            "model": getattr(mode_cfg, "model", ""),
+            "stage": stage,
+            "resume": resume,
+            "limit": limit,
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "platform": sys.platform,
+            "config": self.config.model_dump(mode="json"),
+        }
+        (self.run_dir / "run_meta.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
     # Full run
     def run(self, stage: str, resume: bool, limit: int = 0,
             extra_urls: tuple[str, ...] = (), urls_file: str = "", text: str = "") -> None:
+        self._write_run_meta(stage, resume, limit)
         ckpt = CheckpointManager(
             self.run_dir / "checkpoints",
             self.config.run_name,

@@ -207,10 +207,16 @@ def score_relations(
     tp = len(pred_set & gold_set)
     prf = PRF(tp=tp, fp=len(pred_set - gold_set), fn=len(gold_set - pred_set))
 
+    def readable(eid: str) -> str:
+        """Resolve an internal endpoint id back to a display name."""
+        if eid.startswith("g") and eid[1:].isdigit():
+            return gnodes[int(eid[1:])].rep_norm
+        return eid.removeprefix("p::")
+
     def fmt(keys: Iterable[tuple]) -> list[dict]:
         out = []
         for (pair, t) in list(keys)[:50]:
-            out.append({"a": pair[0], "b": pair[1], "type": t})
+            out.append({"a": readable(pair[0]), "b": readable(pair[1]), "type": t})
         return out
 
     return {"overall": prf.as_dict(),

@@ -20,6 +20,8 @@ errors, merge fragments, or add entities the candidate list missed.
 - Set `directed` true only when the relation is inherently asymmetric \
 (e.g. "works_for", "leads"); use false for symmetric relations (e.g. "met_with").
 - `evidence` must be a verbatim sentence or short span from the passage.
+- Keep entity names and evidence in the language of the passage; never \
+translate them.
 - `confidence` is a float in [0,1] reflecting how strongly the text supports it.
 - Output a SINGLE JSON object and NOTHING else. No markdown, no commentary."""
 

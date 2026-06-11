@@ -71,6 +71,19 @@ def _years(name: str) -> set[str]:
     return set(_YEAR_RE.findall(name))
 
 
+# Prepositions/conjunctions inside a multi-token PERSON name mark a bad NER
+# span ("in Fili", "Bofur and Bombur") - never a fold target for bare names.
+# Articles and "of" stay allowed ("The Master", "Joan of Arc" are real names).
+_NAME_FUNCTION_WORDS = {
+    "in", "on", "at", "to", "by", "and", "or",
+    "und", "oder", "im", "am", "bei", "mit", "zu",
+}
+
+
+def _function_word_name(name: str) -> bool:
+    return any(t in _NAME_FUNCTION_WORDS for t in _tokens(name))
+
+
 class Deduplicator:
     """Resolve raw entities into canonical entities with alias collapsing."""
 
@@ -166,7 +179,11 @@ class Deduplicator:
         primary.doc_ids = sorted(set(primary.doc_ids) | set(other.doc_ids))
         primary.confidence = max(primary.confidence, other.confidence)
         author_flag = primary.attributes.get("is_author") or other.attributes.get("is_author")
-        primary.attributes.update(other.attributes)
+        # The absorbed node only fills attribute gaps - it must never overwrite
+        # the primary's signals (a junk alias with propn_ratio 0.0 would poison
+        # the canon and get it deleted by the POS gate downstream).
+        for k, v in other.attributes.items():
+            primary.attributes.setdefault(k, v)
         if author_flag:
             primary.attributes["is_author"] = True
 
@@ -210,7 +227,8 @@ class Deduplicator:
         if len(persons) < 2:
             return entities
         multi = [e for e in persons
-                 if len(normalize_name(e.canonical_name).split()) >= 2]
+                 if len(normalize_name(e.canonical_name).split()) >= 2
+                 and not _function_word_name(e.canonical_name)]
         singles = [e for e in persons
                    if len(normalize_name(e.canonical_name).split()) == 1]
         if not multi or not singles:

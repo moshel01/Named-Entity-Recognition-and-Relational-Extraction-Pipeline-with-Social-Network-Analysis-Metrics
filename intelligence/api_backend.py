@@ -136,7 +136,7 @@ class ApiBackend(IntelligenceBackend):
             return list(candidates), [], []
         data = coerce_extraction(obj)
         return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,
-                               *self._date_vocab)
+                               *self._date_vocab, chunk_text=chunk_text)
 
     # Quality review
     def review(self, entities_summary: str, edges_summary: str) -> dict[str, Any] | None:
@@ -207,6 +207,30 @@ def _parse_merges(obj: Any) -> list[dict[str, Any]]:
 
 
 # Shared mapping helper (also used by ollama_backend)
+# Fold unicode punctuation variants the LLM normalizes when quoting (curly
+# quotes, dashes, ellipsis) so verbatim evidence isn't flagged as paraphrase.
+_PUNCT_FOLD = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "–": "-", "—": "-", "−": "-", "­": None,
+    "…": "...", " ": " ",
+})
+
+
+def _normalize_ws(s: str) -> str:
+    return " ".join(s.translate(_PUNCT_FOLD).split()).casefold()
+
+
+def _evidence_verbatim(evidence: str, norm_chunk: str) -> bool:
+    """True when the evidence is quoted from the chunk. Models legitimately
+    stitch multiple spans with '...' - each substantial segment must appear."""
+    segments = [s.strip(" .\"'") for s in _normalize_ws(evidence).split("...")]
+    segments = [s for s in segments if len(s) >= 8]
+    if not segments:
+        return True
+    return all(s in norm_chunk for s in segments)
+
+
 def _map_extraction(
     data: dict[str, list],
     candidates: list[EntityMention],
@@ -216,6 +240,7 @@ def _map_extraction(
     month_words: dict[str, int] | None = None,
     season_words: dict[str, int] | None = None,
     pivot_max: int | None = None,
+    chunk_text: str = "",
 ) -> tuple[list[EntityMention], list[Relationship], list[TimelineEvent]]:
     """Map a parsed LLM extraction object onto pipeline dataclasses.
 
@@ -251,7 +276,9 @@ def _map_extraction(
         )
         known_names.add(name.lower())
 
-    # Relationships.
+    # Relationships. Evidence the model paraphrased (not a verbatim span of
+    # the chunk) is tagged, not dropped, so Gephi can filter on it.
+    norm_chunk = _normalize_ws(chunk_text)
     rels: list[Relationship] = []
     for r in data.get("relationships", []):
         if not isinstance(r, dict):
@@ -261,6 +288,10 @@ def _map_extraction(
         rtype = str(r.get("type", "related_to")).strip() or "related_to"
         if not src or not tgt or src.lower() == tgt.lower():
             continue
+        evidence = str(r.get("evidence", "")).strip()
+        attrs = {"edge_source": "llm_extracted"}
+        if evidence and norm_chunk and not _evidence_verbatim(evidence, norm_chunk):
+            attrs["evidence_unverified"] = "true"
         rels.append(
             Relationship(
                 source=src,
@@ -268,11 +299,11 @@ def _map_extraction(
                 rel_type=rtype,
                 doc_id=doc_id,
                 chunk_id=chunk_id,
-                evidence=str(r.get("evidence", "")).strip(),
+                evidence=evidence,
                 confidence=float(r.get("confidence", 0.6) or 0.6),
                 directed=bool(r.get("directed", False)),
                 origin="extracted",
-                attributes={"edge_source": "llm_extracted"},
+                attributes=attrs,
             )
         )
 

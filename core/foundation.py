@@ -10,7 +10,7 @@ from config import Config
 from .chunker import chunk_document
 from .coreference import CoreferenceResolver
 from .date_extractor import extract_dates
-from .entity_merger import merge_mentions
+from .entity_merger import merge_mentions, repair_spans
 from .gliner_engine import GlinerEngine
 from .schema import Chunk, Document, FoundationResult
 from .spacy_engine import SpacyEngine
@@ -193,6 +193,7 @@ class FoundationLayer:
             )
 
         merged = merge_mentions(mentions, sentence_lookup=sent_spans)
+        merged = repair_spans(merged)
 
         # Restrict to requested canonical types (drops spaCy's off-target NER
         # such as DATE/EVENT/ORDINAL when those weren't configured).

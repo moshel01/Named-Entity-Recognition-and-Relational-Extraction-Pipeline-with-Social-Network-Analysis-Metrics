@@ -92,6 +92,9 @@ class QualityReviewer:
         # mentions is a category word ("Monsieur", "der Vater"), not a person.
         # Language-general - no per-corpus stopword list needed. Borderline
         # entities are tagged suspect_common_noun (Gephi-filterable) and kept.
+        # Only proper-name types get the tag: DATE/EVENT/RANK etc. legitimately
+        # consist of common nouns, and tagging them would drown the signal.
+        name_types = {"PERSON", "ORG", "LOCATION", "GPE", "INSTITUTION"}
         if getattr(self.config, "pos_gate", True):
             gated: list[Entity] = []
             for e in kept_entities:
@@ -100,8 +103,12 @@ class QualityReviewer:
                     gated.append(e)
                     continue
                 if e.label == "PERSON" and ratio == 0.0 and e.mention_count >= 2:
+                    if e.mention_count >= 20:
+                        logger.warning("POS gate dropping well-attested PERSON %r "
+                                       "(%d mentions, propn_ratio 0.0)",
+                                       e.canonical_name, e.mention_count)
                     continue
-                if ratio < 0.5:
+                if ratio < 0.5 and e.label in name_types:
                     e.attributes["suspect_common_noun"] = True
                 gated.append(e)
             kept_entities = gated

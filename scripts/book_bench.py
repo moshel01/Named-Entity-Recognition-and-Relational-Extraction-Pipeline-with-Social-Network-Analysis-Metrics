@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ollama-model", default="qwen3:8b")
     ap.add_argument("--limit", type=int, default=0, help="Max chapters (0 = all).")
     ap.add_argument("--resume", action="store_true", help="Continue an interrupted run.")
+    ap.add_argument("--constrain-relations", action="store_true",
+                    help="Constrain the LLM to the gold's relation labels so "
+                         "TYPED relation F1 is meaningful (ollama mode).")
     args = ap.parse_args(argv)
 
     book = Path(args.book)
@@ -60,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"book not found: {book}")
     name = args.name or re.sub(r"[^a-z0-9]+", "_", book.stem.lower()).strip("_")
     run_name = f"{name}_{args.mode}"
+    if args.constrain_relations:
+        run_name += "_constr"
 
     # Validate the gold up front so a format problem fails in seconds, not after
     # the pipeline run.
@@ -91,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = {
         "run_name": run_name,
         "mode": args.mode,
-        "io": {"input_path": str(input_dir).replace("\\", "/"), "input_glob": "*.txt",
+        "io": {"input_path": str(input_dir).replace("\\", "/"), "input_glob": "ch_*.txt",
                "output_dir": "./output", "encoding": "utf-8"},
         "coreference": {"narrator_resolution": False},
         "dedup": {"llm_assist": args.mode == "ollama"},
@@ -100,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
                       "cooccurrence_min_shared_docs": 2},
         "export": {"formats": ["csv", "json"], "gephi": True, "graph_metrics": True},
     }
+    if args.constrain_relations:
+        rel_labels = sorted({r.type for r in gold.relations if r.type})
+        if rel_labels:
+            cfg["ontology"] = {"enabled": True, "drop_unmapped": False,
+                               "relations": rel_labels}
+            print(f"Constraining LLM to {len(rel_labels)} relation labels: {rel_labels}")
     config_path = input_dir / f"config_{run_name}.yaml"
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 

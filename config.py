@@ -209,6 +209,9 @@ class ExportConfig(BaseModel):
     # Precompute SNA metrics Gephi can't (Burt's constraint/effective_size,
     # bridges, articulation points) + a graph-health QA report. Fail-soft.
     graph_metrics: bool = False
+    # Write codebook.xlsx into the run dir: variable definitions + this run's
+    # type/tie-class/relation inventories, for readers new to the data. Fail-soft.
+    codebook: bool = True
 
 
 class CheckpointConfig(BaseModel):

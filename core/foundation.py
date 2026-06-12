@@ -204,8 +204,9 @@ class FoundationLayer:
 
         # Coreference: narrator + (optional) pronoun resolution. Appended after
         # merge so resolved spans (e.g. first-person pronouns) become candidates
-        # for relationship extraction and co-occurrence.
-        if self.coref is not None and narrator_name:
+        # for relationship extraction and co-occurrence. Pronoun resolution must
+        # run even without a narrator (third-person books have no narrator).
+        if self.coref is not None:
             merged += self.coref.resolve(
                 text, merged, chunk.doc_id, chunk.chunk_id, offset, narrator_name
             )

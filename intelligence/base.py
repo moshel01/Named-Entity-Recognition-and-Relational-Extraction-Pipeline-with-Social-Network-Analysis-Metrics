@@ -18,6 +18,12 @@ from .prompts import EXTRACTION_SYSTEM as _DEFAULT_EXTRACTION_SYSTEM
 
 logger = logging.getLogger(__name__)
 
+
+class BackendUnavailable(RuntimeError):
+    """Server/endpoint is down. Must abort the run, not degrade per chunk -
+    extract_document's catch-all would otherwise eat the circuit breaker."""
+
+
 # First-person pronouns -> remapped to the author. Third-person -> unresolvable.
 _FIRST_PERSON = {
     "ich", "mich", "mir", "mein", "meine", "meinen", "meinem", "meiner",
@@ -74,6 +80,10 @@ class IntelligenceBackend(ABC):
         # (month_words, season_words, pivot_max) for normalizing LLM timeline dates.
         v = domain.temporal_vocab() if domain is not None else {}
         self._date_vocab = (v.get("months", {}), v.get("seasons", {}), v.get("pivot_max"))
+        # Set by extract_chunk when it degrades to foundation-only output
+        # (timeout, unrepairable JSON). extract_document records the failure in
+        # checkpoint meta so resume can tell a failed doc from an empty one.
+        self._chunk_failed = False
 
     # Subclass hook
     @abstractmethod
@@ -128,9 +138,11 @@ class IntelligenceBackend(ABC):
             if author_name:
                 break
 
+        failed_chunks: list[str] = []
         for fr in foundation_results:
             # Foundation dates always carry through (cheap, deterministic).
             all_timeline.extend(fr.dates)
+            self._chunk_failed = False
             try:
                 mentions, rels, timeline = self.extract_chunk(
                     fr.chunk.text,
@@ -141,6 +153,8 @@ class IntelligenceBackend(ABC):
                     fr.chunk.start_char,
                     author_name,
                 )
+            except BackendUnavailable:
+                raise  # circuit breaker - abort the run, don't degrade
             except Exception as exc:  # noqa: BLE001 - never let one chunk kill a doc
                 logger.warning(
                     "Backend '%s' failed on chunk %s: %s; "
@@ -148,6 +162,9 @@ class IntelligenceBackend(ABC):
                     self.name, fr.chunk.chunk_id, exc,
                 )
                 mentions, rels, timeline = list(fr.mentions), [], []
+                self._chunk_failed = True
+            if self._chunk_failed:
+                failed_chunks.append(fr.chunk.chunk_id)
             all_mentions.extend(mentions)
             all_rels.extend(rels)
             all_timeline.extend(timeline)
@@ -158,11 +175,16 @@ class IntelligenceBackend(ABC):
         all_mentions = [m for m in all_mentions
                         if m.text.strip().lower() not in _PRONOUNS]
 
+        meta: dict[str, Any] = {"backend": self.name,
+                                "n_chunks": len(foundation_results),
+                                "chunks_failed": len(failed_chunks)}
+        if failed_chunks:
+            meta["failed_chunks"] = failed_chunks[:20]
         return DocumentExtraction(
             doc_id=doc_id,
             source_path=source_path,
             mentions=all_mentions,
             relationships=all_rels,
             timeline=all_timeline,
-            meta={"backend": self.name, "n_chunks": len(foundation_results)},
+            meta=meta,
         )

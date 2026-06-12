@@ -11,7 +11,7 @@ from config import Config
 from core.schema import EntityMention, Relationship, TimelineEvent
 
 from .api_backend import _map_extraction, _parse_enrichment, _parse_merges
-from .base import IntelligenceBackend
+from .base import BackendUnavailable, IntelligenceBackend
 from .json_repair import repair_json
 from .prompts import (
     ENRICHMENT_SYSTEM,
@@ -32,10 +32,15 @@ class OllamaBackend(IntelligenceBackend):
 
     name = "ollama"
 
+    # Abort after this many consecutive failed LLM calls: a downed server would
+    # otherwise produce a silently degraded run (mentions but zero relations).
+    _MAX_CONSECUTIVE_FAILURES = 5
+
     def __init__(self, config: Config, domain=None) -> None:
         super().__init__(config, domain=domain)
         self.cfg = config.intelligence.ollama
         self._endpoint = self.cfg.host.rstrip("/") + "/api/chat"
+        self._consecutive_failures = 0
         self._verify_server()
 
     def _verify_server(self) -> None:
@@ -93,17 +98,36 @@ class OllamaBackend(IntelligenceBackend):
         prompt = build_extraction_prompt(chunk_text, candidates, self.label_types,
                                          relation_types=self.relation_types or None,
                                          author_name=author_name)
+        import time
+        t0 = time.monotonic()
         try:
             raw = self._complete(self.extraction_system, prompt)
+            self._consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001
+            self._consecutive_failures += 1
             logger.warning("Ollama call failed for chunk %s: %s", chunk_id, exc)
+            if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                raise BackendUnavailable(
+                    f"{self._consecutive_failures} consecutive Ollama failures - "
+                    f"server at {self.cfg.host} looks down. Aborting instead of "
+                    "writing an extraction checkpoint with no relationships. "
+                    "Restart ollama and re-run with --resume."
+                ) from exc
+            self._chunk_failed = True
             return list(candidates), [], []
         obj = repair_json(raw)
         if obj is None:
+            self._chunk_failed = True
             return list(candidates), [], []
         data = coerce_extraction(obj)
-        return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,
-                               *self._date_vocab, chunk_text=chunk_text)
+        mentions, rels, timeline = _map_extraction(
+            data, candidates, chunk_id, doc_id, self.label_types,
+            *self._date_vocab, chunk_text=chunk_text)
+        # Heartbeat: chunks take minutes each and the doc-level progress bar
+        # sits still for a whole chapter - show that work is happening.
+        logger.info("chunk %s: %d relationships, %d mentions (%.0fs)",
+                    chunk_id, len(rels), len(mentions), time.monotonic() - t0)
+        return mentions, rels, timeline
 
     def review(self, entities_summary: str, edges_summary: str) -> dict[str, Any] | None:
         system, user = build_quality_review_prompt(entities_summary, edges_summary)

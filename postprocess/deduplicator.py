@@ -93,6 +93,12 @@ class Deduplicator:
         # Key aliases by the same normalization used at lookup time so keys
         # containing punctuation/parentheses still match (e.g. "SS-Nr.").
         self.aliases = {normalize_name(k): v for k, v in (domain_aliases or {}).items()}
+        # Demonyms fold into their place node ("American" -> "United States").
+        # Domain aliases take precedence over the built-in table.
+        if getattr(config, "fold_demonyms", True):
+            from core.demonyms import DEMONYM_TO_PLACE
+            for k, v in DEMONYM_TO_PLACE.items():
+                self.aliases.setdefault(normalize_name(k), v)
 
     # Blocking rules
     def _blocked(self, a: Entity, b: Entity) -> bool:

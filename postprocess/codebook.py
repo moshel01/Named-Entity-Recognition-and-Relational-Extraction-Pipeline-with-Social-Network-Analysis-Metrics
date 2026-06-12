@@ -173,7 +173,10 @@ def _write(run_dir, tables, config, domain, model, Workbook, Font, Alignment):
          "and the evidence tiers (see those sheets) to choose your network."),
         ("Multi-view files",
          "network.gexf = full graph; graph_interaction/affiliation/discourse.gexf "
-         "= single-layer views; network_dynamic.gexf adds the time axis."),
+         "= single-layer views."
+         # Dynamic graph only exists when the corpus yielded dated events.
+         + (" network_dynamic.gexf adds the time axis."
+            if (Path(run_dir) / "network_dynamic.gexf").exists() else "")),
     ]
     sheet("Overview", ["Item", "Description"], overview, [24, 110])
 

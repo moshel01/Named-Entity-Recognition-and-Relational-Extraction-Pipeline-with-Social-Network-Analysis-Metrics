@@ -50,7 +50,7 @@ class CoreferenceResolver:
         self, text: str, doc_id: str, chunk_id: str, offset: int, narrator_name: str
     ) -> list[EntityMention]:
         """Emit narrator mentions at first-person pronoun spans in ``text``."""
-        if not (self.enabled and self.narrator_resolution):
+        if not (self.enabled and self.narrator_resolution and narrator_name):
             return []
         mentions: list[EntityMention] = []
         for m in self._first_person_re.finditer(text):
@@ -80,11 +80,63 @@ class CoreferenceResolver:
             from fastcoref import FCoref
             dev = self.device if self.device != "auto" else "cpu"
             self._fcoref = FCoref(model_name_or_path=self.model_name, device=dev)
+            # transformers 5.x breaks fastcoref at predict time, not load time
+            # (all_tied_weights_keys API change) - probe with a tiny input now
+            # so we fall back once instead of failing on every chunk.
+            self._fcoref.predict(texts=["He met Tom."])
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "fastcoref unavailable (%s); pronoun resolution disabled.", exc
+                "fastcoref unavailable (%s); falling back to the heuristic "
+                "pronoun resolver.", exc
             )
+            self._fcoref = None
             self._fcoref_failed = True
+
+    # Third-person singular subject pronouns for the heuristic resolver.
+    _HEURISTIC_PRONOUNS = re.compile(
+        r"\b(he|she|him|his|her|er|ihn|ihm|sein|seine)\b", re.IGNORECASE)
+    _HEURISTIC_WINDOW = 250        # max chars back to the antecedent
+    _HEURISTIC_CONFIDENCE = 0.4
+
+    def heuristic_pronoun_mentions(
+        self, text: str, mentions: list[EntityMention], doc_id: str,
+        chunk_id: str, offset: int,
+    ) -> list[EntityMention]:
+        """Nearest-antecedent fallback when no neural coref is available.
+
+        A third-person pronoun resolves to the single PERSON mention that
+        starts within the preceding window; two or more candidates = ambiguous
+        = skip. Conservative by design: tagged coref_heuristic, low confidence.
+        """
+        persons = sorted(
+            ((m.start_char - offset, m.end_char - offset, m)
+             for m in mentions if m.label == "PERSON"),
+            key=lambda x: x[0],
+        )
+        if not persons:
+            return []
+        extra: list[EntityMention] = []
+        for pm in self._HEURISTIC_PRONOUNS.finditer(text):
+            window_start = pm.start() - self._HEURISTIC_WINDOW
+            cands = [m for s, e, m in persons if window_start <= s and e <= pm.start()]
+            uniq = {m.text.strip().lower() for m in cands}
+            if len(uniq) != 1:
+                continue
+            identity = cands[-1]
+            extra.append(
+                EntityMention(
+                    text=identity.text,
+                    label="PERSON",
+                    start_char=offset + pm.start(),
+                    end_char=offset + pm.end(),
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    confidence=self._HEURISTIC_CONFIDENCE,
+                    sources=["coref_heuristic"],
+                    attributes={"resolved_from": pm.group(0).lower()},
+                )
+            )
+        return extra
 
     def pronoun_mentions(
         self, text: str, mentions: list[EntityMention], doc_id: str,
@@ -95,7 +147,8 @@ class CoreferenceResolver:
             return []
         self._ensure_fcoref()
         if self._fcoref is None:
-            return []
+            return self.heuristic_pronoun_mentions(text, mentions, doc_id,
+                                                   chunk_id, offset)
         try:
             preds = self._fcoref.predict(texts=[text])
             clusters = preds[0].get_clusters(as_strings=False)

@@ -12,6 +12,32 @@ from core.schema import DocumentExtraction
 logger = logging.getLogger(__name__)
 
 
+def _failure_score(rec: DocumentExtraction) -> int:
+    """0 = clean, 1 = degraded, 2 = full failure artifact.
+
+    Backends record n_chunks/chunks_failed in meta. A failed LLM chunk still
+    passes foundation mentions through, so 'has mentions' proves nothing -
+    only the meta accounting separates a failed doc from an empty one.
+
+    Legacy records (no accounting): empty = full failure; mentions with zero
+    relationships = the known degraded-LLM signature, ranked below a record
+    that did produce relationships but still good enough to count as done."""
+    meta = rec.meta or {}
+    n, failed = meta.get("n_chunks"), meta.get("chunks_failed")
+    if isinstance(n, int) and isinstance(failed, int) and n > 0:
+        return 2 if failed >= n else (1 if failed else 0)
+    if not rec.mentions and not rec.relationships:
+        return 2
+    if not rec.relationships:
+        # Single-chunk LLM doc with mentions only: the one chunk failed, so
+        # nothing is lost by retrying. python_only emits no relationships for
+        # some docs legitimately - never treat those as failures.
+        if meta.get("n_chunks") == 1 and meta.get("backend") != "python_only":
+            return 2
+        return 1
+    return 0
+
+
 class CheckpointManager:
     """Append-only JSONL checkpoint with resume support."""
 
@@ -30,11 +56,18 @@ class CheckpointManager:
     def _load_done(self) -> None:
         if not self.path.exists():
             return
-        good_lines = 0
+        failed = 0
         for rec in self._iter_records(skip_bad=True):
+            # Full failures stay out of the done set so --resume retries them.
+            # Partial failures count as done: the good chunks are not redone.
+            if _failure_score(rec) >= 2:
+                failed += 1
+                continue
             self._done.add(rec.doc_id)
-            good_lines += 1
-        logger.info("Checkpoint: %d completed documents on disk (use --resume to skip them).", good_lines)
+        logger.info("Checkpoint: %d completed documents on disk (use --resume to skip them).",
+                    len(self._done))
+        if failed:
+            logger.info("Checkpoint: %d failed-extraction entries will be retried on --resume.", failed)
 
     def _iter_records(self, skip_bad: bool = True) -> Iterator[DocumentExtraction]:
         with self.path.open("r", encoding="utf-8") as fh:
@@ -76,11 +109,20 @@ class CheckpointManager:
 
     # Load all
     def load_all(self) -> list[DocumentExtraction]:
-        """Return all checkpointed extractions (deduplicated by doc_id, last wins)."""
+        """Return all checkpointed extractions, deduplicated by doc_id.
+
+        Cleanest record wins, last among equals: a re-run that hit an API
+        error mid-doc appends a degraded extraction, which must not shadow a
+        clean earlier pass. A failure artifact survives only when the doc
+        never produced anything better.
+        """
         if not self.path.exists():
             return []
         latest: dict[str, DocumentExtraction] = {}
         for rec in self._iter_records(skip_bad=True):
+            prev = latest.get(rec.doc_id)
+            if prev is not None and _failure_score(rec) > _failure_score(prev):
+                continue
             latest[rec.doc_id] = rec
         return list(latest.values())
 

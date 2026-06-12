@@ -155,7 +155,7 @@ def build_config(
         "coreference": {"enabled": False, "narrator_resolution": False,
                         "pronoun_resolution": False},
         "intelligence": {
-            "ollama": {"model": ollama_model},
+            "ollama": {"model": ollama_model, "request_timeout": 600},
             "python_only": {"cooccurrence_window": "sentence",
                             "min_relationship_confidence": 0.30},
         },

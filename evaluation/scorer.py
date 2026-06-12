@@ -207,6 +207,19 @@ def score_relations(
     tp = len(pred_set & gold_set)
     prf = PRF(tp=tp, fp=len(pred_set - gold_set), fn=len(gold_set - pred_set))
 
+    # Per-label breakdown (typed scoring only): shows which relation labels
+    # actually land, not just the aggregate. Sorted by gold support.
+    per_type: dict[str, dict] = {}
+    if type_sensitive:
+        labels = {t for _, t in pred_set} | {t for _, t in gold_set}
+        rows = []
+        for t in labels:
+            ps = {k for k in pred_set if k[1] == t}
+            gs = {k for k in gold_set if k[1] == t}
+            rows.append((t, PRF(tp=len(ps & gs), fp=len(ps - gs), fn=len(gs - ps))))
+        rows.sort(key=lambda r: (-(r[1].tp + r[1].fn), r[0]))
+        per_type = {t: p.as_dict() for t, p in rows}
+
     def readable(eid: str) -> str:
         """Resolve an internal endpoint id back to a display name."""
         if eid.startswith("g") and eid[1:].isdigit():
@@ -219,7 +232,7 @@ def score_relations(
             out.append({"a": readable(pair[0]), "b": readable(pair[1]), "type": t})
         return out
 
-    return {"overall": prf.as_dict(),
+    return {"overall": prf.as_dict(), "per_type": per_type,
             "false_positives": fmt(pred_set - gold_set),
             "false_negatives": fmt(gold_set - pred_set),
             "n_gold": len(gold_set), "n_pred": len(pred_set)}

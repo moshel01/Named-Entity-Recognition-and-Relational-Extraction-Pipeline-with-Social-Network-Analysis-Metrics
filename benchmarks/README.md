@@ -10,6 +10,8 @@ harness reports entity and relation P/R/F1.
 |---------|--------|--------|
 | **Re-DocRED** | `tonytan48/Re-DocRED` (HF) | ✅ auto-downloads, document-level |
 | **DWIE** | `DFKI-SLT/DWIE` (HF) | ✅ auto-downloads, document-level |
+| **CLEF HIPE-2022** | `hipe-eval/HIPE-2022-data` (GitHub) | ✅ auto-downloads; German historical newspapers, **NER only** (no relation gold). Uses `de_core_news_lg` + `gliner2-multi` automatically. Closest public proxy for the Abel corpus. |
+| **DialogRE** | `nlpdata/dialogre` (GitHub) | ✅ auto-downloads; interpersonal relations in dialogue. "Speaker N" slots get deterministic per-dialogue names ("Alan Abbott") in text and gold, and every speaker counts as a gold PERSON (gold pairs alone are non-exhaustive). Pair with `--constrain-relations`. |
 | **ACE 2005** | LDC2006T06 | ⚠️ license required; not on HF - bring local JSON |
 | **TACRED / TAC-KBP** | LDC2018T24 | ⚠️ license required; bring local JSON, sentence-level |
 

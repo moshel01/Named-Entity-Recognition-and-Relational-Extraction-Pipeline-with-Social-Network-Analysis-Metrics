@@ -17,7 +17,9 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # value terminators (close brackets, a string close, a number, or the literal
 # words true/false/null) so individual letters inside strings are never matched.
 _MISSING_COMMA_RE = re.compile(
-    r'(["}\]\d]|\btrue\b|\bfalse\b|\bnull\b)\s*\n?\s*(["{\[])'
+    # (?<!\\) so an escaped quote (`\""`) is never treated as a value
+    # terminator - inserting a comma there manufactures `\",",` garbage.
+    r'((?<!\\)["}\]\d]|\btrue\b|\bfalse\b|\bnull\b)\s*\n?\s*(["{\[])'
 )
 
 
@@ -32,6 +34,133 @@ def _extract_json_blob(text: str) -> str:
     if starts and ends:
         return text[starts[0]: ends[-1] + 1]
     return text.strip()
+
+
+_DANGLING_KEY_RE = re.compile(r',?\s*"[^"\n]*"?\s*:?\s*$')
+# Content beginning/ending with a straight quote doubles up against the JSON
+# delimiter (`: ""Now go on!" ..."` / `...he said.""`). Escape the inner one.
+# Lookarounds keep legitimate empty strings (`: "",`) untouched.
+_DOUBLED_OPEN_RE = re.compile(r'(:\s*)""(?=[^\s,}\]])')
+_DOUBLED_CLOSE_RE = re.compile(r'(?<=[^\s:,{\[\\])""(\s*[,}\]\n])')
+# Python-style literals in value position ("directed": False).
+_PY_LITERALS = [(re.compile(r"(:\s*)True\b"), r"\1true"),
+                (re.compile(r"(:\s*)False\b"), r"\1false"),
+                (re.compile(r"(:\s*)None\b"), r"\1null")]
+# Unquoted bare-word value ("type": enemy,). Quotes it; skips JSON keywords.
+_BARE_VALUE_RE = re.compile(
+    r'(:\s*)(?!true\b|false\b|null\b)([A-Za-z_][A-Za-z0-9_\- ]*?)(\s*[,}\]])')
+# Model commentary between a string close and the delimiter:
+# `"...house arrest" (implied residence),`. Drop the parenthetical.
+_PAREN_ANNOTATION_RE = re.compile(r'"\s*\([^()"\n]*\)(\s*[,}\]])')
+
+
+def _fix_literal_values(text: str) -> str:
+    for pat, rep in _PY_LITERALS:
+        text = pat.sub(rep, text)
+    return _BARE_VALUE_RE.sub(r'\1"\2"\3', text)
+
+
+def _fix_escaped_delimiters(text: str) -> str:
+    """Fix strings delimited by escaped quotes: `"evidence": \\"text...\\",`.
+
+    qwen emits the value's surrounding quotes pre-escaped (outside any string,
+    where `\\` is invalid JSON). Outside a string, `\\"` becomes an opening
+    quote; inside such a string, a `\\"` standing directly before a value
+    terminator (`,` `}` `]` or end of line) becomes the closing quote.
+    """
+    out: list[str] = []
+    in_str = False
+    opened_by_escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if not in_str:
+            if ch == "\\" and nxt == '"':
+                out.append('"')
+                in_str = True
+                opened_by_escape = True
+                i += 2
+                continue
+            if ch == '"':
+                in_str = True
+                opened_by_escape = False
+        else:
+            if ch == "\\" and nxt == '"':
+                j = i + 2
+                while j < n and text[j] in " \t":
+                    j += 1
+                follow = text[j] if j < n else ""
+                # `\"` before a bare quote is content - the bare quote closes
+                # the string naturally (`...caves.\""` = quoted dialogue).
+                if follow == '"':
+                    out.append('\\"')
+                    i += 2
+                    continue
+                # `\"` before a colon is a mis-escaped KEY closer
+                # (`"evidence\":`) - keys never contain escaped quotes.
+                # Before , } ] or end of line it is a mis-escaped VALUE closer,
+                # but only when the string was opened by `\"` too; a normally
+                # opened string can legitimately contain `\",` in content.
+                if follow == ":" or (opened_by_escape and
+                                     (follow in ",}]\n" or follow == "")):
+                    out.append('"')
+                    in_str = False
+                    opened_by_escape = False
+                    i += 2
+                    continue
+                out.append('\\"')
+                i += 2
+                continue
+            if ch == "\\":
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+                opened_by_escape = False
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _escape_inner_quotes(text: str) -> str:
+    """Escape unescaped quotes inside string values (`"He said "no" here"`).
+
+    State machine: inside a string, a quote whose next non-space char is not a
+    JSON delimiter cannot be the closing quote - escape it.
+    """
+    out: list[str] = []
+    in_str = False
+    escape = False
+    n = len(text)
+    for i, ch in enumerate(text):
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                out.append(ch)
+                continue
+            j = i + 1
+            while j < n and text[j] in " \t":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in ",:}]\n" or nxt == "":
+                in_str = False
+                out.append(ch)
+            else:
+                out.append('\\"')        # content quote, not a terminator
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _balance_and_close(text: str) -> str:
@@ -121,6 +250,14 @@ def repair_json(text: str) -> Optional[Any]:
     except json.JSONDecodeError:
         pass
 
+    # Level 2.5: doubled quotes where content starts/ends with a quote char.
+    # Must run before the missing-comma level, which would corrupt `""` pairs.
+    fixed = _DOUBLED_CLOSE_RE.sub(r'\\""\1', _DOUBLED_OPEN_RE.sub(r'\1"\\"', fixed))
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
     # Level 3: insert missing commas.
     fixed3 = _MISSING_COMMA_RE.sub(r"\1,\2", fixed)
     try:
@@ -135,10 +272,71 @@ def repair_json(text: str) -> Optional[Any]:
     except json.JSONDecodeError:
         pass
 
-    # Level 5: truncate + close.
-    fixed5 = _balance_and_close(fixed4)
+    # Level 4.5: Python literals (False/None) and unquoted bare-word values.
+    # Not string-aware, so keep fixed4 pristine for the later fallback levels.
+    fixed45 = _fix_literal_values(fixed4)
+    try:
+        return json.loads(fixed45)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 4.6: escaped-quote string delimiters (`: \"text\",`).
+    fixed46 = _fix_escaped_delimiters(fixed4)
+    try:
+        return json.loads(fixed46)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 4.7: parenthetical annotation after a string close. Must run
+    # before level 5, whose state machine would swallow the close quote.
+    fixed47 = _PAREN_ANNOTATION_RE.sub(r'"\1', fixed4)
+    try:
+        return json.loads(fixed47)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 5: escape unescaped quotes inside string values.
+    fixed5 = _escape_inner_quotes(fixed4)
     try:
         return json.loads(fixed5)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 6: truncation - close an open string and any open brackets.
+    fixed6 = _balance_and_close(fixed5)
+    try:
+        return json.loads(fixed6)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 7: drop a dangling trailing key first, then close.
+    fixed7 = _balance_and_close(_DANGLING_KEY_RE.sub("", fixed5))
+    try:
+        return json.loads(fixed7)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 8: as 7 but without inner-quote escaping (in case it misfired).
+    fixed8 = _balance_and_close(_DANGLING_KEY_RE.sub("", fixed4))
+    try:
+        return json.loads(fixed8)
     except json.JSONDecodeError as exc:
-        logger.warning("JSON repair exhausted all levels: %s", exc)
+        _dump_failure(text, exc)
         return None
+
+
+def _dump_failure(raw: str, exc: Exception, cap: int = 50) -> None:
+    """Save an unrepairable LLM response for offline analysis (bounded)."""
+    try:
+        from pathlib import Path
+        import hashlib
+        d = Path("scratch/json_failures")
+        d.mkdir(parents=True, exist_ok=True)
+        existing = list(d.glob("*.txt"))
+        name = hashlib.md5(raw.encode("utf-8", "replace")).hexdigest()[:12] + ".txt"
+        if len(existing) < cap and not (d / name).exists():
+            (d / name).write_text(raw, encoding="utf-8")
+        logger.warning("JSON repair exhausted all levels (%s); raw saved to %s",
+                       exc, d / name)
+    except Exception:  # noqa: BLE001 - diagnostics must never break extraction
+        logger.warning("JSON repair exhausted all levels: %s", exc)

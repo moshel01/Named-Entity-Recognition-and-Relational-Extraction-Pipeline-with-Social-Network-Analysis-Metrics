@@ -7,15 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import ace2005, common, dwie, redocred, tacred
+from . import ace2005, common, dialogre, dwie, hipe, redocred, tacred
 
 ADAPTERS = {
     "redocred": redocred,
     "dwie": dwie,
     "ace2005": ace2005,
     "tacred": tacred,
+    "hipe": hipe,
+    "dialogre": dialogre,
 }
-DEFAULT_SPLIT = {"redocred": "test", "dwie": "train", "ace2005": "test", "tacred": "test"}
+DEFAULT_SPLIT = {"redocred": "test", "dwie": "train", "ace2005": "test",
+                 "tacred": "test", "hipe": "dev", "dialogre": "dev"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,8 +30,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workdir", default="data/bench", help="Where to write inputs/output.")
     ap.add_argument("--mode", default="python_only",
                     choices=["python_only", "api", "ollama"])
-    ap.add_argument("--spacy-model", default="en_core_web_trf")
-    ap.add_argument("--gliner-model", default="fastino/gliner2-large-v1")
+    ap.add_argument("--spacy-model", default="",
+                    help="Default: adapter's preferred model (German for hipe), "
+                         "else en_core_web_trf.")
+    ap.add_argument("--gliner-model", default="",
+                    help="Default: adapter's preferred model, else "
+                         "fastino/gliner2-large-v1.")
     ap.add_argument("--ollama-model", default="qwen3:8b")
     ap.add_argument("--types", default="",
                     help="Comma-separated target types (default per dataset), "
@@ -50,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
 
     adapter = ADAPTERS[args.dataset]
     split = args.split or DEFAULT_SPLIT[args.dataset]
+    spacy_model = (args.spacy_model
+                   or getattr(adapter, "DEFAULT_SPACY_MODEL", "en_core_web_trf"))
+    gliner_model = (args.gliner_model
+                    or getattr(adapter, "DEFAULT_GLINER_MODEL", "fastino/gliner2-large-v1"))
 
     # 1. Load + convert.
     print(f"Loading {args.dataset} (split={split}, limit={args.limit}) ...")
@@ -99,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     common.build_config(
         run_name=run_name, input_dir=input_dir, output_dir=output_dir,
         gliner_labels=gliner_labels, label_map=label_map,
-        mode=args.mode, spacy_model=args.spacy_model, gliner_model=args.gliner_model,
+        mode=args.mode, spacy_model=spacy_model, gliner_model=gliner_model,
         config_path=config_path, ollama_model=args.ollama_model,
         ontology_relations=ontology_relations,
         min_entity_confidence=args.min_entity_confidence,

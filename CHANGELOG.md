@@ -4,6 +4,184 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## qwen3.5:9b constrained benchmarks; checkpoint failure accounting; breaker was dead code
+
+Re-DocRED + DialogRE re-runs (qwen3.5:9b, --constrain-relations) reviewed.
+Headline numbers, conservative tier:
+
+- **Re-DocRED**: typed relation F1 0.021 -> 0.161 (tp 8 -> 62) from the
+  P-code mapping + constrained ontology; untyped 0.196 -> 0.255. Entities
+  flat at 0.822, as expected (NER path untouched).
+- **DialogRE first honest scores**: entity F1 0.831, untyped relations 0.203,
+  typed 0.058. Typed is weak for a reason the new per-label table makes
+  visible: qwen calls everyone `friends` (44 fp) and never emits
+  `positive_impression`, the most common gold label.
+- **Scorer now reports per-label relation P/R/F1** (`per_type` under
+  relations_typed, sorted by gold support). Re-DocRED's typed score turns out
+  to be carried by geo/admin labels; `member_of` is P 0.06. Also visible:
+  `has_part`/`part_of` inverses match untyped but miss typed - directionality,
+  not detection.
+- **DialogRE gold now counts every speaker as a PERSON entity.** Gold pairs
+  only cover relation arguments, so the extractor was charged fp for
+  correctly finding the other speakers we ourselves named into the text.
+  Entity precision 0.545 -> 0.765 with no extraction change.
+- **JSON repair level 4.7**: parenthetical commentary after a closed string
+  (`"...house arrest" (implied residence),`). The shape cost one Re-DocRED
+  doc its whole extraction twice (temperature 0 = deterministic failure,
+  one md5-deduped dump). All 4 real dumps + 14-case suite recover.
+- **Checkpoint failure accounting.** Backends now record
+  n_chunks/chunks_failed in meta; a failed LLM chunk passes foundation
+  mentions through, so "has mentions" never proved anything. Cleanest record
+  wins on duplicate doc_ids (an API-error re-run had stomped a good pass:
+  4 relationships recovered on re-analyze), full failures are retried by
+  --resume instead of being skipped forever, and the "N completed documents"
+  log counts docs, not lines.
+- **The circuit breaker was dead code.** extract_document's per-chunk
+  catch-all swallowed the RuntimeError, so a downed server would have
+  degraded every chunk with a warning instead of aborting. Breaker now raises
+  BackendUnavailable, which the assembly loop re-raises. Never fired in a
+  real run only because the server stayed up.
+- Codebook: the Multi-view line only mentions network_dynamic.gexf when the
+  run produced one (dialogue corpora have no dated events).
+- benchmarks/README DialogRE row updated (synthetic speaker names + speaker
+  gold); AGENTS.md layout line now lists all six adapters.
+
+Re-run cost after the fixes: --resume retries only the failed docs (1 per
+dataset), not the whole benchmark.
+
+---
+
+## Five-run review: dialogre identity bug, doubled-quote repair, coref verdict
+
+Reviewed runs 1-5 against the archived 06-10 baselines
+(scratch/baseline_reports_2026-06-10).
+
+- **Re-DocRED run #1 never executed** - run_meta.json shows the on-disk output
+  is still the 06-10 run (started 18:02 that day). Caught purely by the
+  provenance file; the "new" report was the old one. Re-run needed.
+- **DWIE re-ran byte-identical** to 06-10. Expected, not a bug: temperature 0
+  + unchanged prompts = deterministic model output; the span/dedup fixes
+  didn't touch any DWIE chunk that mattered.
+- **DialogRE corpus-identity bug** (found via the 30-dialogue collapse,
+  F1 0.40 -> 0.14): 96% of gold relations involve a "Speaker N" slot and 44
+  of 89 pairs collided across dialogues - corpus-level scoring merged
+  different people who share the literal slot name. Adapter now assigns
+  deterministic per-dialogue names ("Alan Abbott": given name by slot,
+  surname by dialogue) in BOTH the transcript text and the gold.
+  Cross-dialogue collisions now 0. Old dialogre scores are void; re-run.
+- **Hobbit constrained run validates the JSON repair overhaul in production**:
+  1 repair failure across 19 chapters (previous runs: 5+), conservative
+  untyped relation recall 0.250 -> 0.339, and the first nonzero TYPED F1
+  against the mentor's 8 labels (0.084, 23 tp). The one new failure was a
+  third delimiter shape - content starting/ending with a straight quote
+  doubles against the JSON delimiter (`: ""Now go on!" ...`) - fixed with
+  pre-missing-comma doubled-quote escaping; all 3 real dumps + 11-case suite
+  green, legit empty strings untouched.
+- **Coref heuristic verdict: does not pay for fiction.** The load probe
+  correctly catches the fastcoref/transformers-5.x break and falls back; the
+  heuristic emitted 2650 mentions on the Hobbit but moved recall exactly 0
+  and cost conservative relation precision (0.116 -> 0.082): it re-emits
+  already-found entities, so it adds edges, never nodes. Keep
+  pronoun_resolution default-off; narrator resolution (the Abel path) is
+  unaffected and stays on.
+- HIPE at 20 docs: entity F1 0.405 (0.419 at 8) - stable German-historical
+  baseline. DWIE calibration matches redocred's pattern (top entity bin 0.82
+  precise, ECE 0.22; edge confidence still junk) - the "weight by
+  corroboration, not confidence" rule holds across datasets.
+- codebook.xlsx + run_meta.json confirmed present and correct in all five new
+  run dirs (constrained codebook classifies the mentor labels into tie
+  classes correctly: geo->biographical, friend/enemy/kin->interaction).
+- Docs: INSTRUCTIONS output table now lists codebook.xlsx / run_meta.json /
+  graph_report.json; benchmark + calibration commands added. AGENTS.md and
+  CLAUDE.md carry the comment-style rule (terse, pragmatic, owner's voice).
+
+---
+
+## Constrained Hobbit run triage: timeouts + JSON repair levels
+
+The 19-chapter constrained run surfaced two robustness gaps (~7 of ~60 chunks
+silently lost their relationships):
+
+- **request_timeout 600 in bench/book configs** (was the 180 default): long
+  8k-char chunks on qwen3.5:9b hit read timeouts and a 500 under load. The
+  hardware notes already said 600 for big models; the generated configs now
+  comply.
+- **JSON repair overhaul** (`json_repair.py`), driven by the real failing
+  payloads (identical chunks fail identically at temperature 0; unrepairable
+  responses now dump to scratch/json_failures/, bounded 50). The actual
+  failure shape: qwen3.5 emits string delimiters PRE-ESCAPED -
+  `"evidence": \"text\",` and `"evidence\":` - invalid JSON at value/key
+  position. A state-machine fixer distinguishes mis-escaped delimiters from
+  legitimate escaped quotes in content (`\"` before a bare quote is content;
+  before `:` it closes a key; before `,}]`/EOL it closes only strings that
+  were opened escaped). Second bug: the missing-comma repair level treated
+  the quote in `\""` as a value terminator and inserted a comma inside the
+  string - negative lookbehind added. Further new levels: Python literals
+  ("directed": False), unquoted bare enum values ("type": associate),
+  inner-quote escaping, dangling-key trim before bracket closing. Both real
+  dumps now fully recover (12 + 5 relationships with evidence); 12-case
+  regression suite green, valid-JSON and legit-escape guards included.
+- Run speed itself was NOT a bug: ~7-9 min/chapter is this card's rate for
+  multi-chunk chapters (matches the first overnight run).
+
+---
+
+## Full-module audit + HIPE/DialogRE benchmarks + coref/linking/calibration
+
+Line-level audit of every module in core/, intelligence/, postprocess/,
+checkpoint/, benchmarks/, evaluation/. Two real bugs found and fixed; four new
+evaluation capabilities added.
+
+- **Coref gating bug** (`core/foundation.py`): `coref.resolve` only ran when a
+  narrator was detected, so pronoun_resolution could never fire on third-person
+  text (books, news) even when enabled. Now runs whenever coref is on;
+  narrator emission guards itself against an empty narrator name.
+  `book_bench --coref` added for on/off A/B runs.
+- **Ollama circuit breaker** (`ollama_backend`): a downed server produced a
+  "successful" run with mentions but zero relationships (every call failed
+  soft, discovered via a DialogRE run against a dead server). After 5
+  consecutive call failures the backend now aborts with a clear message;
+  --resume continues after the server is back.
+- **CLEF HIPE-2022 adapter** (`benchmarks/hipe.py`): German historical
+  newspaper NER (hipe2020 subset, auto-download + cache), the closest public
+  proxy for Abel-era German. Adapters can now declare DEFAULT_SPACY_MODEL /
+  DEFAULT_GLINER_MODEL (HIPE uses de_core_news_lg + gliner2-multi); the
+  runner picks those unless overridden. Baseline measured (8 docs, dev,
+  python_only foundation): entity F1 0.42 typed / 0.43 agnostic - OCR-era
+  text is hard; gold itself carries OCR fragmentation. Track this number.
+- **DialogRE adapter** (`benchmarks/dialogre.py`): interpersonal-relation
+  gold from dialogue (friends/siblings/boss), auto-download + cache.
+  Speaker-slot entities kept literal ("Speaker 1"); STRING/VALUE args and
+  unanswerable pairs dropped. Works with --constrain-relations (12 labels).
+- **Demonym handling** (`core/demonyms.py`, spacy_engine, deduplicator):
+  ~130-entry demonym->place table (EN + German incl. Abel-era: prussian,
+  bavarian, soviet...). spaCy NORP mentions matching the table are relabeled
+  LOCATION with `demonym_of`; dedup folds them into the place node as aliases
+  (`dedup.fold_demonyms`, default on, domain aliases take precedence).
+  Benchmark-neutral on existing checkpoints (+-0.002); graph-level it
+  consolidates "American" into "United States" instead of duplicating actors.
+- **Confidence calibration report** (`evaluation/calibration.py`): reliability
+  bins + ECE for entities and edges vs gold. Measured on redocred/qwen3:8b:
+  entities are usable (0.9 bin -> 90.4% precise, ECE 0.10); edge confidences
+  are inflated and near-meaningless (0.9 bin -> 26.7%, ECE 0.67). Use
+  corroboration (Weight = distinct docs), not confidence, to weight edges.
+- **Entity linking evaluated** (existing `postprocess/wikidata.py`, kept
+  off by default): top-40 redocred entities -> 10 linked, effectively 10/10
+  correct (one hit is Wikidata's rename of the same object). High precision,
+  conservative coverage; enable per-run via `linking.enabled` when online.
+- **fastcoref is dead under transformers 5.x** (all_tied_weights_keys API
+  change at predict time; GLiNER2 needs 5.x, so no downgrade). Added a load
+  probe so the failure surfaces once, plus a conservative heuristic fallback
+  (`coreference.heuristic_pronoun_mentions`): a third-person pronoun resolves
+  to the single PERSON mention in the preceding 250 chars; any ambiguity =
+  skip; tagged coref_heuristic, confidence 0.4. EN+DE pronoun sets.
+- **DialogRE measured** (qwen3.5:9b, constrained, 10 dialogues): untyped
+  relation F1 0.40 at P 0.667, typed 0.16. Misses concentrate on ties between
+  unnamed "Speaker N" slots (dataset quirk). First-run zero was a downed
+  ollama server - that's what motivated the circuit breaker above.
+
+---
+
 ## Hobbit ollama audit: dedup kill chain fixed, span hygiene, verbatim segments
 
 Audited the hobbit_ollama (19 ch, qwen3.5:9b) output against the mentor gold.

@@ -130,6 +130,9 @@ class DedupConfig(BaseModel):
     block_family_merges: bool = True
     block_year_mismatch_events: bool = True
     block_location_substring: bool = True
+    # Fold demonyms into their place node ("American" -> "United States");
+    # see core/demonyms.py. Domain aliases override the built-in table.
+    fold_demonyms: bool = True
     # Collapse same-name entities that got different types (e.g. "Soviet Union"
     # as ORG and LOCATION) onto the dominant type.
     resolve_cross_type: bool = True

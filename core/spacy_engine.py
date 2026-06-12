@@ -113,8 +113,20 @@ class SpacyEngine:
         for ent in doc.ents:
             if ent.label_ in exclude_labels:
                 continue
+            attrs: dict = {}
             if ent.label_ in _CANONICAL_PASSTHROUGH:
                 canon = ent.label_
+            elif ent.label_ == "NORP":
+                # Known demonyms reference the place ("American" -> United
+                # States); dedup folds them into the country node via the
+                # demonym alias table. Unknown NORPs stay group-like (ORG).
+                from .demonyms import demonym_place
+                place = demonym_place(ent.text)
+                if place:
+                    canon = "LOCATION"
+                    attrs["demonym_of"] = place
+                else:
+                    canon = "ORG"
             else:
                 canon = _SPACY_LABEL_MAP.get(ent.label_)
             if canon is None:
@@ -130,6 +142,7 @@ class SpacyEngine:
                     confidence=0.60,          # spaCy gives no per-span score
                     sources=["spacy"],
                     sentence=ent.sent.text.strip() if ent.sent else "",
+                    attributes=attrs,
                 )
             )
         return mentions

@@ -133,6 +133,7 @@ class ApiBackend(IntelligenceBackend):
         obj = repair_json(raw)
         if obj is None:
             logger.warning("Unparseable LLM output for chunk %s; using candidates.", chunk_id)
+            self._chunk_failed = True
             return list(candidates), [], []
         data = coerce_extraction(obj)
         return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,

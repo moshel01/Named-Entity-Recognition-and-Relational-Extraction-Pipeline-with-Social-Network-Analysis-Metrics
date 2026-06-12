@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--constrain-relations", action="store_true",
                     help="Constrain the LLM to the gold's relation labels so "
                          "TYPED relation F1 is meaningful (ollama mode).")
+    ap.add_argument("--coref", action="store_true",
+                    help="Enable fastcoref pronoun resolution (A/B vs default off).")
     args = ap.parse_args(argv)
 
     book = Path(args.book)
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     run_name = f"{name}_{args.mode}"
     if args.constrain_relations:
         run_name += "_constr"
+    if args.coref:
+        run_name += "_coref"
 
     # Validate the gold up front so a format problem fails in seconds, not after
     # the pipeline run.
@@ -98,9 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         "mode": args.mode,
         "io": {"input_path": str(input_dir).replace("\\", "/"), "input_glob": "ch_*.txt",
                "output_dir": "./output", "encoding": "utf-8"},
-        "coreference": {"narrator_resolution": False},
+        "coreference": {"narrator_resolution": False,
+                        "pronoun_resolution": args.coref},
         "dedup": {"llm_assist": args.mode == "ollama"},
-        "intelligence": {"ollama": {"model": args.ollama_model}},
+        "intelligence": {"ollama": {"model": args.ollama_model,
+                                    "request_timeout": 600}},
         "inference": {"enable_cooccurrence_edges": True,
                       "cooccurrence_min_shared_docs": 2},
         "export": {"formats": ["csv", "json"], "gephi": True, "graph_metrics": True},

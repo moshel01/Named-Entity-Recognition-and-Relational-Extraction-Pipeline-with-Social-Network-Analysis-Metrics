@@ -125,6 +125,7 @@ class LangExtractBackend(IntelligenceBackend):
             result = self._extract(chunk_text)
         except Exception as exc:  # noqa: BLE001
             logger.warning("LangExtract failed for chunk %s: %s", chunk_id, exc)
+            self._chunk_failed = True
             return list(candidates), [], []
 
         # Foundation candidates are always kept; LangExtract adds grounded

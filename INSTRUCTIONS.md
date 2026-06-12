@@ -107,6 +107,8 @@ documents ─► FOUNDATION (always): spaCy + GLiNER + coref + dates
 - A **domain** (e.g. `nazi_era`) plugs in aliases, labels, patterns, prompts,
   and inference rules without touching core code.
 - Everything is **checkpointed** - re-run with `--resume` after an interruption.
+  Documents whose extraction failed outright (timeout, unrepairable LLM output)
+  are retried on `--resume`; completed ones are skipped.
 
 ---
 
@@ -276,7 +278,16 @@ python -m evaluation.evaluate --gold evaluation/gold_template.json `
 # public IE benchmark: prepares inputs+gold, runs the pipeline, scores it
 python -m benchmarks.run_benchmark --dataset redocred --limit 25 --run --eval
 python -m benchmarks.run_benchmark --dataset redocred --limit 10 --mode ollama `
-  --ollama-model qwen3:8b --run --eval
+  --ollama-model qwen3:8b --constrain-relations --run --eval
+# German historical NER (closest public proxy for the Abel corpus):
+python -m benchmarks.run_benchmark --dataset hipe --limit 20 --run --eval
+# interpersonal ties in dialogue:
+python -m benchmarks.run_benchmark --dataset dialogre --limit 30 --mode ollama `
+  --ollama-model qwen3:8b --constrain-relations --run --eval
+
+# are the confidence scores honest? reliability bins + ECE vs gold
+python -m evaluation.calibration --gold data/bench/redocred.gold.json `
+  --run-dir data/bench/redocred/output/redocred_test_ollama_constr
 ```
 
 ## Scaling up (larger test -> full corpus)
@@ -333,6 +344,9 @@ In `output/<run_name>/`:
 | `graph_affiliation.gexf` / `graph_discourse.gexf` | Two-mode and discourse layers. |
 | `entities.json` | Full entity records incl. aliases, attributes, tags. |
 | `timeline.csv` | Dated events, chronological. |
+| `codebook.xlsx` | Auto-generated SNA codebook: boundary spec, definition of every node/edge column, entity types, tie classes, the run's relation inventory with example evidence, evidence tiers. Hand this to anyone who has never seen the pipeline. |
+| `run_meta.json` | Which model/mode/config produced this run, with timestamp. |
+| `graph_report.json` | Graph-health QA + brokerage/bridge counts (when `export.graph_metrics` is on). |
 | `raw_extractions.jsonl` | Per-document extractions (provenance / re-analysis). |
 | `checkpoints/` | Resume data. |
 

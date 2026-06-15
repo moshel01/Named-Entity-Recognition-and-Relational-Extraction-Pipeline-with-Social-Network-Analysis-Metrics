@@ -9,14 +9,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from postprocess.evidence_tiers import tier_allows
+
 from .gold_schema import load_gold
 from .scorer import score_all
-
-_TIERS = {
-    "conservative": {"llm_extracted", "gliner_extracted", "rule_extracted"},
-    "moderate": {"llm_extracted", "gliner_extracted", "rule_extracted",
-                 "sna_inferred", "rule_cooccurrence"},
-}
 
 
 def _load_entities(path: Path) -> list[dict]:
@@ -30,17 +26,22 @@ def _load_edges(path: Path) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
-def _filter_edges(edges: list[dict], tier: str) -> list[dict]:
-    if tier in ("full", "all"):
-        return edges
-    allowed = _TIERS.get(tier)
-    if allowed is None:
-        return edges
+def _filter_edges(edges: list[dict], tier: str,
+                  exclude: set[str] | None = None) -> list[dict]:
+    """Edges passing the tier filter, minus any whose sources are *entirely* in
+    ``exclude``. Excluding by whole-source set (not 'any source') keeps an edge
+    the text also asserts: a 'metadata;llm_extracted' edge survives --exclude
+    metadata because llm_extracted remains. Used to measure how much of the
+    metadata-derived gold the prose recovered on its own."""
+    exclude = exclude or set()
     out = []
     for e in edges:
-        sources = set((e.get("edge_source") or "").split(";"))
-        if sources & allowed:
-            out.append(e)
+        if not tier_allows(e.get("edge_source") or "", tier):
+            continue
+        srcs = {s for s in (e.get("edge_source") or "").split(";") if s}
+        if exclude and srcs and srcs <= exclude:
+            continue
+        out.append(e)
     return out
 
 
@@ -87,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--edge-sources", default="full",
                     choices=["conservative", "moderate", "full", "all"],
                     help="Restrict predicted edges to an evidentiary tier.")
+    ap.add_argument("--exclude-edge-source", default="",
+                    help="Comma-separated edge_source values to drop (only edges "
+                         "with NO other source go). Use 'metadata' to score what "
+                         "the text recovered vs the spreadsheet-derived gold.")
     ap.add_argument("--out", help="Write the full JSON report to this path.")
     args = ap.parse_args(argv)
 
@@ -105,12 +110,14 @@ def main(argv: list[str] | None = None) -> int:
 
     gold = load_gold(args.gold)
     pred_entities = _load_entities(ent_path)
-    pred_edges = _filter_edges(_load_edges(edge_path), args.edge_sources)
+    exclude = {s.strip() for s in args.exclude_edge_source.split(",") if s.strip()}
+    pred_edges = _filter_edges(_load_edges(edge_path), args.edge_sources, exclude)
 
     report = score_all(gold, pred_entities, pred_edges)
     report["meta"] = {
         "gold": str(args.gold), "entities": str(ent_path), "edges": str(edge_path),
         "edge_tier": args.edge_sources, "n_pred_edges_after_filter": len(pred_edges),
+        "excluded_edge_sources": sorted(exclude),
         "n_gold_documents": len(gold.documents),
     }
 

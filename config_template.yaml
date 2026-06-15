@@ -73,6 +73,10 @@ coreference:
   pronoun_resolution: false        # fastcoref third-person resolution (optional)
   model: "biu-nlp/f-coref"
   device: "auto"
+  # "" = load fastcoref in-process. Or offload it to the coref microservice
+  # (services/coref_service.py) - lighter main env, isolates transformers <5.
+  # e.g. "http://127.0.0.1:8000". Unreachable falls back to in-process/heuristic.
+  service_url: ""
   max_narrator_mentions_per_chunk: 40
   languages: ["en"]                # add "de" for German first-person pronouns
 
@@ -125,6 +129,12 @@ quality:
 inference:
   enable_cooccurrence_edges: true
   cooccurrence_min_shared_docs: 2
+  # Within-document window co-occurrence: link entities mentioned within N chars
+  # of each other (doc-absolute, so it crosses chunk boundaries the LLM didn't).
+  # Standard character-network signal; the only within-letter weak tie in
+  # ollama/api mode. Co-occurrence stays full-tier only. 0 disables.
+  enable_proximity_edges: true
+  proximity_window_chars: 600
   enable_canonical_inference: false   # Domain rules add membership edges
   # Domain mandatory-membership assumption: authors_only | all | off
   mandatory_membership: "authors_only"
@@ -161,6 +171,16 @@ export:
   # (structural-hole brokerage), bridges, articulation points, + a graph-health
   # QA report (graph_report.json). Standard centrality/community: let Gephi do it.
   graph_metrics: true
+  # codebook: true                 # codebook.xlsx (variable definitions; on by default)
+  # codebook_note: ""              # corpus caveat shown in the codebook overview
+                                   # (sampling frame, known biases)
+
+# ... and under `ontology:` you can pin the meaning of confusable labels:
+# ontology:
+#   relations: [associate, friend, enemy]   # constrain the LLM to these
+#   relation_guide:                          # one-line defs shown next to them
+#     associate: "Default companionship tie. NOT friend unless affection stated."
+#     friend: "Use only when the text states friendship/affection."
 
 # Checkpointing
 checkpoint:

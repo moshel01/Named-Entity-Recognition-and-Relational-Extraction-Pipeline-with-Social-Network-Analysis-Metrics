@@ -38,7 +38,7 @@ def _concept_type(tags: list[str]) -> str | None:
     return "MISC" if raw_types else None
 
 
-def load(split: str = "train", limit: int = 0) -> list[BenchDoc]:
+def load(split: str = "train", limit: int = 0, **_) -> list[BenchDoc]:
     """Load DWIE into BenchDocs (HF version exposes a single 'train' split)."""
     from datasets import load_dataset
     ds = load_dataset(HF_ID, HF_CONFIG, split=split)

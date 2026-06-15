@@ -107,7 +107,7 @@ Outputs land in `output/<run_name>/`:
 |------|-------------|
 | `documents.csv` | Per-doc manifest: `doc_id, letter_id, author, filename` (join key to external metadata). |
 | `gephi_nodes.csv` | Nodes with `type`, `mention_count`, `doc_count`, `first_year`/`last_year`, a degree split by tie class (`deg_interaction`, `deg_affiliation`, ...), `tag_*`, `attr_*` (incl. `attr_wikidata_qid` when linking is on). Standard centralities are **not** precomputed — Gephi computes those on whichever view you load. |
-| `gephi_edges.csv` | Edges with `tie_class`, `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. |
+| `gephi_edges.csv` | Edges with `tie_class`, `connection_type` (physical/ideological/organizational/biographical), `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. |
 | `network.gexf` | Full single-file graph for Gephi / Cytoscape. |
 | `network_dynamic.gexf` | Same graph with `start` years on nodes/edges for Gephi's timeline (when datable). |
 | `graph_interaction.gexf` | **Interpersonal social network** (person↔person ties only) — the headline SNA. |
@@ -211,7 +211,8 @@ given name), events with mismatched years, and substring locations
 ### Edge origins
 
 - `extracted` - asserted in the text (LLM or dependency parse).
-- `inferred` - co-occurrence across documents.
+- `inferred` - co-occurrence: within-document window proximity (spans chunk
+  boundaries) and cross-document co-mention.
 - `canonical` - added by domain inference rules.
 
 ---
@@ -257,9 +258,9 @@ can rebuild the network at progressively looser evidentiary thresholds:
 
 | Network | Includes edge_source |
 |---------|----------------------|
-| **Conservative** | `llm_extracted`, `gliner_extracted`, `rule_extracted` (stated in text) |
-| **Moderate** | + `sna_inferred`, `rule_cooccurrence` (co-occurrence) |
-| **Full** | + `pipeline_inferred` (mandatory), `canonical_inferred` (evidence-based) |
+| **Conservative** | `llm_extracted`, `langextract_extracted`, `rule_extracted`, `metadata` (stated in text / verified record) |
+| **Moderate** | + `canonical_inferred` (membership inferred from a detected signal) |
+| **Full** | + `rule_cooccurrence`, `pipeline_inferred` (co-occurrence + mandatory-membership assumption; weakest layers) |
 
 The pipeline extracts what the documents state and never fabricates claims;
 inferred edges are labeled so they can be included or excluded explicitly.

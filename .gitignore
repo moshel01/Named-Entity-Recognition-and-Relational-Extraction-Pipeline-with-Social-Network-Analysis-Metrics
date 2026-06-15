@@ -41,6 +41,7 @@ dist/
 
 # Virtual environments
 .venv/
+.venv-coref/
 venv/
 env/
 ENV/

@@ -126,3 +126,43 @@ def _ontology() -> dict[str, list[str]]:
 
 
 RELATION_ONTOLOGY: dict[str, list[str]] = _ontology()
+
+
+# One-line definitions shown to the LLM next to the allowed labels. Contrastive
+# on the pairs qwen confuses: joined/member_of/served_in, led/commanded,
+# opposed/fought_against, participated_in/fought_in, met_with/co_occurs_with.
+# Keep them short - 27 labels share the prompt budget with the passage.
+RELATION_GUIDE: dict[str, str] = {
+    "joined": "Became a member of an org/party at a point in time (the act of joining). Prefer this over member_of when the text gives a date or describes entering.",
+    "member_of": "Ongoing membership in an org/party/group, no joining moment stated. Use joined for the act itself.",
+    "served_in": "Duty or service in a military unit or official body (not paid civilian work - that is employed_by).",
+    "employed_by": "Paid civilian work for a person or company.",
+    "led": "Headed or directed an organization or group (non-military). Use commanded for troops.",
+    "commanded": "Held military command over a unit or formation.",
+    "founded": "Created or established the organization.",
+    "joined_into": "",
+    "opposed": "Political or ideological opposition, no physical combat. Use fought_against for armed conflict.",
+    "fought_against": "Armed or physical conflict against a person, group, or force.",
+    "fought_in": "Took part in combat in a named war or battle (the event).",
+    "participated_in": "Took part in a non-combat event: rally, putsch, election, march, meeting.",
+    "supported": "Backed, endorsed, or aided - without a formal alliance (allied_with) or propaganda (propagandized_for).",
+    "allied_with": "Formal alliance or cooperation between roughly equal parties.",
+    "propagandized_for": "Produced or spread propaganda on behalf of a cause or org.",
+    "influenced_by": "This person's views were shaped by another (directional: subject is influenced).",
+    "met_with": "A specific meeting or encounter between people.",
+    "co_occurs_with": "Mentioned together with no stated relationship - the weakest tie. Use only when nothing more specific fits.",
+    "family_of": "Any kin relationship (parent, sibling, spouse, relative).",
+    "located_in": "A person or org is situated in a place.",
+    "studied_at": "Attended or was educated at a school, university, or institution.",
+    "appointed_by": "Was appointed or named to a post by someone.",
+    "promoted_to": "Advanced to a rank or office.",
+    "recruited": "Brought someone into an org or cause.",
+    "imprisoned_by": "Was jailed or detained by an authority.",
+    "expelled_from": "Was thrown out of an org, place, or country.",
+    "wounded_at": "Was injured at a place or in a battle.",
+    "subordinate_to": "Reported to or ranked under another person.",
+    "propaganda_for": "",
+}
+# Keep only labels that exist in the ontology (typo guard); drop empty stubs.
+RELATION_GUIDE = {k: v for k, v in RELATION_GUIDE.items()
+                  if v and k in RELATION_ONTOLOGY}

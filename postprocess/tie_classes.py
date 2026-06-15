@@ -140,6 +140,61 @@ def polarity(rel_type: str) -> str:
     return "neutral"
 
 
+# Connection-type axis, orthogonal to tie_class (fascist-transnationalism
+# guideline, Toro 2024): separate a DIRECT PHYSICAL/material connection (meeting,
+# funding, combat, kinship, employment) from an ABSTRACT IDEOLOGICAL one (shared
+# or opposed belief, influence, propaganda). This cross-cuts tie_class - e.g.
+# fought_against is a stance but a physical connection; influenced_by is a stance
+# but ideological. Organizational membership and biographical place/rank get their
+# own values; co-occurrence is not a connection.
+_CONNECTION: dict[str, str] = {
+    "met_with": "physical", "visited": "physical", "family_of": "physical",
+    "married_to": "physical", "sibling_of": "physical", "related_to": "physical",
+    "employed_by": "physical", "worked_for": "physical", "served_with": "physical",
+    "served_in": "physical", "fought_against": "physical", "fought_in": "physical",
+    "wounded_at": "physical", "commanded": "physical", "recruited": "physical",
+    "imprisoned_by": "physical", "appointed_by": "physical", "promoted_to": "physical",
+    "funded": "physical",
+    "supported": "ideological", "opposed": "ideological", "influenced_by": "ideological",
+    "admired": "ideological", "read": "ideological", "believed_in": "ideological",
+    "allied_with": "ideological", "sympathized_with": "ideological",
+    "propagandized_for": "ideological",
+    "member_of": "organizational", "joined": "organizational", "led": "organizational",
+    "founded": "organizational", "studied_at": "organizational",
+    "expelled_from": "organizational", "subordinate_to": "organizational",
+    "born_in": "biographical", "resided_in": "biographical", "located_in": "biographical",
+    "lived_in": "biographical", "died_in": "biographical",
+    "co_occurs_with": "cooccurrence", "alias_of": "none",
+}
+_PHYS_SUBSTR = ("met", "visit", "fund", "financ", "fought", "combat", "marri",
+                "famil", "sibling", "employ", "arrest", "imprison", "wound",
+                "recruit", "kill", "assassinat")
+_IDEO_SUBSTR = ("support", "oppos", "influenc", "admir", "ideolog", "propagand",
+                "believ", "sympath", "endors", "inspir", "allied", "praise")
+_ORG_SUBSTR = ("member", "join", "founded", "studi", "expel", "subordinate")
+
+
+def connection_type(rel_type: str, tgt_label: str = "") -> str:
+    """Physical / ideological / organizational / biographical connection axis,
+    orthogonal to tie_class. Free-form relations fall back to substring markers
+    (belief checked before act), then the target type; else 'unspecified'."""
+    rt = (rel_type or "").strip().lower()
+    ct = _CONNECTION.get(rt)
+    if ct:
+        return ct
+    if any(s in rt for s in _IDEO_SUBSTR):
+        return "ideological"
+    if any(s in rt for s in _PHYS_SUBSTR):
+        return "physical"
+    if any(s in rt for s in _ORG_SUBSTR):
+        return "organizational"
+    if tgt_label in ("LOCATION", "RANK"):
+        return "biographical"
+    if tgt_label in ("ORG", "INSTITUTION"):
+        return "organizational"
+    return "unspecified"
+
+
 # Edge classes that count as the headline social network.
 SOCIAL = {"interaction"}
 # Classes that are two-mode but still structural (membership/biography).

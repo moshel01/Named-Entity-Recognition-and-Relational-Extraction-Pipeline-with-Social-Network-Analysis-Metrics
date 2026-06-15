@@ -54,7 +54,21 @@ def _extract_rtf(path: Path, encoding: str) -> str:
 
 
 def _clean_html(raw: str) -> str:
-    """Strip boilerplate tags from an HTML string and return readable text."""
+    """HTML -> readable main text.
+
+    Prefer trafilatura (main-content extraction: drops nav/ads/sidebars/related
+    links/comments, keeps the article body + data tables) - a raw BeautifulSoup
+    get_text dumps all the boilerplate too, which feeds noise into NER/RE on
+    scraped pages. trafilatura is optional (`pip install trafilatura`); a missing
+    package or an empty extraction falls back to the BeautifulSoup tag strip.
+    """
+    try:
+        import trafilatura
+        text = trafilatura.extract(raw, include_comments=False, include_tables=True)
+        if text and text.strip():
+            return text
+    except Exception:  # noqa: BLE001 - not installed / extraction failure -> fallback
+        pass
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(raw, "html.parser")
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "form"]):
@@ -218,6 +232,11 @@ def fetch_url(url: str, timeout: int = 30) -> str:
     resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=timeout)
     resp.raise_for_status()
     ctype = (resp.headers.get("Content-Type") or "").lower()
+
+    # requests falls back to ISO-8859-1 when the server sends no charset, which
+    # mangles UTF-8 pages. Re-sniff from the body in that case before resp.text.
+    if (resp.encoding or "").lower() == "iso-8859-1" and "charset" not in ctype:
+        resp.encoding = resp.apparent_encoding or resp.encoding
 
     if "pdf" in ctype or url.lower().endswith(".pdf"):
         import fitz  # PyMuPDF

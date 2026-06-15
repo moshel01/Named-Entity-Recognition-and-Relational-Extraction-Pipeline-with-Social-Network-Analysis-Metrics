@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import tie_classes
+from .evidence_tiers import TIER_DOCS
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ _EDGE_DEFS: dict[str, str] = {
     "Label": "Relation type (same as rel_type; Gephi display).",
     "rel_type": "Specific relation verb (see the Relation Inventory sheet).",
     "tie_class": "Social-tie class of the relation (see the Tie Classes sheet).",
+    "connection_type": "Physical / ideological / organizational / biographical axis, orthogonal to tie_class: separates a direct material tie (meeting, funding, combat, kinship) from a shared/opposed-belief one.",
     "polarity": "Sign of the tie: positive / negative / neutral (for signed-network analysis).",
     "Weight": "Number of distinct documents supporting the edge (corroboration), not raw mentions.",
     "n_mentions": "Raw number of supporting relationship mentions.",
@@ -88,16 +90,6 @@ _TIE_CLASS_DEFS: dict[str, str] = {
     "cooccurrence": "Co-presence in the same context only. Weakest evidence layer.",
     "other": "Unclassifiable relations and dedup artifacts.",
 }
-
-_TIER_DEFS: list[tuple[str, str, str]] = [
-    ("conservative", "llm_extracted, gliner_extracted, rule_extracted",
-     "Only edges stated in the text. Use for precision-critical claims."),
-    ("moderate", "+ sna_inferred, rule_cooccurrence",
-     "Adds co-occurrence edges (two entities sharing documents). Higher recall."),
-    ("full", "all edge sources, incl. metadata, canonical_inferred, pipeline_inferred",
-     "Everything, including metadata-derived and ontology-inferred edges."),
-]
-
 
 def _col_def(col: str, defs: dict[str, str], prefixes: list[tuple[str, str]] | None = None) -> str:
     if col in defs:
@@ -178,6 +170,9 @@ def _write(run_dir, tables, config, domain, model, Workbook, Font, Alignment):
          + (" network_dynamic.gexf adds the time axis."
             if (Path(run_dir) / "network_dynamic.gexf").exists() else "")),
     ]
+    note = getattr(getattr(config, "export", None), "codebook_note", "")
+    if note:
+        overview.append(("Corpus note", note))
     sheet("Overview", ["Item", "Description"], overview, [24, 110])
 
     # 2/3. Variable definitions for the columns actually present.
@@ -214,18 +209,20 @@ def _write(run_dir, tables, config, domain, model, Workbook, Font, Alignment):
     for e in edges:
         rt = e.get("rel_type", "")
         info = rel_info.setdefault(rt, {"n": 0, "tie_class": e.get("tie_class", ""),
+                                        "connection_type": e.get("connection_type", ""),
                                         "polarity": e.get("polarity", ""), "example": ""})
         info["n"] += 1
         if not info["example"] and e.get("evidence"):
             info["example"] = str(e["evidence"])[:200]
-    rel_rows = [(rt, i["tie_class"], i["polarity"], i["n"], i["example"])
+    rel_rows = [(rt, i["tie_class"], i["connection_type"], i["polarity"], i["n"], i["example"])
                 for rt, i in sorted(rel_info.items(), key=lambda kv: -kv[1]["n"])]
-    sheet("Relation Inventory", ["rel_type", "tie_class", "polarity", "Edges", "Example evidence"],
-          rel_rows, [26, 14, 10, 8, 80])
+    sheet("Relation Inventory",
+          ["rel_type", "tie_class", "connection_type", "polarity", "Edges", "Example evidence"],
+          rel_rows, [26, 14, 14, 10, 8, 80])
 
     # 7. Evidence tiers.
     source_counts = Counter(s for e in edges for s in str(e.get("edge_source", "")).split(";") if s)
-    tier_rows = [(t, srcs, d) for t, srcs, d in _TIER_DEFS]
+    tier_rows = [(t, srcs, d) for t, srcs, d in TIER_DOCS]
     tier_rows.append(("", "", ""))
     tier_rows.append(("edge_source values in this run",
                       ", ".join(f"{s} ({n})" for s, n in source_counts.most_common()), ""))

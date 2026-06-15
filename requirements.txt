@@ -15,7 +15,9 @@ protobuf>=4.0
 # ── Document ingestion ────────────────────────────────────────────────────────
 pymupdf>=1.24
 python-docx>=1.1
-beautifulsoup4>=4.12
+beautifulsoup4>=4.12     # HTML fallback extractor
+trafilatura>=1.8         # web main-content extraction (drops nav/ads/sidebars/
+                         # boilerplate); fail-soft -> beautifulsoup4 if absent
 striprtf>=0.0.26
 
 # ── Intelligence tier (mode dependent) ────────────────────────────────────────

@@ -39,6 +39,12 @@ class CoreferenceConfig(BaseModel):
     model: str = "biu-nlp/f-coref"
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     max_narrator_mentions_per_chunk: int = 40
+    # Coref microservice (services/coref_service.py). Empty = load fastcoref
+    # in-process. Set to e.g. "http://127.0.0.1:8000" to offload coref to an
+    # isolated env (fastcoref needs transformers <5, which conflicts with the
+    # main env's GLiNER2). Unreachable service falls back to in-process/heuristic.
+    service_url: str = ""
+    service_timeout: int = 30
     # Languages whose first-person pronouns mark the narrator.
     languages: list[str] = Field(default_factory=lambda: ["en", "de"])
 
@@ -169,6 +175,14 @@ class QualityConfig(BaseModel):
 class InferenceConfig(BaseModel):
     enable_cooccurrence_edges: bool = True
     cooccurrence_min_shared_docs: int = 2
+    # Within-document proximity co-occurrence: link entities mentioned within
+    # `proximity_window_chars` of each other (doc-absolute positions, so it spans
+    # chunk boundaries the LLM never saw across). A windowed tie is the standard
+    # character-network signal; far less noisy than the whole-doc complete graph,
+    # and the only within-letter weak-tie layer in ollama/api mode. Co-occurrence
+    # stays the weakest evidence tier (full only). 0 disables.
+    enable_proximity_edges: bool = True
+    proximity_window_chars: int = 600
     enable_canonical_inference: bool = False
     # How the corpus-level mandatory-membership assumption is applied by domains
     # that implement one (e.g. nazi_era NSDAP). "authors_only" is the defensible
@@ -189,6 +203,10 @@ class OntologyConfig(BaseModel):
     fuzzy_threshold: float = 0.82
     drop_unmapped: bool = False        # drop relations that match nothing in the ontology
     relations: Any = None              # dict[str, list[str]] | list[str] | None
+    # label -> one-line definition shown to the LLM next to the allowed types.
+    # Make confusable labels contrastive ("associate: companions, NOT friends").
+    # Local models default to intuitive labels; definitions pin the coding scheme.
+    relation_guide: Any = None         # dict[str, str] | None
 
 
 class LinkingConfig(BaseModel):
@@ -215,6 +233,9 @@ class ExportConfig(BaseModel):
     # Write codebook.xlsx into the run dir: variable definitions + this run's
     # type/tie-class/relation inventories, for readers new to the data. Fail-soft.
     codebook: bool = True
+    # Free-text corpus caveat for the codebook overview (sampling frame, known
+    # biases). Boundary specification includes how the data came to be.
+    codebook_note: str = ""
 
 
 class CheckpointConfig(BaseModel):

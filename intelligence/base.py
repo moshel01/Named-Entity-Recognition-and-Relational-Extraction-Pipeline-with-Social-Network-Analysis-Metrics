@@ -74,9 +74,11 @@ class IntelligenceBackend(ABC):
             domain.quality_review_system_prompt() if domain else None
         )
         # Resolved relation ontology -> constrain LLM relation extraction.
-        from postprocess.ontology import resolve_relation_ontology
+        from postprocess.ontology import resolve_relation_guide, resolve_relation_ontology
         onto = resolve_relation_ontology(config, domain)
         self.relation_types: list[str] = sorted(onto.keys())
+        # Optional per-label definitions rendered next to the allowed types.
+        self.relation_guide: dict[str, str] = resolve_relation_guide(config, domain)
         # (month_words, season_words, pivot_max) for normalizing LLM timeline dates.
         v = domain.temporal_vocab() if domain is not None else {}
         self._date_vocab = (v.get("months", {}), v.get("seasons", {}), v.get("pivot_max"))

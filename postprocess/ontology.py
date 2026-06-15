@@ -36,6 +36,21 @@ def resolve_relation_ontology(config, domain=None) -> dict[str, list[str]]:
     return {}
 
 
+def resolve_relation_guide(config, domain=None) -> dict[str, str]:
+    """label -> definition, from config.ontology.relation_guide, else domain."""
+    guide = getattr(getattr(config, "ontology", None), "relation_guide", None)
+    if isinstance(guide, dict) and guide:
+        return {str(k): str(v) for k, v in guide.items() if v}
+    if domain is not None:
+        try:
+            dom = domain.relation_guide()
+            if isinstance(dom, dict) and dom:
+                return {str(k): str(v) for k, v in dom.items() if v}
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
+
+
 class OntologyAligner:
     """Align relation-type strings onto a canonical ontology."""
 

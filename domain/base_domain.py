@@ -71,6 +71,10 @@ class BaseDomain(ABC):
         """Return ``{canonical_relation: [synonyms...]}`` for alignment, or {}."""
         return {}
 
+    def relation_guide(self) -> dict[str, str]:
+        """Return ``{relation: one-line definition}`` shown to the LLM, or {}."""
+        return {}
+
     def narrator_name(self, filename: str, doc_id: str) -> Optional[str]:
         """Author/narrator node name from a filename, or None for the default."""
         return None
@@ -179,6 +183,12 @@ class GenericDomain(BaseDomain):
         if onto is None:
             onto = _safe_attr(self.package, "relation_config", "RELATION_ONTOLOGY", {})
         return {k: list(v or []) for k, v in (onto or {}).items()}
+
+    def relation_guide(self) -> dict[str, str]:
+        guide = _safe_attr(self.package, "relationship_config", "RELATION_GUIDE", None)
+        if guide is None:
+            guide = _safe_attr(self.package, "relation_config", "RELATION_GUIDE", {})
+        return {str(k): str(v) for k, v in (guide or {}).items() if v}
 
     def narrator_name(self, filename: str, doc_id: str) -> Optional[str]:
         fn = _safe_attr(self.package, "german_nlp", "author_from_filename", None)

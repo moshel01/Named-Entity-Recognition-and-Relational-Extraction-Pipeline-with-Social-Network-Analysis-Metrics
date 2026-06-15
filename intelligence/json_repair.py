@@ -13,14 +13,18 @@ _FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)\s*```", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # Missing comma between a value-ending token and the start of the next value,
-# e.g. `}{`, `] [`, `" "`, `1 "b"`, `true {`. The first group only matches real
-# value terminators (close brackets, a string close, a number, or the literal
-# words true/false/null) so individual letters inside strings are never matched.
+# e.g. `}{`, `] [`, `" "`, `true {`. The first group only matches real value
+# terminators (close brackets, a string close, or the literal words
+# true/false/null) so individual letters inside strings are never matched.
 _MISSING_COMMA_RE = re.compile(
     # (?<!\\) so an escaped quote (`\""`) is never treated as a value
     # terminator - inserting a comma there manufactures `\",",` garbage.
-    r'((?<!\\)["}\]\d]|\btrue\b|\bfalse\b|\bnull\b)\s*\n?\s*(["{\[])'
+    r'((?<!\\)["}\]]|\btrue\b|\bfalse\b|\bnull\b)\s*\n?\s*(["{\[])'
 )
+# Digits are terminators only across a newline. Same-line `1"` is usually a
+# digit inside a string right before its close quote ("born 1903") - treating
+# it as a missing comma writes a comma INTO the string.
+_MISSING_COMMA_NUM_RE = re.compile(r'(\d)\s*\n(\s*["{\[])')
 
 
 def _extract_json_blob(text: str) -> str:
@@ -52,6 +56,19 @@ _BARE_VALUE_RE = re.compile(
 # Model commentary between a string close and the delimiter:
 # `"...house arrest" (implied residence),`. Drop the parenthetical.
 _PAREN_ANNOTATION_RE = re.compile(r'"\s*\([^()"\n]*\)(\s*[,}\]])')
+# Several comma-separated strings as one value, no array brackets:
+# `"evidence": "s1", "s2", "s3",`. Merge them. The anchor on `:` keeps real
+# array elements out; the lookahead keeps the next key (always followed by a
+# colon) out. Applied repeatedly for 3+ strings.
+_MULTI_STRING_VALUE_RE = re.compile(
+    r'(:\s*"(?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*"(?!\s*:))')
+# Value opens with an escaped quote: `"evidence": \"text...`. qwen pre-escapes
+# the JSON delimiter when the evidence is itself a book quote. Outside a string
+# a backslash is invalid, so this only fires on real malformations. Strip the
+# opening backslash and let _escape_inner_quotes find the true close. (`\\"` -
+# an escaped backslash then quote - does not match: the pattern needs `\` then
+# `"` adjacent.)
+_VALUE_OPEN_ESCAPED_RE = re.compile(r'(:\s*)\\"')
 
 
 def _fix_literal_values(text: str) -> str:
@@ -259,7 +276,7 @@ def repair_json(text: str) -> Optional[Any]:
         pass
 
     # Level 3: insert missing commas.
-    fixed3 = _MISSING_COMMA_RE.sub(r"\1,\2", fixed)
+    fixed3 = _MISSING_COMMA_NUM_RE.sub(r"\1,\2", _MISSING_COMMA_RE.sub(r"\1,\2", fixed))
     try:
         return json.loads(fixed3)
     except json.JSONDecodeError:
@@ -295,10 +312,42 @@ def repair_json(text: str) -> Optional[Any]:
     except json.JSONDecodeError:
         pass
 
+    # Level 4.8: multi-string value -> single string, " ... " separated
+    # (matches the model's own ellipsis style, keeps the verbatim check happy).
+    fixed48 = fixed4
+    for _ in range(30):
+        merged = _MULTI_STRING_VALUE_RE.sub(r'\1 ... \2', fixed48)
+        if merged == fixed48:
+            break
+        fixed48 = merged
+    try:
+        return json.loads(fixed48)
+    except json.JSONDecodeError:
+        pass
+
     # Level 5: escape unescaped quotes inside string values.
     fixed5 = _escape_inner_quotes(fixed4)
     try:
         return json.loads(fixed5)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 5.5: escaped delimiters THEN inner-quote escaping. A response can
+    # mix a mis-escaped value closer (`\",`) on one edge with an unescaped
+    # dialogue quote on another; neither 4.6 nor 5 alone fixes both, composed
+    # they do.
+    fixed55 = _escape_inner_quotes(_fix_escaped_delimiters(fixed4))
+    try:
+        return json.loads(fixed55)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 5.6: value-opening escaped quote, then inner-quote escaping. Handles
+    # book quotes the model wraps in `\"...\"` with embedded dialogue quotes and
+    # commas (`: \"...quietly,\" said Gandalf.\""`) that 4.6 mis-segments.
+    fixed56 = _escape_inner_quotes(_VALUE_OPEN_ESCAPED_RE.sub(r'\1"', fixed4))
+    try:
+        return json.loads(fixed56)
     except json.JSONDecodeError:
         pass
 

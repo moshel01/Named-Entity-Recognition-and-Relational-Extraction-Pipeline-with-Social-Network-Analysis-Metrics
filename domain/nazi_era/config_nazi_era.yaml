@@ -66,9 +66,9 @@ intelligence:
     aws_region: "us-east-1"
   ollama:
     host: "http://localhost:11434"
-    # qwen3:8b is the verified upgrade over qwen2.5:7b (richer interaction layer).
+    # qwen3.5:9b: current best fit for 8 GB, beats qwen3:8b on relations.
     # Override per machine, e.g. --ollama-model gemma4:26b / qwen3.6:27b.
-    model: "qwen3:8b"
+    model: "qwen3.5:9b"
     temperature: 0.0
     request_timeout: 600     # large models (26B/27B) are slower; avoid timeouts
     num_ctx: 8192
@@ -138,6 +138,12 @@ export:
   formats: ["csv", "json", "gexf", "jsonl"]
   gephi: true
   graph_metrics: true      # brokerage/bridges/articulation + graph_report.json
+  codebook_note: >-
+    Theodore Abel Papers: autobiographical essays submitted to Abel's 1934
+    contest for early NSDAP members. Opt-in sample of committed members, not
+    a random draw of the membership - read network statistics as descriptive
+    of this corpus, not inferential for the movement. Mentions reflect what
+    authors chose to recount in 1934, writing under the regime they joined.
 
 checkpoint:
   enabled: true

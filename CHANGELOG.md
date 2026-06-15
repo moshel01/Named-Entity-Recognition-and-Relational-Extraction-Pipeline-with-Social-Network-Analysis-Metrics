@@ -4,6 +4,321 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Web ingestion: trafilatura main-content extraction
+
+The web path was `requests` + `BeautifulSoup.get_text` with a tag blocklist - it
+kept sidebars/ads/related-links/captions, feeding boilerplate into NER/RE on
+scraped pages. `_clean_html` now prefers **trafilatura** (main-content extraction:
+drops the boilerplate, keeps article body + data tables), BeautifulSoup as
+fail-soft fallback. Optional dep (in requirements; works without it).
+
+- ARCHITECTURE.md corrected: the stack is `requests` + trafilatura, **not**
+  ScrapeGraphAI/Crawl4AI (a Gemini-draft claim). Those are LLM/agent scrapers for
+  dynamic JS sites - heavy, and they'd spend the LLM budget on scraping; revisit
+  only if JS-rendered targets become a requirement. The LLM tier stays reserved
+  for relation extraction.
+- Coref microservice verified end-to-end (correct pronoun cluster on a Bilbo test,
+  model loads lazily on first request). test_html_extraction added.
+
+## Coref microservice; physical/ideological edge axis; architecture + papers review
+
+Reviewed research_context/ (Bearman & Stovel narrative networks; Zheng 2017 joint
+tagging; Choi & Jung / Zavarella KG-construction surveys; ScrapeGraphAI / WebScraper
+web IE; Bosshart et al. NBER NSDAP membership universe) and reconciled
+ARCHITECTURE.md (a Gemini draft) with the real pipeline.
+
+- **fastcoref microservice (`services/coref_service.py`).** fastcoref needs
+  transformers <5, which conflicts with the main env's GLiNER2 (transformers 5.x);
+  an isolated FastAPI service keeps it out-of-process and light (no spaCy/GLiNER).
+  The pipeline POSTs chunk text and re-attaches char-offset clusters with the same
+  logic as in-process; enable via `coreference.service_url`, falls back to
+  in-process fastcoref then the heuristic. `services/requirements-coref.txt` for
+  the isolated env. Pipeline-side client is stdlib urllib (no new main-env dep).
+- **connection_type edge axis (Toro 2024 / ARCHITECTURE guideline).**
+  physical / ideological / organizational / biographical, orthogonal to tie_class:
+  separates a direct material tie (meeting, funding, combat, kinship) from a
+  shared/opposed-belief one. The cross-cut is the point - fought_against is a
+  stance but physical; influenced_by is a stance but ideological. New
+  `tie_classes.connection_type`; flows to gephi_edges.csv, GEXF, codebook.
+- ARCHITECTURE.md rewritten to the as-built pipeline (GLiNER2-only, four RE tiers,
+  real stage flow, the microservice, recall ceiling, paper grounding). The draft
+  had GLiNER v1, langextract-only RE, and a fictional coref microservice.
+- Best-practice check vs the KG surveys: the canonicalize -> typed extraction ->
+  tiered evaluation spine with hallucination guards is already what we run.
+  Proposed (not built): a Bearman-style narrative-sequence network (life events as
+  nodes, narrative order as arcs) from the timeline. tests: coref re-attach +
+  connection_type, offline.
+
+## Four more NER benchmarks: CoNLL-2003, OntoNotes 5.0, WNUT-17, Universal NER
+
+Widen the entity-side eval beyond German (GermEval/HIPE): English clean (CoNLL
+newswire, OntoNotes multi-genre), noisy social media (WNUT), multilingual (UNER).
+
+- All BIO token-classification. Decode + pseudo-doc grouping factored into
+  `benchmarks/common.py` (`decode_bio`, `build_ner_docs`); adapters are thin.
+- datasets 4.x dropped script loading, so the canonical NER sets no longer load
+  by id. `common.load_token_dataset` falls back to the auto-converted parquet
+  (refs/convert/parquet). ClassLabel names survive for CoNLL; the tner mirrors
+  (OntoNotes/WNUT) store raw ints, so `hf_iob_label_map` scrapes label2id from
+  the dataset README. The tner WNUT map orders O last (O=12), not first - a
+  hardcoded guess decoded garbage, so README-scrape-with-fallback it is.
+- UNER's HF repo is script-only with no data; the adapter reads a local UNER
+  `.iob2` via --path (`common.parse_iob2`), like ace2005/tacred.
+- Prepare validated end-to-end (download + decode + gold): CoNLL 139 ents/4 docs,
+  OntoNotes 68, WNUT 25 - all real names, right types. The --run step (GLiNER2
+  foundation) is the owner's; prepare writes gold + inputs + config. Tests:
+  decode_bio / build_ner_docs / parse_iob2 offline.
+
+## Proximity edges validated on the 15-doc run; org-name suspect guard
+
+15-doc Abel run on qwen3.5:9b with the new proximity layer + GermEval/HIPE German
+entity validation. Scored offline.
+
+- **Window co-occurrence does what it was built for.** Metadata-gold untyped
+  relation recall: conservative (text only) 0.628, full (with the proximity
+  floor) **0.884** - the floor recovers 11 of the 16 author->place/org facts the
+  LLM never typed, only 5 left unconnected. Recovered edges are all tagged
+  rule_cooccurrence (full tier), so they stay filterable. Edge mix on the run:
+  4849 rule_cooccurrence / 365 llm_extracted / 46 metadata. Entity recall on the
+  metadata targets is 1.0 - every author/place/org node is found; the gap was
+  never entities, only the tie between them.
+- **GermEval 0.690 / HIPE 0.405 - both exactly at baseline under qwen3.5:9b.**
+  Entities are foundation (GLiNER2+spaCy), model-independent, so the qwen3:8b ->
+  qwen3.5:9b swap moves relations, not entities. Confirmed: no regression. HIPE
+  stays OCR-bound (token splits, title-laden gold person spans); GermEval ORG
+  precision (0.46) is modern-news compounds that won't appear in Abel.
+- **suspect_common_noun no longer flags real orgs by their form.** German
+  proper-org names are capitalized common nouns (spaCy tags NOUN not PROPN), so
+  the propn-ratio gate flagged genuine parties/units - Deutschnationale
+  Volkspartei, Sozialdemokratische Partei, Völkische Bewegung, Freikorps,
+  Garde-Feldartillerie-Regiment. `quality_review._has_org_marker` exempts
+  ORG/INSTITUTION whose name ends in a distinctive org-form marker
+  (partei/bewegung/front/bund/verein/regiment/korps/... + English party/union/
+  league/...). Only ever removes a false suspect flag - never drops a node, never
+  adds one. 15 of 231 flags on the run corrected, all true orgs. The born/resided
+  -> located_in "typed gap" is correct behaviour, not a bug: born_in/resided_in
+  are metadata-only; located_in is the honest text label.
+
+## Window co-occurrence; the cross-chunk recall ceiling; metadata hygiene
+
+Top-to-bottom comb of both pipelines. Coref is chunk-local (fastcoref runs per
+chunk), so a relation between two third parties split across chunks is never
+seen - the cross-chunk recall ceiling. Three layers, fixed differently.
+
+- **Within-document window co-occurrence (`enable_proximity_edges`, default on).**
+  Links entities mentioned within `proximity_window_chars` (600) of each other.
+  Positions are document-absolute, so a windowed pair spans chunk boundaries the
+  LLM never saw across - a floor under the *weak/untyped* layer of the ceiling.
+  It is also the only within-letter weak tie in ollama/api mode (python_only had
+  sentence co-occurrence; the LLM modes had none). The character-network
+  literature uses exactly this (a k-sentence / fixed-char window; physical
+  divisions like pages/chunks miss co-occurrences). Stays the weakest evidence
+  tier - co_occurs_with, full only - and far less noisy than the old whole-doc
+  complete graph. New: `postprocess/canonical_inference.py:proximity_edges`,
+  threaded `agg.mentions` + dedup name map into `InferenceEngine.run`.
+- **Typed boundary-spanning relations:** raise `chunking.overlap_chars` (we ship
+  400 ~= 7%; the chunking literature says 10-20%). Resume is doc-level, so
+  bumping it only affects not-yet-extracted docs - safe to raise mid-corpus.
+  Left the default alone (cost/output call); documented as the lever.
+- **Typed long-range relations** (entities chapters apart) still need
+  document-level coref or a second doc-level pass - scoped, not built. Bounded
+  impact here: the author hub is already resolved in every chunk, so only
+  third-party<->third-party pairs hit it.
+- **Metadata mojibake hygiene.** `load_metadata` now runs the same
+  `clean_surface` repair the text path uses, so a metadata-only place
+  ("Stallup√∂nen") no longer mints a corrupted node / `attr_place_of_birth`
+  column. Not a recall fix - `normalize_name` already repairs umlaut mojibake at
+  match time, so node-merging and scoring were never broken by it; this is node
+  hygiene for places the prose doesn't mention.
+
+Reviewed and unchanged (already best-practice): `graph_metrics` (Burt
+constraint + effective size, bridges, articulation, substantive-graph only),
+`tie_classes` (signed polarity, person<->person interaction correction,
+opposition-as-stance), the dedup guards, the aggregator mojibake repair.
+
+---
+
+## German relation gold from the spreadsheet (no hand-annotation)
+
+The metadata xlsx already encodes verified relations - birthplace, residence,
+prior party, NSDAP membership - one set per author. Turned that into a gold and
+scored how much of it the *text* extraction recovers on its own. First German
+relation number that doesn't need a hand-annotated set.
+
+- **`scripts/metadata_gold.py`** reads a finished run's `entities.json` (metadata
+  is already merged onto author nodes) and emits a gold of the spreadsheet's
+  biographical relations for every matched author. Self-contained; pass
+  `--metadata` only for runs predating the merge.
+- **`--exclude-edge-source` on the evaluator.** Drops edges whose sources are
+  *entirely* in the exclude set (a `metadata;llm_extracted` edge survives
+  `--exclude metadata` because the text also asserts it). Scoring with
+  `--edge-sources conservative --exclude-edge-source metadata` measures what the
+  prose recovered vs the injected edges - otherwise the match is circular.
+- **Baseline (qwen3.5:9b, 15-doc Abel run).** Untyped relation recall 0.581
+  (25/43 verified author<->fact ties recovered from prose); `member_of` recall
+  0.55. Read untyped recall as the headline - the text uses its own labels, so
+  endpoints-only is the honest match. Precision is meaningless here (the prose
+  asserts many true ties the four fields never list).
+- **Finding it surfaced:** `born_in` / `resided_in` typed recall is 0 while the
+  endpoints often *are* recovered (untyped > typed). The pipeline ties
+  author->place generically (`located_in`); the metadata labels are
+  birth/residence. Not a recall hole - a labeling gap, and metadata already
+  covers those facts. The member_of 0.55 is the real signal: it validates the
+  membership extraction that feeds the whole affiliation analysis.
+
+This is a permanent regression gold - every future Abel run and model A/B can
+score against it offline (pure stdlib, no GPU).
+
+---
+
+## Relation guide lands; evidence tiers rebuilt; two more JSON shapes
+
+Ran the Hobbit A/B. The guide works.
+
+- **Relation-guide result (qwen3.5:9b, Hobbit gold, conservative tier).** Typed
+  relation F1 0.084 -> 0.203 (tp 23 -> 64, fn 165 -> 124); `associate` alone
+  P0.41 / R0.36 / F1 0.39 where before it barely registered. Untyped F1 flat
+  (0.238 -> 0.231) - as intended: the guide fixes labels, not which pairs get
+  found. Both runs identical config bar the guide (run_meta confirms). Carries
+  to Abel for free (RELATION_GUIDE already shipped).
+
+- **Evidence tiers rebuilt - they had drifted from what the pipeline stamps.**
+  The tier->edge_source map lived in two places (evaluator + codebook) and
+  matched neither reality:
+  - `langextract_extracted` and `metadata` were in no tier but `full`. So a
+    langextract run scored `--edge-sources conservative` showed zero relations,
+    and Abel's verified-spreadsheet edges (the most precise in the system) were
+    excluded from the conservative network. Both now conservative.
+  - Co-occurrence was double-branded - `sna_inferred` (ollama/api) vs
+    `rule_cooccurrence` (python_only) - and rode in `moderate`. The 3445
+    proximity edges flooded the middle tier and made `moderate == full`.
+    Unified to `rule_cooccurrence` (legacy `sna_inferred` still recognised),
+    demoted to `full`-only. Co-occurrence is the weakest layer (not a tie); it
+    belongs in the widest network, not the middle one.
+  - `gliner_extracted` was a phantom - referenced, emitted by nothing. Dropped.
+  - One source of truth now: `postprocess/evidence_tiers.py`, imported by the
+    evaluator and the codebook so they cannot drift again. Tested.
+  Result: the three tiers are finally distinct. Hobbit guided, typed F1 -
+  conservative 0.203, moderate 0.203 (no domain inference in the generic
+  pipeline), full 0.031 (co-occurrence flood, now isolated). For Abel, moderate
+  sits between (canonical_inferred membership edges).
+
+- **JSON repair levels 5.5 / 5.6.** The longer guide prompt makes qwen wrap
+  evidence in book quotes - two new malformations: a value opening with an
+  escaped quote (`"evidence": \"...`), and escaped dialogue quotes with an
+  embedded comma (`\"...quietly,\" said Gandalf.\""`) that the 4.6 segmenter
+  mis-closes. 5.5 composes escaped-delim + inner-quote escaping; 5.6 strips the
+  opening backslash-quote then lets the inner-quote escaper find the real close.
+  Both captured dumps recover; suite green (7/7 real shapes).
+
+---
+
+## Relation guide: contrastive label definitions in the extraction prompt
+
+The one weakness every dataset confirmed this round is typed-relation
+accuracy: at 9B the model labels by intuition, not by the coding scheme
+(Hobbit's `associate` - 62% of the gold - comes back as `friend`; DialogRE
+the same). The fix is to give the model the definitions it never had.
+
+- **`ontology.relation_guide`** (config) / **`RELATION_GUIDE`** (domain):
+  `{label: one-line definition}`. When constraining relations, the prompt now
+  renders each allowed label with its definition instead of a bare comma list,
+  prefixed "the definitions are deliberate; follow them over your intuition."
+  Labels without a definition still render bare. No guide -> old behavior.
+- **Contrastive where it matters.** Hobbit guide
+  (data/hobbit.relation_guide.json) pins the associate/friend boundary
+  ("companionship is associate, NOT friend"). Abel `RELATION_GUIDE` (27
+  labels) separates the pairs qwen confuses: joined/member_of/served_in,
+  led/commanded, opposed/fought_against, participated_in/fought_in,
+  met_with/co_occurs_with.
+- **book_bench `--relation-guide <file.json>`**: ships definitions for the
+  gold's labels, tags the run `_guide`, implies `--constrain-relations`. The
+  baseline (`hobbit_ollama_constr`, typed F1 0.084) already exists, so the
+  A/B is one new run.
+- Wired generically: api + ollama backends, domain hook
+  (`base_domain.relation_guide()` reads the package's `RELATION_GUIDE`), test
+  coverage in tests/run_tests.py. Helps Abel, not just the benchmark.
+
+A/B to run (one ollama run; baseline already on disk):
+`python scripts/book_bench.py --book data/hobbit.txt --gold data/hobbit.gold.json
+--mode ollama --ollama-model qwen3.5:9b --relation-guide data/hobbit.relation_guide.json`
+then compare `output/hobbit_ollama_constr_guide/eval_report.*.json` typed F1
+against `output/hobbit_ollama_constr`.
+
+---
+
+## Live scrape test: three dedup gaps, a junk-narrator fix, GermEval, tests/
+
+Ran two live URLs (Wikipedia + InfluenceWatch) through python_only as a real
+test of the scraping path. Pipeline held end to end; the entity list exposed
+four issues, all fixed and verified on the same run:
+
+- **Fuzzy bucketing never compared "the X" with "X".** Non-person buckets
+  keyed on the raw first character, so a leading article isolated a name from
+  its own variants. Buckets now key on the first content token ("the American
+  Enterprise Institute" finally merged into "American Enterprise Institute").
+- **Acronym fold**: an all-caps ORG folds into the unique org whose
+  capitalized-word initials spell it (AEI -> American Enterprise Institute,
+  69 mentions reunited). No _blocked check here - the distinctive-token rule
+  always fires for an acronym vs its expansion; uniqueness is the guard.
+  DVP/DNVP-style distinct acronyms unaffected (initials must match exactly).
+- **Token-subset person fold**: middle-name variants merge into the unique
+  longer name ("Theodore Abel" -> "Theodore Fred Abel"), running before the
+  single-token fold so bare surnames see one target. Family blocking still
+  holds: "Fred Abel" stays separate (could be a sibling).
+- **Scraped pages no longer get a narrator.** Quoted first person on a web
+  page synthesized "Narrator [https://...]" hub nodes; URL-sourced docs now
+  skip narrator detection (a memoir fetched by URL loses it - save locally).
+- **GermEval 2014 adapter** (gwlms parquet mirror; the original HF script
+  dataset is dead under datasets 4.x). Modern German NER to pair with HIPE's
+  historical OCR German - the two bracket the Abel register. Entities only.
+  Baseline at 20 pseudo-docs: F1 0.690, R 0.819 (PERSON 0.81 / LOC 0.67 /
+  ORG 0.57) vs HIPE 0.405 - the HIPE number was mostly OCR noise, the German
+  stack is fine on clean text. Precision reads low by design: we resolve
+  demonym derivations the GermEval gold deliberately excludes.
+- **tests/run_tests.py**: offline regression suite - every json_repair shape
+  incl. the real failure dumps, checkpoint failure scoring, all three dedup
+  folds, the article-bucket merge. No models, no network. Run it after
+  touching any of those modules.
+- Hobbit + DWIE re-scored with the per-label table. The cross-dataset
+  pattern: factual relations land (citizen_of P 0.78, head_of 0.60),
+  interpersonal stance labels do not - qwen answers "friend" for the
+  mentor's "associate" (71 fp vs R 0.03 on the gold's largest class).
+  Hobbit moderate-tier untyped recall 0.622: detection is fine, typing is
+  the weak layer at 9B.
+
+---
+
+## Abel qwen3.5:9b pilot (15 docs): two repair gaps closed, one of them a corruptor
+
+First production run with the chunk-failure accounting: checkpoint meta
+pinpointed both losses (doc_48a5c22097 1/2 chunks - the JSON dump;
+doc_a54fc3fa51 1/6 - a transient ollama error). Both docs kept their good
+chunks. scripts/drop_failed_docs.py prunes failed records so --resume
+re-extracts only those docs.
+
+- **JSON repair level 4.8**: several comma-separated strings as one value
+  with no array brackets (`"evidence": "s1", "s2", "s3",` - qwen citing
+  multiple passages). Merged with " ... " separators, which the verbatim
+  checker already understands. The colon anchor keeps array elements out;
+  the next key's colon stops the merge.
+- **Level 3 was writing commas INTO strings.** The `\d` alternative in the
+  missing-comma regex matched a digit inside a string right before its close
+  quote ("born 1903" -> "born 1903,"). Any payload reaching level 3 with a
+  digit-final string got silently polluted. Digits now count as value
+  terminators only across a newline - the actual shape of qwen's missing
+  commas. All 5 real dumps + 16-case suite green.
+- **Metadata xlsx: literal "NA" no longer becomes a name.** The _ok filter
+  (already used for metadata edges) now applies at field load, so the
+  "NA Bartsch" author and birth_date="NA" attrs are gone on next analyze.
+- Run health otherwise: 15/15 authors detected, hubs are NSDAP / Hitler /
+  Germany / DNVP / Berlin, enrichment 24% subtype coverage with the domain
+  vocabulary (one batch lost to the guarded failure), entity count
+  proportional to the 06-10 25-doc baseline. Graph QA in the expected
+  envelope for ego-network autobiographies (largest CC 43.5%).
+
+---
+
 ## qwen3.5:9b constrained benchmarks; checkpoint failure accounting; breaker was dead code
 
 Re-DocRED + DialogRE re-runs (qwen3.5:9b, --constrain-relations) reviewed.

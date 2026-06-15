@@ -248,9 +248,12 @@ class Pipeline:
             from postprocess.wikidata import link_entities
             entities = link_entities(entities, self.config.linking)
 
-        # 4. Inference (co-occurrence + canonical edges).
+        # 4. Inference (co-occurrence + proximity + canonical edges). Pass the
+        # raw mentions + dedup name map so within-document window co-occurrence
+        # can resolve surfaces to surviving entity ids.
         inference = InferenceEngine(self.config.inference, domain=self.domain)
-        relationships = inference.run(entities, relationships)
+        relationships = inference.run(entities, relationships,
+                                      mentions=agg.mentions, name_to_id=_name_to_id)
 
         # 4b. Optionally drop degree-0 nodes (cleaner SNA graphs).
         if self.config.quality.drop_isolated_nodes:

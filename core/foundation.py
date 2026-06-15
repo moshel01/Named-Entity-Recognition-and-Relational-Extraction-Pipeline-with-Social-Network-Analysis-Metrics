@@ -232,6 +232,11 @@ class FoundationLayer:
 
     # Per-document processing
     def _narrator_name(self, document: Document) -> str:
+        # Scraped pages are not first-person documents: quoted speech
+        # ("I believe...") would synthesize a junk narrator hub per URL.
+        # A memoir fetched by URL loses narrator detection - save it locally.
+        if document.meta.get("source_type") == "url":
+            return ""
         # Domain can name the author from the filename (Abel: real author name).
         fn = document.meta.get("filename") or document.doc_id
         if self.domain is not None:

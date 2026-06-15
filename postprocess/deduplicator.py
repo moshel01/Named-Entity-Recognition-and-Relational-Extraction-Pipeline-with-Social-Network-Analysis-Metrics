@@ -261,6 +261,77 @@ class Deduplicator:
             return entities
         return [e for e in entities if id(e) not in folded]
 
+    # Fold name variants whose tokens are an ordered subset of a longer name.
+    def _fold_subset_persons(self, entities: list[Entity]) -> list[Entity]:
+        """Merge multi-token PERSON variants into the unique longer name that
+        contains all their tokens in order ("Theodore Abel" and "Fred Abel"
+        -> "Theodore Fred Abel"). Single tokens go through the stricter
+        partial-person fold; run this first so that fold sees one target."""
+        multi = [e for e in entities
+                 if e.label == "PERSON"
+                 and len(normalize_name(e.canonical_name).split()) >= 2
+                 and not _function_word_name(e.canonical_name)]
+        if len(multi) < 2:
+            return entities
+
+        def toks(e: Entity) -> list[str]:
+            return normalize_name(e.canonical_name).split()
+
+        def subseq(short: list[str], long: list[str]) -> bool:
+            it = iter(long)
+            return all(t in it for t in short)
+
+        alive = {id(e) for e in multi}
+        folded: set[int] = set()
+        # Shortest first, so "Theodore Abel" folds into "Theodore Fred Abel"
+        # before anything folds into IT.
+        for s in sorted(multi, key=lambda e: len(toks(e))):
+            if id(s) not in alive:
+                continue
+            st = toks(s)
+            cands = [c for c in multi
+                     if id(c) in alive and id(c) != id(s)
+                     and len(toks(c)) > len(st) and subseq(st, toks(c))
+                     and not self._blocked(c, s)]
+            if len(cands) == 1:
+                self._merge_into(cands[0], s, keep_primary_name=True)
+                folded.add(id(s))
+                alive.discard(id(s))
+        if not folded:
+            return entities
+        return [e for e in entities if id(e) not in folded]
+
+    # Fold an acronym ORG into the org whose initials spell it.
+    def _fold_org_acronyms(self, entities: list[Entity]) -> list[Entity]:
+        """"AEI" -> "American Enterprise Institute". Initials come from the
+        capitalized words only, so connectors don't break the match. Unique
+        target required; distinct acronyms stay (the DVP/DNVP rule)."""
+        orgs = [e for e in entities if e.label in ("ORG", "INSTITUTION")]
+        if len(orgs) < 2:
+            return entities
+        by_initials: dict[str, list[Entity]] = defaultdict(list)
+        for e in orgs:
+            words = [w for w in re.findall(r"[A-Za-zÄÖÜ][\w'\-]*", e.canonical_name)
+                     if w[0].isupper()]
+            if len(words) >= 2:
+                by_initials["".join(w[0].upper() for w in words)].append(e)
+        folded: set[int] = set()
+        for e in orgs:
+            acro = _acronym_form(e.canonical_name)
+            if not acro:
+                continue
+            # No _blocked here: the distinctive-token rule always fires for an
+            # acronym vs its expansion (zero shared tokens is the very point).
+            # The initials match + unique-candidate guard carry the safety.
+            cands = [c for c in by_initials.get(acro, [])
+                     if id(c) != id(e) and id(c) not in folded]
+            if len(cands) == 1:
+                self._merge_into(cands[0], e, keep_primary_name=True)
+                folded.add(id(e))
+        if not folded:
+            return entities
+        return [e for e in entities if id(e) not in folded]
+
     # Fold third-person mentions of an author into the author node.
     def _fold_author_mentions(self, entities: list[Entity]) -> list[Entity]:
         """Merge a non-author PERSON into the author of the same name.
@@ -322,7 +393,11 @@ class Deduplicator:
                 toks = norm.split()
                 initial = toks[-1][0] if toks and toks[-1] else "#"
             else:
-                initial = norm[0] if norm else "#"
+                # First CONTENT token: "the American Enterprise Institute" must
+                # land in 'a' with "American Enterprise Institute", or the two
+                # are never even compared.
+                ct = _content_tokens(norm)
+                initial = ct[0][0] if ct else (norm[0] if norm else "#")
             buckets[(e.label, initial)].append(e)
 
         canonical: list[Entity] = []
@@ -347,6 +422,13 @@ class Deduplicator:
 
         if self.config.resolve_cross_type:
             canonical = self._resolve_cross_type(canonical)
+
+        # Fold middle-name variants first so the partial fold below sees a
+        # single target ("Theodore Abel" -> "Theodore Fred Abel" before "Abel"
+        # looks for its full name). Then acronym orgs into their spelled-out
+        # form ("AEI" -> "American Enterprise Institute").
+        canonical = self._fold_subset_persons(canonical)
+        canonical = self._fold_org_acronyms(canonical)
 
         # Fold bare first/last names into their unique full name (after fuzzy,
         # which can't cross surname-initial buckets).

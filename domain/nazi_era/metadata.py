@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging
 import re
 
+from postprocess.aggregator import clean_surface
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,8 +73,13 @@ def load_metadata(path: str) -> dict[str, dict[str, str]]:
             if field == "letter_id":
                 continue
             v = row[idx] if idx < len(row) else None
-            if v is not None and str(v).strip():
-                rec[field] = str(v).strip()
+            # _ok also drops NA/N/A/unknown placeholders - a literal "NA"
+            # first name otherwise becomes part of the author's canonical name.
+            # clean_surface repairs the same umlaut mojibake (√∂ -> ö) the text
+            # path fixes, so a spreadsheet "Stallup√∂nen" merges with the text's
+            # "Stallupönen" instead of forming a duplicate node.
+            if _ok(v):
+                rec[field] = clean_surface(str(v))
         bd = rec.get("birth_date", "")
         m = _YEAR.search(bd)
         if m:

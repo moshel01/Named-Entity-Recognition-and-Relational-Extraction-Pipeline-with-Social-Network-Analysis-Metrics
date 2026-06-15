@@ -113,6 +113,8 @@ class GephiBuilder:
         for (s, t, rt), b in agg.items():
             b["tie_class"] = tie_classes.classify(rt, id_to_label.get(s, ""),
                                                   id_to_label.get(t, ""))
+            b["connection_type"] = tie_classes.connection_type(
+                rt, id_to_label.get(t, ""))
             b["weight"] = max(1, len(b["doc_ids"]))
             b["n_sources"] = len({letter_of(d) for d in b["doc_ids"] if letter_of(d)})
             b["period"] = period_fn(b["year"]) if (period_fn and b["year"]) else ""
@@ -181,6 +183,7 @@ class GephiBuilder:
                 "Label": rt,
                 "rel_type": rt,
                 "tie_class": b["tie_class"],
+                "connection_type": b["connection_type"],
                 "polarity": tie_classes.polarity(rt),
                 "Weight": b["weight"],                 # distinct documents (corroboration)
                 "n_mentions": b["n_mentions"],         # raw supporting mentions

@@ -160,7 +160,7 @@ def _entity_repr(cluster: list[dict]) -> tuple[str, str, list[str]]:
     return rep, canon, aliases
 
 
-def load(split: str = "test", limit: int = 0) -> list[BenchDoc]:
+def load(split: str = "test", limit: int = 0, **_) -> list[BenchDoc]:
     """Load Re-DocRED into BenchDocs. ``split`` in {train,validation,test}."""
     from datasets import load_dataset
     ds = load_dataset(HF_ID, split=split)

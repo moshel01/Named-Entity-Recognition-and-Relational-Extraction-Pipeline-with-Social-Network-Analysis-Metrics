@@ -194,6 +194,7 @@ class Exporter:
                 "weight": edge.get("Weight", 1),
                 "rel_type": edge.get("rel_type", ""),
                 "tie_class": edge.get("tie_class", ""),
+                "connection_type": edge.get("connection_type", ""),
                 "polarity": edge.get("polarity", ""),
                 "n_sources": edge.get("n_sources", 0),
                 "period": edge.get("period", ""),

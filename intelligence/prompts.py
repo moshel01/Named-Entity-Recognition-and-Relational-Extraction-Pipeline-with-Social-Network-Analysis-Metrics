@@ -47,6 +47,7 @@ def build_extraction_prompt(
     label_types: list[str],
     relation_types: list[str] | None = None,
     author_name: str = "",
+    relation_guide: dict[str, str] | None = None,
 ) -> str:
     """Construct the user prompt for relationship/entity extraction."""
     # Compact, de-duplicated candidate list to keep the prompt small.
@@ -72,11 +73,26 @@ def build_extraction_prompt(
 
     rel_constraint = ""
     if relation_types:
-        rel_constraint = (
-            "\nALLOWED RELATION TYPES - set each relationship `type` to the "
-            "single closest value from this list (use \"other\" only if none fit):\n  "
-            + ", ".join(relation_types) + "\n"
-        )
+        guide = relation_guide or {}
+        if guide:
+            # Definitions pin a coding scheme the model would otherwise overrule
+            # with its intuition (the classic "associate" labeled "friend").
+            lines = []
+            for rt in relation_types:
+                d = guide.get(rt)
+                lines.append(f"  - {rt}: {d}" if d else f"  - {rt}")
+            rel_constraint = (
+                "\nALLOWED RELATION TYPES - set each relationship `type` to the "
+                "single closest value below. The definitions are deliberate; "
+                "follow them over your own intuition. Use \"other\" only if none "
+                "fit:\n" + "\n".join(lines) + "\n"
+            )
+        else:
+            rel_constraint = (
+                "\nALLOWED RELATION TYPES - set each relationship `type` to the "
+                "single closest value from this list (use \"other\" only if none fit):\n  "
+                + ", ".join(relation_types) + "\n"
+            )
 
     return f"""ENTITY CANDIDATES (from a base NER model - confirm, refine, extend):
 {cand_block}

@@ -281,9 +281,16 @@ python -m benchmarks.run_benchmark --dataset redocred --limit 10 --mode ollama `
   --ollama-model qwen3:8b --constrain-relations --run --eval
 # German historical NER (closest public proxy for the Abel corpus):
 python -m benchmarks.run_benchmark --dataset hipe --limit 20 --run --eval
+# modern German NER (pairs with hipe - the two bracket the Abel register):
+python -m benchmarks.run_benchmark --dataset germeval --limit 20 --run --eval
 # interpersonal ties in dialogue:
 python -m benchmarks.run_benchmark --dataset dialogre --limit 30 --mode ollama `
   --ollama-model qwen3:8b --constrain-relations --run --eval
+
+# book vs gold; --relation-guide gives the LLM contrastive label definitions
+# (A/B the typed-relation accuracy vs the bare-label run):
+python scripts/book_bench.py --book data/hobbit.txt --gold data/hobbit.gold.json `
+  --mode ollama --ollama-model qwen3.5:9b --relation-guide data/hobbit.relation_guide.json
 
 # are the confidence scores honest? reliability bins + ECE vs gold
 python -m evaluation.calibration --gold data/bench/redocred.gold.json `
@@ -338,7 +345,7 @@ In `output/<run_name>/`:
 | File | What it is |
 |------|-----------|
 | `gephi_nodes.csv` | One row per entity. `type, mention_count, doc_count`, tie-class degree split (`deg_interaction, deg_affiliation, ...`), `tag_*`, `attr_*`. Centralities are not precomputed — Gephi does that. |
-| `gephi_edges.csv` | One row per aggregated relationship. `Source, Target, Type, Label, tie_class, Weight, n_mentions, n_sources, reciprocal, period, origin, edge_source, confidence, source_name, target_name, letter_id, evidence` |
+| `gephi_edges.csv` | One row per aggregated relationship. `Source, Target, Type, Label, tie_class, connection_type, polarity, Weight, n_mentions, n_sources, reciprocal, period, origin, edge_source, confidence, source_name, target_name, letter_id, evidence` |
 | `network.gexf` | The whole graph in one file. |
 | `graph_interaction.gexf` | **Interpersonal social network (open this for SNA).** |
 | `graph_affiliation.gexf` / `graph_discourse.gexf` | Two-mode and discourse layers. |
@@ -376,6 +383,14 @@ Configured under `coreference:`.
 - **`pronoun_resolution: true`** (optional, needs `fastcoref`) - resolves
   third-person pronouns ("he", "er") to named entities. English-oriented;
   silently no-ops if `fastcoref` isn't installed.
+- **`service_url`** (optional) - run fastcoref out-of-process. It needs
+  `transformers <5`, which conflicts with the main env's GLiNER2; the microservice
+  keeps it isolated and light. In a separate venv:
+  `pip install -r services/requirements-coref.txt` then
+  `uvicorn services.coref_service:app --port 8000`, and set
+  `coreference.service_url: "http://127.0.0.1:8000"`. An unreachable service falls
+  back to in-process fastcoref, then the heuristic resolver, so it's safe to leave
+  configured.
 
 Turn it all off with `coreference.enabled: false`.
 
@@ -406,9 +421,12 @@ evidentiary looseness:
 
 | Network | `edge_source` values | Meaning |
 |---------|----------------------|---------|
-| **Conservative** | `llm_extracted`, `gliner_extracted`, `rule_extracted` | stated in the text |
-| **Moderate** | + `sna_inferred`, `rule_cooccurrence` | co-occurrence |
-| **Full** | + `pipeline_inferred`, `canonical_inferred` | assumption + evidence-based inference |
+| **Conservative** | `llm_extracted`, `langextract_extracted`, `rule_extracted`, `metadata` | stated in the text or a verified record |
+| **Moderate** | + `canonical_inferred` | + membership inferred from a detected textual signal |
+| **Full** | + `rule_cooccurrence`, `pipeline_inferred` | + raw co-occurrence and the mandatory-membership assumption (weakest layers) |
+
+The single source of truth for this mapping is `postprocess/evidence_tiers.py`;
+the evaluator and the per-run codebook both import it.
 
 In Gephi, filter edges on the `edge_source` column. For evaluation, pass
 `--edge-sources conservative|moderate|full` (§11). **Report the conservative
@@ -596,7 +614,8 @@ python -m evaluation.evaluate --gold gold.json --run-dir output/abel_papers --ed
 | `Could not reach Ollama` | `ollama serve` running? `ollama pull <model>` done? Check `host`. |
 | `No module named 'polars'` | `pip install -r requirements.txt`. CSV export falls back to stdlib; Parquet needs polars. |
 | `fastcoref unavailable` warning | Only matters if `pronoun_resolution: true`; `pip install fastcoref` or leave it off (narrator still works). |
-| Run crashed midway | Re-run the same command with `--resume`. |
+| Run crashed midway | Re-run the same command with `--resume`. Docs whose extraction failed outright are retried automatically. |
+| Some docs lost chunks (`chunks_failed` in checkpoint meta, "JSON repair exhausted" / timeout warnings) | `python scripts/drop_failed_docs.py <run_dir>/checkpoints/<name>.extractions.jsonl`, then re-run with `--resume` - only those docs re-extract. |
 | Want to re-tune without re-extracting | `--stage analyze`. |
 | Author nodes named `Narrator [doc_...]` | Give files meaningful filenames; the node uses the filename stem. |
 | Marx/Lenin showing as NSDAP members | You set `mandatory_membership: all`. Use `authors_only`. |

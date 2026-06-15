@@ -1,0 +1,8 @@
+# Isolated env for the fastcoref coreference microservice (services/coref_service.py).
+# Kept separate from the main pipeline because fastcoref needs transformers <5,
+# which conflicts with GLiNER2 (transformers 5.x) in the main env.
+fastcoref
+fastapi
+uvicorn[standard]
+transformers<5
+torch

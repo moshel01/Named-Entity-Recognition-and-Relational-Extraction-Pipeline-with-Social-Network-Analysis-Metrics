@@ -44,6 +44,25 @@ def _strip_determiner(norm: str) -> str:
     return norm
 
 
+# Distinctive org-form endings. A name ending in one of these is a proper
+# organization (party, union, military unit), not a stray common noun. German
+# proper-org names are built from capitalized common nouns (spaCy tags them NOUN
+# not PROPN), so the propn-ratio gate flags them as suspect; this exempts the
+# unambiguous ones. Match on the full lowercased name so compounds count
+# (Volkspartei -> partei, Arbeiterfront -> front).
+_ORG_NAME_MARKERS = (
+    "partei", "bewegung", "front", "bund", "gewerkschaft", "verband",
+    "vereinigung", "verein", "gesellschaft", "loge", "orden",
+    "regiment", "bataillon", "brigade", "korps", "kompanie", "standarte",
+    "party", "movement", "league", "union", "association", "federation",
+    "alliance", "brotherhood", "guild", "battalion", "corps",
+)
+
+
+def _has_org_marker(name: str) -> bool:
+    return (name or "").strip().lower().rstrip(".").endswith(_ORG_NAME_MARKERS)
+
+
 def _bad_entity_name(name: str) -> bool:
     n = name.strip()
     if not n or len(n) < 2:
@@ -108,7 +127,9 @@ class QualityReviewer:
                                        "(%d mentions, propn_ratio 0.0)",
                                        e.canonical_name, e.mention_count)
                     continue
-                if ratio < 0.5 and e.label in name_types:
+                if ratio < 0.5 and e.label in name_types and not (
+                        e.label in ("ORG", "INSTITUTION")
+                        and _has_org_marker(e.canonical_name)):
                     e.attributes["suspect_common_noun"] = True
                 gated.append(e)
             kept_entities = gated

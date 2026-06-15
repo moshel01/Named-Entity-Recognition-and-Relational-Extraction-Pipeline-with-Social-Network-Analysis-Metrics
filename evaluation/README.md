@@ -71,12 +71,54 @@ python -m evaluation.evaluate --gold gold.json \
 
 | Tier | Includes |
 |------|----------|
-| `conservative` | `llm_extracted`, `gliner_extracted`, `rule_extracted` |
-| `moderate` | + `sna_inferred`, `rule_cooccurrence` |
-| `full` / `all` | + `pipeline_inferred`, `canonical_inferred` |
+| `conservative` | `llm_extracted`, `langextract_extracted`, `rule_extracted`, `metadata` |
+| `moderate` | + `canonical_inferred` |
+| `full` / `all` | + `rule_cooccurrence`, `pipeline_inferred` |
+
+Defined once in `postprocess/evidence_tiers.py`. Co-occurrence is the bulk of
+the edges and floods precision, so it sits only in `full`; report `conservative`
+(or `moderate` for domain runs) as the headline relation number.
 
 Report the conservative network's edge precision as your headline relation
 number; report the others to show the effect of inference.
+
+## German relation gold without hand-annotation
+
+The Abel metadata spreadsheet is itself a verified relation set: each author's
+birthplace, residence, prior party, and NSDAP membership. `scripts/metadata_gold.py`
+turns that into a gold so you can measure how much of it the **text** extraction
+recovers - no hand-annotation, the only German *relation* number available until
+a hand gold exists.
+
+```bash
+# 1. Build the gold from a finished run (metadata is already on the author nodes).
+python scripts/metadata_gold.py output/abel_papers
+# 2. Score the TEXT extraction's recall - exclude the injected metadata edges, or
+#    the match is circular (the pipeline put those edges there).
+python -m evaluation.evaluate --gold output/abel_papers/metadata_gold.json \
+    --run-dir output/abel_papers --edge-sources conservative \
+    --exclude-edge-source metadata
+```
+
+Read **`relations_untyped` recall** as the headline: the text labels these its own
+way (`located_in` for a birthplace, `joined` for `member_of`), so endpoints-only
+is the honest match. **Precision is not meaningful** - the prose asserts many true
+ties the four spreadsheet fields never list, so every one of them scores as a
+false positive. `member_of` recall is the load-bearing number; it validates the
+membership extraction that feeds the affiliation network.
+
+`--exclude-edge-source` drops an edge only when *all* its sources are excluded, so
+a `metadata;llm_extracted` edge (the text corroborated the record) still counts.
+
+## German entities without hand-annotation
+
+For the entity side, two off-the-shelf German sets bracket the Abel register and
+need no annotation - run them like any benchmark:
+
+```bash
+python -m benchmarks.run_benchmark --dataset germeval --limit 20 --run --eval  # modern news/wiki
+python -m benchmarks.run_benchmark --dataset hipe --limit 20 --run --eval      # historical OCR (German by default)
+```
 
 ## Interpreting results
 

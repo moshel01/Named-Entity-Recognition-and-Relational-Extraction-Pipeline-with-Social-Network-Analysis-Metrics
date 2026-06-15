@@ -56,6 +56,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--constrain-relations", action="store_true",
                     help="Constrain the LLM to the gold's relation labels so "
                          "TYPED relation F1 is meaningful (ollama mode).")
+    ap.add_argument("--relation-guide", default="",
+                    help="JSON file of {label: definition} shown to the LLM next "
+                         "to the allowed types (A/B the typing accuracy). Implies "
+                         "--constrain-relations; tags the run _guide.")
     ap.add_argument("--coref", action="store_true",
                     help="Enable fastcoref pronoun resolution (A/B vs default off).")
     args = ap.parse_args(argv)
@@ -63,10 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     book = Path(args.book)
     if not book.exists():
         ap.error(f"book not found: {book}")
+    # A guide only constrains if the labels are constrained too.
+    if args.relation_guide:
+        args.constrain_relations = True
     name = args.name or re.sub(r"[^a-z0-9]+", "_", book.stem.lower()).strip("_")
     run_name = f"{name}_{args.mode}"
     if args.constrain_relations:
         run_name += "_constr"
+    if args.relation_guide:
+        run_name += "_guide"
     if args.coref:
         run_name += "_coref"
 
@@ -114,8 +123,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.constrain_relations:
         rel_labels = sorted({r.type for r in gold.relations if r.type})
         if rel_labels:
-            cfg["ontology"] = {"enabled": True, "drop_unmapped": False,
-                               "relations": rel_labels}
+            onto = {"enabled": True, "drop_unmapped": False, "relations": rel_labels}
+            if args.relation_guide:
+                import json as _json
+                full = _json.loads(Path(args.relation_guide).read_text(encoding="utf-8"))
+                # Only ship definitions for labels actually in the gold inventory.
+                guide = {k: full[k] for k in rel_labels if k in full}
+                onto["relation_guide"] = guide
+                print(f"Relation guide: definitions for {len(guide)}/{len(rel_labels)} labels")
+            cfg["ontology"] = onto
             print(f"Constraining LLM to {len(rel_labels)} relation labels: {rel_labels}")
     config_path = input_dir / f"config_{run_name}.yaml"
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")

@@ -7,7 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import ace2005, common, dialogre, dwie, hipe, redocred, tacred
+from . import (ace2005, common, conll2003, dialogre, dwie, germeval, hipe,
+               ontonotes5, redocred, tacred, uner, wnut17)
 
 ADAPTERS = {
     "redocred": redocred,
@@ -16,9 +17,16 @@ ADAPTERS = {
     "tacred": tacred,
     "hipe": hipe,
     "dialogre": dialogre,
+    "germeval": germeval,
+    "conll2003": conll2003,
+    "ontonotes5": ontonotes5,
+    "wnut17": wnut17,
+    "uner": uner,
 }
 DEFAULT_SPLIT = {"redocred": "test", "dwie": "train", "ace2005": "test",
-                 "tacred": "test", "hipe": "dev", "dialogre": "dev"}
+                 "tacred": "test", "hipe": "dev", "dialogre": "dev",
+                 "germeval": "validation", "conll2003": "test",
+                 "ontonotes5": "test", "wnut17": "test", "uner": "test"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"--path is required for {args.dataset} (local LDC-derived JSON).")
         docs = adapter.load(path=args.path, limit=args.limit)
     else:
-        docs = adapter.load(split=split, limit=args.limit)
+        # path is optional here: HF-id override (conll2003/ontonotes5/wnut17) or
+        # treebank config (uner); ignored by adapters that do not use it.
+        docs = adapter.load(split=split, limit=args.limit, path=args.path)
 
     # Trim to target types (both gold and the GLiNER labels the pipeline gets).
     types = ([t.strip().upper() for t in args.types.split(",") if t.strip()]

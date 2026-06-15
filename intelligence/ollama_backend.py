@@ -97,7 +97,8 @@ class OllamaBackend(IntelligenceBackend):
     ) -> tuple[list[EntityMention], list[Relationship], list[TimelineEvent]]:
         prompt = build_extraction_prompt(chunk_text, candidates, self.label_types,
                                          relation_types=self.relation_types or None,
-                                         author_name=author_name)
+                                         author_name=author_name,
+                                         relation_guide=self.relation_guide or None)
         import time
         t0 = time.monotonic()
         try:

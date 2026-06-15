@@ -36,6 +36,8 @@ class CoreferenceResolver:
         self.model_name = cc.model
         self.device = cc.device
         self.max_narrator = cc.max_narrator_mentions_per_chunk
+        self.service_url = (getattr(cc, "service_url", "") or "").rstrip("/")
+        self.service_timeout = getattr(cc, "service_timeout", 30)
         langs = [l for l in cc.languages if l in _FIRST_PERSON] or ["en"]
         words = set().union(*(_FIRST_PERSON[l] for l in langs))
         self._first_person_re = re.compile(
@@ -44,6 +46,7 @@ class CoreferenceResolver:
         )
         self._fcoref = None
         self._fcoref_failed = False
+        self._service_failed = False
 
     # Narrator (always available)
     def narrator_mentions(
@@ -138,30 +141,55 @@ class CoreferenceResolver:
             )
         return extra
 
-    def pronoun_mentions(
-        self, text: str, mentions: list[EntityMention], doc_id: str,
-        chunk_id: str, offset: int,
-    ) -> list[EntityMention]:
-        """Re-emit named identities at third-person pronoun spans via fastcoref."""
-        if not (self.enabled and self.pronoun_resolution):
-            return []
+    def _service_clusters(self, text: str):
+        """POST a chunk to the coref microservice. Returns its clusters
+        ``[[[s,e],...],...]`` or None on any failure (then stop retrying)."""
+        import json
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                self.service_url + "/resolve",
+                data=json.dumps({"texts": [text]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=self.service_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return data["clusters"][0]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("coref service %s failed (%s); falling back to "
+                           "in-process/heuristic for the rest of the run.",
+                           self.service_url, exc)
+            self._service_failed = True
+            return None
+
+    def _get_clusters(self, text: str):
+        """Coref clusters for one chunk: microservice first, then in-process
+        fastcoref, else None (caller uses the heuristic resolver)."""
+        if self.service_url and not self._service_failed:
+            clusters = self._service_clusters(text)
+            if clusters is not None:
+                return clusters
         self._ensure_fcoref()
         if self._fcoref is None:
-            return self.heuristic_pronoun_mentions(text, mentions, doc_id,
-                                                   chunk_id, offset)
+            return None
         try:
-            preds = self._fcoref.predict(texts=[text])
-            clusters = preds[0].get_clusters(as_strings=False)
+            return self._fcoref.predict(texts=[text])[0].get_clusters(as_strings=False)
         except Exception as exc:  # noqa: BLE001
             logger.debug("fastcoref prediction failed: %s", exc)
-            return []
+            return None
 
+    def _mentions_from_clusters(
+        self, clusters, text: str, mentions: list[EntityMention], doc_id: str,
+        chunk_id: str, offset: int,
+    ) -> list[EntityMention]:
+        """Re-emit each cluster's named identity at its pronoun spans."""
         # Index named mentions by their chunk-relative span for cluster matching.
         rel_spans = [(mm.start_char - offset, mm.end_char - offset, mm) for mm in mentions]
         extra: list[EntityMention] = []
         for cluster in clusters:
-            # Find the named identity in this cluster: a real detected mention
-            # whose span overlaps one of the cluster's spans.
+            # The named identity in this cluster: a real detected mention whose
+            # span overlaps one of the cluster's spans.
             identity: Optional[EntityMention] = None
             for (c_start, c_end) in cluster:
                 for s, e, mm in rel_spans:
@@ -190,6 +218,24 @@ class CoreferenceResolver:
                     )
                 )
         return extra
+
+    def pronoun_mentions(
+        self, text: str, mentions: list[EntityMention], doc_id: str,
+        chunk_id: str, offset: int,
+    ) -> list[EntityMention]:
+        """Re-emit named identities at third-person pronoun spans.
+
+        Clusters come from the coref microservice (if ``service_url`` is set) or
+        in-process fastcoref; with neither, the nearest-antecedent heuristic.
+        """
+        if not (self.enabled and self.pronoun_resolution):
+            return []
+        clusters = self._get_clusters(text)
+        if clusters is None:
+            return self.heuristic_pronoun_mentions(text, mentions, doc_id,
+                                                   chunk_id, offset)
+        return self._mentions_from_clusters(clusters, text, mentions, doc_id,
+                                            chunk_id, offset)
 
     # Combined
     def resolve(

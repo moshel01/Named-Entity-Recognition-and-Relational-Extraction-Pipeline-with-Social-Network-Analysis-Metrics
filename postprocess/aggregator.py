@@ -71,6 +71,27 @@ class AggregateResult:
     timeline: list[TimelineEvent] = field(default_factory=list)
 
 
+def _consolidate_relationships(rels: list[Relationship]) -> list[Relationship]:
+    """Drop the duplicate edges chunk overlap double-extracts: same doc, same
+    endpoints + type, same verbatim evidence. Distinct-evidence repeats are real
+    corroboration (separate sentences) and kept, so edge weight stays meaningful."""
+    seen: set[tuple] = set()
+    out: list[Relationship] = []
+    dropped = 0
+    for r in rels:
+        key = (r.doc_id, normalize_name(r.source), normalize_name(r.target),
+               (r.rel_type or "").strip().lower(),
+               _WS_RE.sub(" ", (r.evidence or "")).strip().lower())
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        out.append(r)
+    if dropped:
+        logger.info("Edge consolidation: dropped %d overlap-duplicate relationships.", dropped)
+    return out
+
+
 def aggregate(extractions: list[DocumentExtraction]) -> AggregateResult:
     """Merge per-document extractions into corpus tables."""
     mentions: list[EntityMention] = []
@@ -138,6 +159,8 @@ def aggregate(extractions: list[DocumentExtraction]) -> AggregateResult:
                 attributes=attrs,
             )
         )
+
+    relationships = _consolidate_relationships(relationships)
 
     logger.info(
         "Aggregated %d extractions -> %d raw entities, %d relationships, %d timeline events",

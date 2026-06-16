@@ -17,7 +17,14 @@ The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
 > **Optional add-ons:** `io.use_docling` for structure-aware PDF/DOCX/OCR
 > ingestion; `export.graph_metrics` for SNA metrics Gephi can't compute
 > (Burt's constraint/brokerage, bridges, articulation points + a `graph_report.json`
-> health check). Both off by default. NER is **GLiNER2** (`fastino/*`); GLiNER v1 is deprecated.
+> health check with a KGC-2026 quality-pillar summary). Both off by default. NER is
+> **GLiNER2** (`fastino/*`); GLiNER v1 is deprecated.
+
+> **Cheap API path:** `api` mode talks to any OpenAI-compatible host - set
+> `provider: openai` + `base_url` + `json_mode` to point at DeepSeek, Together, Groq,
+> OpenRouter, or a local vLLM (NER stays local/free; only relations hit the API). The
+> `intelligence.skip_sparse_chunks` cost gate skips the LLM call for chunks too sparse
+> to hold a relation. See [INSTRUCTIONS.md §4](INSTRUCTIONS.md#4-the-three-modes).
 
 ---
 
@@ -52,9 +59,9 @@ python -m spacy download de_core_news_lg       # German (for the nazi_era domain
 
 # GLiNER, sentence-transformers, and fastcoref weights all download
 # automatically from Hugging Face on first run - no manual step. The GLiNER
-# model is chosen in config: fastino/gliner2-large-v1 (English) or
-# fastino/gliner2-multi-v1 (multilingual / German). Backend (GLiNER vs
-# GLiNER2) is auto-detected from the model name.
+# model is chosen in config: fastino/gliner2-multi-v1 (multilingual, the
+# default) or fastino/gliner2-large-v1 (English-only, heavier). Backend
+# (GLiNER vs GLiNER2) is auto-detected from the model name.
 ```
 
 > Full step-by-step model install (incl. GPU, offline caching, and what each
@@ -118,7 +125,7 @@ Outputs land in `output/<run_name>/`:
 | `graph_affiliation.gexf` | Two-mode membership/biography network (person→org/event/place). |
 | `graph_discourse.gexf` | Stance + co-occurrence layer (attitudes, co-presence). |
 | `narrative.gexf` / `narrative_transitions.csv` | Bearman-Stovel narrative-sequence network: event-element transitions across the corpus (opt-in `export.narrative_network`). |
-| `graph_report.json` | NetworkX QA: components, weighted brokerage, bridges, articulation points, signed structural balance (opt-in `export.graph_metrics`). |
+| `graph_report.json` | NetworkX QA: components, weighted brokerage, bridges, articulation points, signed structural balance, + a `quality_pillars` summary (provenance/consistency from real data; accuracy/completeness/timeliness as labelled coverage proxies). Opt-in `export.graph_metrics`. |
 | `timeline.csv` | Chronological dated events (`letter_id` included). |
 | `entities.json` | Full resolved entity records with aliases, tags, attributes. |
 | `raw_extractions.jsonl` | Per-document extractions (provenance). |
@@ -276,6 +283,12 @@ inferred edges are labeled so they can be included or excluded explicitly.
 ## Robustness
 
 - **JSON repair** - 5 escalating levels recover malformed LLM output.
+- **Faithfulness guards** - hallucination signals tagged on edges (filter in Gephi),
+  never silently dropped unless you opt in: `evidence_unverified` (the quote isn't
+  verbatim in the chunk), `evidence_ungrounded` (the quote names neither endpoint -
+  anchor check), `type_violation` (endpoint types contradict the relation's signature,
+  e.g. `born_in` pointing at an org). Type violations drop with
+  `ontology.drop_type_violations`.
 - **Checkpointing** - append-only JSONL; `--resume` skips completed docs; a
   truncated final line from a crash is detected and discarded.
 - **Fail-soft** - an unreadable file or a failed chunk logs a warning and falls

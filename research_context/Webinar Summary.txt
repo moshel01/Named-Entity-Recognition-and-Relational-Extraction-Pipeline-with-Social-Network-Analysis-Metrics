@@ -1,0 +1,38 @@
+WEBINAR SUMMARY: How to Pick the Right Document Extraction Platform in 2026
+
+Topic: Transitioning from Legacy Intelligent Document Processing (IDP) to Large Language Models (LLMs)
+Focus: Architectural constraints, agentic workflows, and verification mechanisms for 2026 data pipelines.
+
+1. The Fall of Legacy IDP and OCR
+
+Historically, extracting data from unstructured documents relied on Zonal OCR (Optical Character Recognition) and rigid bounding-box templates.
+
+The Problem: Template drift. When a vendor moves the "Total Amount" field one inch to the left, the legacy IDP system breaks. Operations teams spend more time maintaining templates than processing documents.
+
+The LLM Shift: Modern extraction (2025-2026) Abandons spatial templates entirely. It relies on Vision-Language Models (VLMs) and LLMs to read the document semantically. The model finds the "Total Amount" based on the meaning of the surrounding text, regardless of where it appears on the page.
+
+2. Agentic Extraction Capabilities (The New Standard)
+
+In 2026, extraction is no longer a single-pass API call. It is an "Agentic Workflow."
+
+Multi-Step Reasoning: Instead of just outputting JSON, the extraction agent is given a schema. If the document is 50 pages long, the agent autonomously decides how to chunk the document, which tables to parse, and how to merge nested data structures across page breaks.
+
+Self-Correction: If the agent encounters a blurry scan or an edge case, it does not just fail silently or output a hallucination. It runs a self-diagnostic, checks its extraction against the schema, and re-evaluates the chunk of text to correct its own error before finalizing the output.
+
+3. Accuracy and Verification Mechanisms (Code-in-the-Loop)
+
+To achieve 99%+ accuracy required for enterprise or historical data extraction, pipelines can no longer rely solely on LLMs. They must implement deterministic guardrails.
+
+Schema Enforcement: Using frameworks like Pydantic in Python to force the LLM to output valid data types (e.g., ensuring a "Date" field is actually a datetime object, not a string).
+
+Traceability / Grounding: Every extracted field must carry a citation or a bounding-box coordinate linking back to the original source text. If an LLM cannot point to the exact sentence it extracted the data from, the extraction is flagged as a potential hallucination.
+
+4. Document Pre-Processing
+
+LLMs are highly sensitive to the quality of the text they are fed.
+
+The Multimodal Approach: Pipelines must preserve layout context (headers, lists, reading order) during the pre-processing stage. Flattening a complex two-column PDF into a single string of text destroys the semantic relationships. Tools must preserve the Markdown structure before the LLM ever sees the text.
+
+5. Deployment Flexibility
+
+Cloud vs. Local: While massive models (GPT-4, Claude) dominate cloud extraction, strict data privacy, HIPAA compliance, or cost-at-scale requirements are pushing developers toward local, open-weights models (like Llama 3 or Qwen) quantized to run on consumer or edge hardware.

@@ -73,7 +73,7 @@ class CoreferenceConfig(BaseModel):
 class FoundationConfig(BaseModel):
     spacy_model: str = "en_core_web_trf"
     spacy_disable: list[str] = Field(default_factory=list)
-    gliner_model: str = "fastino/gliner2-large-v1"
+    gliner_model: str = "fastino/gliner2-multi-v1"   # multilingual, fits 8GB; large-v1 = English-only, heavier
     gliner_threshold: float = 0.45
     gliner_labels: list[str] = Field(
         default_factory=lambda: ["person", "organization", "location", "event"]
@@ -102,6 +102,15 @@ class ApiConfig(BaseModel):
     provider: Literal["anthropic", "openai", "bedrock"] = "anthropic"
     model: str = "claude-opus-4-8"
     api_key_env: str = "ANTHROPIC_API_KEY"
+    # OpenAI-compatible endpoint for any cheap host (DeepSeek, Together, Groq,
+    # OpenRouter, local vLLM/llama.cpp). Set provider: openai and point base_url
+    # at it. Empty = the provider's own default. For DeepSeek use deepseek-chat
+    # (V3): cheap, fast, JSON-mode capable. deepseek-reasoner (R1) wastes tokens on
+    # reasoning and its structured output is unreliable - same trap as qwen3.5.
+    base_url: str = ""
+    # response_format={"type":"json_object"} for openai-compatible servers that
+    # honor it (OpenAI, DeepSeek-chat). Off for reasoner models - they reject it.
+    json_mode: bool = False
     max_tokens: int = 4096
     temperature: float = 0.0
     max_retries: int = 4
@@ -143,6 +152,13 @@ class IntelligenceConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     python_only: PythonOnlyConfig = Field(default_factory=PythonOnlyConfig)
     langextract: LangExtractConfig = Field(default_factory=LangExtractConfig)
+    # Cost gate (LLM modes only): skip the relation call for a chunk too sparse to
+    # contain a relation. A relation needs two entities co-occurring, so a chunk
+    # with no two distinct entities inside one window can't yield one - skipping it
+    # saves API tokens with no recall loss. Off by default (no behavior change).
+    skip_sparse_chunks: bool = False
+    sparse_window_words: int = 200
+    sparse_min_entities: int = 2
 
 
 class DedupConfig(BaseModel):
@@ -237,6 +253,10 @@ class OntologyConfig(BaseModel):
     enabled: bool = True
     fuzzy_threshold: float = 0.82
     drop_unmapped: bool = False        # drop relations that match nothing in the ontology
+    # Type-signature consistency check (ASP-style): a relation whose endpoint
+    # entity types contradict its signature ("led" pointing at a place) is
+    # tagged type_violation, filterable in Gephi. Set true to drop instead.
+    drop_type_violations: bool = False
     relations: Any = None              # dict[str, list[str]] | list[str] | None
     # label -> one-line definition shown to the LLM next to the allowed types.
     # Make confusable labels contrastive ("associate: companions, NOT friends").

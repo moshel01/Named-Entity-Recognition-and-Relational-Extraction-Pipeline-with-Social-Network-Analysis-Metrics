@@ -288,6 +288,21 @@ class Pipeline:
             if before != len(relationships):
                 console.print(f"[cyan]Dropped {before - len(relationships)} non-org membership edges.[/cyan]")
 
+        # 2a3. Type-signature consistency (ASP-style, Tran et al. 2025): a
+        # relation whose endpoint types contradict its signature ("led" into a
+        # place, "born_in" into an org) is a likely misextraction. Tag
+        # type_violation so it stays filterable; drop only if configured. Loose
+        # relations carry no signature and are never flagged.
+        if self.config.ontology.enabled:
+            from postprocess.ontology import check_relation_types
+            type_of = {e.entity_id: e.label for e in entities}
+            relationships, n_typeviol = check_relation_types(
+                relationships, type_of,
+                drop=self.config.ontology.drop_type_violations)
+            if n_typeviol:
+                verb = "Dropped" if self.config.ontology.drop_type_violations else "Tagged"
+                console.print(f"[cyan]{verb} {n_typeviol} type-signature violations.[/cyan]")
+
         # 2b. LLM-assisted dedup: merge same-entity nodes the rules missed.
         if self.config.dedup.llm_assist and llm_capable:
             from postprocess.llm_dedup import apply_llm_merges
@@ -372,6 +387,7 @@ class Pipeline:
             from postprocess import graph_metrics
             report = graph_metrics.enrich(tables)
             if report:
+                report["quality_pillars"] = graph_metrics.quality_pillars(report, tables)
                 import json as _json
                 (self.run_dir / "graph_report.json").write_text(
                     _json.dumps(report, indent=2), encoding="utf-8")

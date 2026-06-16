@@ -23,7 +23,18 @@ errors, merge fragments, or add entities the candidate list missed.
 - Keep entity names and evidence in the language of the passage; never \
 translate them.
 - `confidence` is a float in [0,1] reflecting how strongly the text supports it.
-- Output a SINGLE JSON object and NOTHING else. No markdown, no commentary."""
+- Output a SINGLE JSON object and NOTHING else. No markdown, no commentary.
+
+NEVER do these (negative examples):
+- entity "he" / "the company" / "my father" -> WRONG: pronouns and bare common \
+nouns are not entities; use the named referent or drop it.
+- type "provided_grant_to_support_the_education_program" -> WRONG: the type is a \
+short verb phrase ("funded"), never a sentence.
+- a relationship the passage does not state -> WRONG: if it is not in the text, \
+omit it; do not infer from world knowledge.
+- evidence translated to English when the passage is German -> WRONG: keep names \
+and evidence verbatim in the source language.
+- ```json ... ``` or "Here is the JSON:" -> WRONG: emit the raw object only."""
 
 _OUTPUT_SCHEMA = {
     "entities": [

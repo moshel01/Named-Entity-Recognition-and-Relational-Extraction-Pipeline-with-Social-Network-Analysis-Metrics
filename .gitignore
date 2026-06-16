@@ -68,3 +68,7 @@ desktop.ini
 # Logs
 *.log
 logs/
+research_context/Agentic GraphRAG_ Autonomous Knowledge Graph Construction and Adaptive Retrieval_files/
+research_context/Atomic GraphRAG Explained_ The Case for a Single-Query Pipeline_files/
+research_context/BenchmarkQED_ Automated benchmarking of RAG systems - Microsoft Research_files/
+research_context/Neo4j LLM Knowledge Graph Builder - Extract Nodes and Relationships from Unstructured Text - Neo4j Labs_files/

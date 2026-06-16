@@ -62,9 +62,9 @@ foundation:
   spacy_disable: []                # e.g. ["lemmatizer"] to speed up
   # NER backend is GLiNER2 (fastino/* models). The original GLiNER (urchade/*)
   # is deprecated and no longer loads.
-  #   English (best):        fastino/gliner2-large-v1   <-- default
-  #   Non-English / mixed:   fastino/gliner2-multi-v1   (100+ langs, mDeBERTa)
-  gliner_model: "fastino/gliner2-large-v1"
+  #   Multilingual / mixed:  fastino/gliner2-multi-v1   <-- default (100+ langs, mDeBERTa)
+  #   English-only, heavier: fastino/gliner2-large-v1   (best English NER; ~2x the load)
+  gliner_model: "fastino/gliner2-multi-v1"
   gliner_threshold: 0.45           # Min GLiNER confidence to keep a span
   gliner_labels:                   # Zero-shot labels - edit per corpus
     - "person"
@@ -107,12 +107,29 @@ intelligence:
     provider: "anthropic"          # "anthropic" | "openai" | "bedrock"
     model: "claude-opus-4-8"       # anthropic/openai model id, or bedrock model id
     api_key_env: "ANTHROPIC_API_KEY"   # Env var holding the key (not the key!)
+    # Cheap path: any OpenAI-compatible endpoint via provider: openai + base_url.
+    # DeepSeek (recommended cheap target):
+    #   provider: "openai"
+    #   model: "deepseek-chat"           # V3 - cheap, fast, JSON-mode capable
+    #   api_key_env: "DEEPSEEK_API_KEY"
+    #   base_url: "https://api.deepseek.com"
+    #   json_mode: true
+    # Use deepseek-chat, NOT deepseek-reasoner (R1): R1 burns tokens on reasoning
+    # and its structured output is unreliable (same trap as qwen3.5). Also works
+    # for Together/Groq/OpenRouter/local vLLM - just change base_url + model.
+    base_url: ""                   # OpenAI-compatible host; empty = provider default
+    json_mode: false               # response_format json_object (OpenAI/DeepSeek-chat)
     max_tokens: 4096
     temperature: 0.0
     max_retries: 4
     request_timeout: 120
     # Bedrock only:
     aws_region: "us-east-1"
+  # Cost gate (api/ollama): skip the relation call for chunks too sparse to hold a
+  # relation. Free NER (GLiNER) still runs; only entity-dense chunks reach the API.
+  skip_sparse_chunks: false        # true to save tokens on a paid endpoint
+  sparse_window_words: 200         # a relation needs 2 entities within this window
+  sparse_min_entities: 2
   # Mode 3: ollama
   ollama:
     host: "http://localhost:11434"
@@ -178,6 +195,11 @@ ontology:
   enabled: true                    # false = free-form relations (no schema at all)
   fuzzy_threshold: 0.82
   drop_unmapped: false             # true = drop edges that match no canonical type
+  # Type-signature consistency check (ASP-style): a relation whose endpoint
+  # entity types contradict its signature ("led"/"born_in" pointing at a place
+  # or an org) is tagged type_violation (filterable in Gephi). Only constraining
+  # relations have a signature; loose stance/interaction relations are exempt.
+  drop_type_violations: false      # true = drop the violations instead of tagging
   # null + no domain -> a built-in generic schema (funded/led/member_of...) so a
   # web crawl gets a usable edge vocabulary instead of a unique verb phrase per
   # edge. Set your own to override; ontology.enabled:false to turn it off.

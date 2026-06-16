@@ -853,6 +853,139 @@ def test_generic_ontology() -> None:
     check("funded_by keeps direction", al.align("funded_by") == "funded_by", str(al.align("funded_by")))
 
 
+def test_org_name_cleanup() -> None:
+    from config import DedupConfig
+    from core.schema import Entity
+    from postprocess.deduplicator import (Deduplicator, _strip_leading_the,
+                                          _singularize_org)
+    print("-- org name cleanup")
+    for raw, want in {"the Lilly Endowment": "Lilly Endowment",
+                      "The Manhattan Institute": "Manhattan Institute",
+                      "Die Linke": "Die Linke",            # German article kept
+                      "Ford Foundation": "Ford Foundation"}.items():
+        check(f"strip-the {raw!r}", _strip_leading_the(raw) == want, f"got {_strip_leading_the(raw)!r}")
+    for raw, want in {"Knight Foundations": "Knight Foundation",
+                      "Carnegie Universities": "Carnegie University",
+                      "Heritage Societies": "Heritage Society"}.items():
+        check(f"singularize {raw!r}", _singularize_org(raw) == want, f"got {_singularize_org(raw)!r}")
+    # Safety: singularize only when a singular sibling exists; real plural names stay.
+    d = Deduplicator(DedupConfig())
+    ents = [Entity(entity_id="e1", canonical_name="Knight Foundations", label="ORG", mention_count=2),
+            Entity(entity_id="e2", canonical_name="Knight Foundation", label="ORG", mention_count=5),
+            Entity(entity_id="e3", canonical_name="Open Society Foundations", label="ORG", mention_count=4),
+            Entity(entity_id="e4", canonical_name="the Lilly Endowment", label="ORG", mention_count=3)]
+    names = sorted(e.canonical_name for e in d._clean_org_surfaces(ents))
+    check("plural folds onto existing singular",
+          "Knight Foundation" in names and "Knight Foundations" not in names, str(names))
+    check("real plural name kept (no sibling)", "Open Society Foundations" in names, str(names))
+    check("leading 'the' stripped", "Lilly Endowment" in names, str(names))
+    check("knight pair merged (4 -> 3)", len(names) == 3, str(names))
+
+
+def test_sparse_chunk_gate() -> None:
+    from intelligence.base import _dense_enough
+    from core.schema import EntityMention
+    print("-- sparse chunk cost gate")
+    def m(t, sc):
+        return EntityMention(text=t, label="PERSON", start_char=sc, end_char=sc + len(t),
+                             chunk_id="c", doc_id="d")
+    txt = "Alice " + "x " * 40 + "Bob " + "y " * 300 + "Carol"
+    ms = [m("Alice", 0), m("Bob", txt.find("Bob")), m("Carol", txt.find("Carol"))]
+    check("two entities in one window -> send", _dense_enough(ms, txt, 0, 200, 2) is True, "")
+    check("single entity -> skip", _dense_enough([ms[0]], txt, 0, 200, 2) is False, "")
+    far = [m("Alice", 0), m("Carol", txt.find("Carol"))]
+    check("entities >window apart -> skip", _dense_enough(far, txt, 0, 200, 2) is False, "")
+
+
+def test_edge_consolidation() -> None:
+    from core.schema import Relationship
+    from postprocess.aggregator import _consolidate_relationships
+    print("-- cross-chunk edge consolidation")
+    def R(ev, doc="d"):
+        return Relationship(source="A", target="B", rel_type="met_with", doc_id=doc, evidence=ev)
+    out = _consolidate_relationships([R("They met in Berlin."), R("They met in Berlin."),
+                                      R("Later they met again.")])
+    check("overlap dup dropped, corroboration kept", len(out) == 2, str(len(out)))
+    out2 = _consolidate_relationships([R("They met in Berlin."), R("They met in Berlin.", doc="d2")])
+    check("cross-doc same evidence kept", len(out2) == 2, str(len(out2)))
+
+
+def test_relation_type_signatures() -> None:
+    from core.schema import Relationship
+    from postprocess.ontology import check_relation_types
+    print("-- ASP-style relation type signatures")
+    type_of = {"p1": "PERSON", "p2": "PERSON", "o1": "ORG",
+               "l1": "LOCATION", "x1": "ROLE"}  # ROLE not a core type -> wildcard
+
+    def R(src, tgt, rt):
+        return Relationship(source=src, target=tgt, rel_type=rt, doc_id="d", evidence="e")
+
+    good = R("p1", "o1", "led")          # person -> org: ok
+    bad = R("p1", "l1", "led")           # person -> place: violation
+    wild = R("p1", "x1", "born_in")      # exotic target type: wildcard, ok
+    loose = R("p1", "p2", "supported")   # no signature: never flagged
+    out, n = check_relation_types([good, bad, wild, loose], type_of, drop=False)
+    check("one violation flagged", n == 1, str(n))
+    check("violating edge tagged", bad.attributes.get("type_violation") is True, "")
+    check("valid edge untouched", "type_violation" not in good.attributes, "")
+    check("wildcard target untouched", "type_violation" not in wild.attributes, "")
+    check("loose relation untouched", "type_violation" not in loose.attributes, "")
+    check("nothing dropped when drop=False", len(out) == 4, str(len(out)))
+    out2, n2 = check_relation_types([R("p1", "l1", "led")], type_of, drop=True)
+    check("violation dropped when drop=True", len(out2) == 0 and n2 == 1, str(len(out2)))
+
+
+def test_quality_pillars() -> None:
+    from types import SimpleNamespace
+    from postprocess.graph_metrics import quality_pillars
+    print("-- KGC quality pillars")
+    edges = [
+        {"edge_source": "llm_extracted"},                 # asserted
+        {"edge_source": "metadata"},                       # asserted
+        {"edge_source": "rule_cooccurrence", "type_violation": True},  # weak + bad
+        {"edge_source": ""},                               # no provenance
+    ]
+    tables = SimpleNamespace(edges=edges)
+    report = {"qa_substantive": {"largest_cc_pct": 80.0, "isolates": 2},
+              "conflicts": {"conflicting_dyads": 1}}
+    qp = quality_pillars(report, tables)
+    check("asserted proxy 2/4 = 50%", qp["accuracy_proxy"]["asserted_tier_pct"] == 50.0,
+          str(qp["accuracy_proxy"]))
+    check("provenance 3/4 = 75%", qp["provenance"]["edges_with_source_pct"] == 75.0,
+          str(qp["provenance"]))
+    check("type violations counted", qp["consistency"]["type_violations"] == 1,
+          str(qp["consistency"]))
+    check("polarity conflicts surfaced", qp["consistency"]["polarity_conflicts"] == 1, "")
+    check("completeness carries cc%", qp["completeness_proxy"]["largest_cc_pct"] == 80.0, "")
+
+
+def test_evidence_grounding() -> None:
+    from core.schema import Relationship
+    from intelligence.base import _tag_ungrounded_evidence, _name_in_evidence
+    print("-- AEVS anchor / evidence grounding")
+    check("token grounds full name", _name_in_evidence("Joseph Goebbels", "goebbels spoke"), "")
+    # A shared stopword token must not ground when the significant tokens are absent.
+    check("article token ignored",
+          not _name_in_evidence("the Ford Foundation", "the committee met today"), "")
+    check("org acronym grounds", _name_in_evidence("the NSDAP", "joined the nsdap"), "")
+
+    def R(s, t, ev, origin="extracted"):
+        return Relationship(source=s, target=t, rel_type="met_with", doc_id="d",
+                            evidence=ev, origin=origin)
+    grounded = R("Goebbels", "Hitler", "Goebbels met Hitler in Berlin.")
+    by_token = R("Joseph Goebbels", "Propaganda Ministry", "Goebbels ran the ministry.")
+    bad = R("Alice", "Bob", "The committee approved the annual budget.")
+    narr = R("Johann Alff", "NSDAP", "I joined the party in 1931.")  # author endpoint
+    inferred = R("X", "Y", "", origin="inferred")
+    n = _tag_ungrounded_evidence([grounded, by_token, bad, narr, inferred], author="Johann Alff")
+    check("one ungrounded flagged", n == 1, str(n))
+    check("bad edge tagged", bad.attributes.get("evidence_ungrounded") == "true", "")
+    check("grounded untagged", "evidence_ungrounded" not in grounded.attributes, "")
+    check("token-grounded untagged", "evidence_ungrounded" not in by_token.attributes, "")
+    check("narrator endpoint exempt", "evidence_ungrounded" not in narr.attributes, "")
+    check("inferred/no-evidence skipped", "evidence_ungrounded" not in inferred.attributes, "")
+
+
 def test_qid_consolidation() -> None:
     from core.schema import Entity, Relationship
     from postprocess.wikidata import consolidate_by_qid
@@ -961,6 +1094,12 @@ def main() -> int:
     test_signed_balance()
     test_polarity_conflicts()
     test_generic_ontology()
+    test_org_name_cleanup()
+    test_sparse_chunk_gate()
+    test_edge_consolidation()
+    test_relation_type_signatures()
+    test_quality_pillars()
+    test_evidence_grounding()
     test_qid_consolidation()
     test_reference_stripping()
     test_narrative_transitions()

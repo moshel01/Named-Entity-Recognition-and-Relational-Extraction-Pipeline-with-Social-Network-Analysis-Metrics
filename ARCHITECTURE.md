@@ -145,6 +145,20 @@ in-process fastcoref, then the heuristic resolver. Setup:
   the extraction prompt and aligns the verbose tail, so a web crawl yields a usable
   edge vocabulary (funded/led/member_of...) instead of a unique verb phrase per edge.
   Domain configs still supply their own ontology; `ontology.enabled: false` opts out.
+- **Type-consistency & anchor grounding (Tran et al. 2025, LLM+ASP; Yang et al.
+  2026, AEVS).** Both fight hallucination by checking extractions against structure:
+  ASP rejects relations whose argument types violate a signature; AEVS grounds every
+  triplet element to a source-text span (anchor discovery -> grounded extraction ->
+  restoration verification). We adopt the type half as a plain-Python consistency gate
+  (`ontology.check_relation_types`: an endpoint type contradicting a relation's
+  signature -> `type_violation`, running after the existing suspect_membership rule) -
+  no clingo, a 14-relation check doesn't need an answer-set solver. The provenance half
+  AEVS formalizes is mostly already here: local GLiNER spans are the anchors, every
+  relation carries its evidence text, and `evidence_tiers` ranks faithfulness. The one
+  net-new AEVS lever - verify a relation's endpoints actually occur in its evidence span -
+  shipped as `intelligence.base._tag_ungrounded_evidence` (`evidence_ungrounded`,
+  tag-only; author endpoint exempt for first-person coref). Complements the existing
+  `evidence_unverified` (quote-not-in-chunk) check.
 - **Membership-universe context (Bosshart et al. 2026, NBER).** The Abel corpus
   is an opt-in sample of committed early members, not a random draw — read the
   network as descriptive of this corpus, not inferential for the movement (the
@@ -178,10 +192,38 @@ Not on the current track; recorded so the rationale survives.
   KB). The disambiguation passes would spend the LLM budget reserved for relations,
   and entity resolution is already handled by dedup/identity_resolution + optional
   Wikidata QID linking. Not adopted as a framework; its lesson — fold article/plural
-  ORG variants ("the Rockefeller Foundation", "Knight foundations") — is a cheap
-  dedup tweak, tracked separately.
+  ORG variants ("the Rockefeller Foundation", "Knight Foundations") — shipped in
+  `deduplicator._clean_org_surfaces` (strip leading "the"; singularize a plural only
+  when its singular already exists, so real plural names are kept).
 - **Generating unseen temporal facts (Amalvy & Huang 2026).** A method for building
   contamination-free TKGE benchmarks by forecasting future quadruples then generating
   text for them. Useful for benchmark hygiene, but it's synthetic fact generation in
   the invent-unseen-edges space this pipeline excludes, and the harness already scores
   against real gold. Not adopted.
+- **Code-based event extraction (SALE, Xu et al. 2026; AEC, Guo et al. 2026).** Both
+  cast document-level EVENT extraction (triggers + argument roles) as Python class
+  instantiation, AEC adding a multi-agent retrieve/plan/code/verify loop. Not adopted:
+  this pipeline builds an actor-tie network, not an event-argument structure (the
+  narrative-sequence net is the deliberately-light event layer), and the code-schema
+  re-plumbing + multi-agent passes cost many more local LLM calls for a task we don't
+  run. The convergent lesson — schema-as-code reduces structural violations — is
+  already covered cheaply by the JSON schema + `json_repair` + ontology alignment.
+- **Entity side information for zero-shot RE (DocZSRE-SI, Chanthran et al. 2026).**
+  Feeding per-entity descriptions + hypernyms into the RE step lifts macro-F1 ~11.6%
+  without synthetic data. A real recall lever and the most promising deferred item,
+  but a faithful version needs an entity knowledge source during extraction. Concrete
+  path: when Wikidata linking is on, move it ahead of relation extraction and pass the
+  entity descriptions into the prompt as side information.
+- **SLM-proxy knowledge mining (Falconer, Zhang et al. 2026).** An LLM plans an
+  executable workflow and generates supervision to train small BERT proxies
+  (`get_label`/`get_span`) that carry the bulk inference, ~90% cheaper and 20x faster
+  at corpus scale. A scale play for "massive corpora"; our corpus is 540 docs and the
+  small-model role is already filled by GLiNER (free local NER). Training per-task
+  relation proxies would add a supervision/training loop for a cost we don't have at
+  this scale. Revisit only if the corpus grows by orders of magnitude.
+- **Hyper-relational KG construction (LLHKG, Zhu et al. 2026).** A PLM-for-KG survey
+  plus a lightweight-LLM framework for n-ary / qualified facts (a triple plus qualifier
+  key-values, Wikidata-statement style, claimed comparable to GPT-3.5). We already hang
+  qualifiers on edges (`period`, `year`, evidence, `edge_source`); promoting them to
+  first-class qualified statements is a data-model change for marginal SNA gain. Not
+  adopted; the survey confirms the extract -> canonicalize -> evaluate spine we follow.

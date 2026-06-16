@@ -4,6 +4,114 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Type-signature consistency gate, evidence-grounding anchor check, KGC quality-pillar report
+
+Three precision/QA guards from a paper pass; the rest triaged.
+
+- **Evidence-grounding anchor check** (`intelligence/base.py`, `_tag_ungrounded_evidence`,
+  after Yang et al. 2026 AEVS): a typed relation whose evidence quote names NEITHER
+  endpoint is likely misattributed (the model picked a real sentence that doesn't
+  mention the pair). Tag `evidence_ungrounded`; never drop - coref-resolved first-person
+  evidence uses pronouns, so the author endpoint is exempt and this stays a filterable
+  signal, not a filter. Token-level match (so "Goebbels" grounds "Joseph Goebbels",
+  multilingual-safe). Complements the existing `evidence_unverified` (quote-not-in-chunk).
+
+- **ASP-style relation type signatures** (`ontology.py`, `RELATION_TYPE_SIGNATURES`):
+  a relation whose endpoint entity types contradict its signature ("led" or
+  "born_in" pointing at a place, "founded_by" reversed) is a likely misextraction.
+  Tag `type_violation` (filterable in Gephi); drop only with
+  `ontology.drop_type_violations`. High-precision: only constraining relations get a
+  signature; loose stance/interaction ones are exempt, and a non-core entity type is
+  a wildcard (no false flags on domain labels). Generalizes the hand-rolled
+  suspect_membership check already in main.py. After Tran et al. 2025 (LLM + ASP for
+  joint entity-relation extraction): the ASP solver is overkill for a 14-relation
+  type check, so the consistency rule is plain Python - no clingo dependency.
+- **KGC-2026 quality pillars** (`graph_metrics.quality_pillars`): `graph_report.json`
+  now carries a five-pillar summary - provenance (edge_source coverage) and
+  consistency (polarity conflicts + type violations) from real data; accuracy,
+  completeness, timeliness as labelled coverage proxies (no gold at run time).
+  Reporting overlay only, fail-soft.
+
+Three RAG/QA resources triaged into ASPIRATIONAL.md (different problem - retrieval,
+not SNA extraction): Microsoft BenchmarkQED (RAG eval harness), Neo4j Agentic
+GraphRAG (autonomous KG + adaptive retrieval), Memgraph Atomic GraphRAG (single-query
+pipeline). LELA/KGGen/DocZSRE-SI already on record there.
+
+Three more papers triaged into ARCHITECTURE.md grounding/deferred: AEVS
+(anchor-constrained extraction + provenance, Yang 2026) - grounding; its net-new
+lever (verify endpoints occur in the evidence span) shipped as the anchor check
+above. Falconer (SLM-proxy mining, Zhang 2026) and LLHKG (hyper-relational KG,
+Zhu 2026) - deferred (wrong scale / data-model change for marginal SNA gain).
+
+---
+
+## API build-out (cheap-endpoint ready), cost gate, edge consolidation, negative anchoring
+
+Built the API path out for cheap-or-expensive endpoints, plus three asked-about
+methodologies. New ASPIRATIONAL.md tracks the unlimited-resources "perfect pipeline".
+
+- **OpenAI-compatible endpoints** (`api_backend.py`, `ApiConfig`): provider `openai`
+  now takes `base_url` + `json_mode`, so any cheap OpenAI-compatible host works
+  (DeepSeek, Together, Groq, OpenRouter, local vLLM). The documented DeepSeek path is
+  `deepseek-chat` (V3) - NOT `deepseek-reasoner` (R1), which burns tokens on reasoning
+  and breaks structured output the same way qwen3.5 did. NER stays local/free; only
+  relation extraction hits the API (the RetriCo-style hybrid is already the design).
+- **Sparse-chunk cost gate** (`intelligence.skip_sparse_chunks`, default off): a
+  relation needs two entities co-occurring, so a chunk without two distinct entities
+  inside `sparse_window_words` can't yield one - skip its LLM call. Free NER still
+  runs and the co-occurrence floor is untouched; zero recall loss, tokens saved. LLM
+  modes only (never python_only). `chunks_skipped` recorded in checkpoint meta.
+- **Cross-chunk edge consolidation** (`aggregator.py`): `overlap_chars` puts the
+  boundary sentence in two chunks, so the same relation was extracted twice and
+  inflated edge weight. Now drop duplicates with identical doc/endpoints/type AND
+  verbatim evidence; distinct-evidence repeats (real corroboration) and cross-doc
+  repeats are kept.
+- **Negative anchoring in the extraction prompt** (`prompts.py`): explicit "NEVER do
+  these" examples (pronoun-as-entity, sentence-as-relation-type, inferred-not-stated
+  relations, translated evidence, markdown fences) so a cheap model complies first try.
+
+The disparity-filter backbone (asked about) was already shipped (`backbone.py`,
+Serrano 2009). Papers triaged into ASPIRATIONAL.md with why each is deferred: KGGen,
+Neo4j LLM graph builder, Microsoft GraphRAG, KGC-2026 quality pillars, KARMA,
+Chain-of-Agents.
+
+---
+
+## ORG name folding, multilingual GLiNER default, paper triage
+
+Two delegated follow-ups, plus a round of papers.
+
+- **ORG display-name cleanup** (`deduplicator.py`, after LELA's entity-linking
+  lesson): strip a leading "the" (always) and singularize an org-suffix plural
+  only when the singular already exists as a node, so "the Lilly Endowment" /
+  "Knight Foundations" fold onto the bare/singular form while a genuinely plural
+  name (Open Society Foundations, Council on Foundations) is left alone. English
+  "the" only - German der/die/das stays so party names ("Die Linke") survive.
+  ORG/INSTITUTION only; runs after every other merge and re-folds collisions.
+- **GLiNER default -> multilingual** (`config.py`): the generic default is now
+  `fastino/gliner2-multi-v1` (serves English and German, fits 8GB, lighter on CPU)
+  instead of the English-only `large-v1` - which was also the model in the
+  foundation segfault combo. large-v1 stays available for English-only max-NER runs.
+
+Papers reviewed:
+- **SALE** (code-based DEE) and **AEC** (multi-agent code-EE) declined. Both target
+  document-level EVENT extraction (triggers + argument roles), not the actor-tie
+  network this pipeline builds; their shared code-as-class-schema + multi-agent
+  refinement would mean re-plumbing extraction around event structures and many more
+  local LLM calls (the verified-extraction paper already found iterative prompting
+  trades latency for little gain on a small local model).
+- **DocZSRE-SI** (entity side information for zero-shot RE) deferred, not declined.
+  Per-entity descriptions/hypernyms in the RE prompt are a real recall lever (+11.6%
+  F1 in the paper), but a faithful version needs a knowledge source we don't cheaply
+  have during extraction. Path on record: feed Wikidata descriptions as side info if
+  entity linking moves ahead of relation extraction.
+- **"Pick a Document Extraction Platform 2026"** webinar: validation, nothing to
+  build - it endorses pydantic schema enforcement, per-field source grounding (our
+  per-edge evidence + tiers), layout-preserving preprocessing (Docling), and local
+  quantized Qwen, all already in place.
+
+---
+
 ## Generic relation ontology, smart-quote JSON repair, crawl data verified
 
 The InfluenceWatch ollama crawl verified end-to-end: 392 typed edges (funding /

@@ -141,6 +141,63 @@ def _qa(G) -> dict[str, Any]:
     }
 
 
+def quality_pillars(report: dict[str, Any], tables) -> dict[str, Any]:
+    """KGC-2026-style quality summary over five pillars, derived from data the
+    run already has - not new computation. provenance + consistency come
+    straight from edge tiers and conflict counts; accuracy/completeness/
+    timeliness are honest coverage proxies (there's no gold at run time),
+    labelled as such so nobody reads them as scored. Fail-soft."""
+    try:
+        from postprocess import evidence_tiers as et
+        edges = list(getattr(tables, "edges", []) or [])
+        n = len(edges)
+        pct = lambda k: round(100.0 * k / n, 1) if n else None
+
+        # provenance: every edge should carry an edge_source.
+        with_src = sum(1 for e in edges if (e.get("edge_source") or "").strip())
+        # accuracy proxy: share of edges in the conservative (asserted) tier.
+        asserted = sum(1 for e in edges
+                       if et.tier_allows(e.get("edge_source", ""), "conservative"))
+        # consistency: contradictory dyads + type-signature violations.
+        conf = report.get("conflicts", {})
+        n_conf = conf.get("conflicting_dyads", 0) if isinstance(conf, dict) else 0
+        n_typeviol = sum(1 for e in edges if e.get("type_violation"))
+        # completeness proxy: connectivity (isolates flood => undercovered).
+        qa = report.get("qa_substantive", {})
+        # timeliness proxy: temporal coverage of edges.
+        dated = sum(1 for e in edges
+                    if e.get("period") or e.get("date") or e.get("year"))
+
+        return {
+            "accuracy_proxy": {
+                "asserted_tier_pct": pct(asserted),
+                "note": "share of edges stated in text or a verified record; "
+                        "not gold-scored accuracy",
+            },
+            "completeness_proxy": {
+                "largest_cc_pct": qa.get("largest_cc_pct"),
+                "isolates": qa.get("isolates"),
+                "note": "graph connectivity stands in for completeness; "
+                        "no gold recall at run time",
+            },
+            "consistency": {
+                "polarity_conflicts": n_conf,
+                "type_violations": n_typeviol,
+                "clean_pct": pct(n - n_typeviol),
+            },
+            "provenance": {
+                "edges_with_source_pct": pct(with_src),
+            },
+            "timeliness_proxy": {
+                "edges_with_time_pct": pct(dated),
+                "note": "share of edges carrying a period/date; corpus-dependent",
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quality_pillars failed: %s", exc)
+        return {}
+
+
 def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     """Attach brokerage/bridge columns to ``tables`` and return a QA report.
 

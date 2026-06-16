@@ -38,6 +38,31 @@ def _content_tokens(name: str) -> list[str]:
     return [t for t in _tokens(name) if t not in _GENERIC_ORG_TOKENS and len(t) >= 2]
 
 
+# ORG display-name cleanup: strip a leading "the" and singularize a known
+# org-suffix plural so "the Lilly Endowment" / "Knight Foundations" stop appearing
+# as their own nodes and fold onto the bare/singular form. English "the" only -
+# stripping German der/die/das would maul party names ("Die Linke"). ORG only.
+_LEADING_THE = re.compile(r"^the\s+", re.IGNORECASE)
+_ORG_PLURAL_S = re.compile(
+    r"\b(foundation|institute|institution|endowment|fund|trust|association|"
+    r"college|corporation|council|committee|union|party|center|centre|"
+    r"department|bank|federation|alliance|league|brotherhood|group|school|"
+    r"club|board|office)s\b", re.IGNORECASE)
+_ORG_PLURAL_IES = re.compile(
+    r"\b(universit|compan|societ|agenc|ministr|facult|academ)ies\b", re.IGNORECASE)
+
+
+def _strip_leading_the(name: str) -> str:
+    return _LEADING_THE.sub("", name).strip() or name
+
+
+def _singularize_org(name: str) -> str:
+    # Apply only when a singular sibling exists - a plural with none is usually the
+    # real name (Open Society Foundations, Council on Foundations), not a slip.
+    n = _ORG_PLURAL_IES.sub(r"\1y", _ORG_PLURAL_S.sub(r"\1", name))
+    return n or name
+
+
 def _acronym_form(name: str) -> str:
     # "N.S.D.A.P." / "NSDAP" -> "NSDAP"; non-acronyms -> "". Used to keep distinct
     # acronyms (DVP vs DNVP) from fuzzy-merging while still merging NSDAP/NSDAP.
@@ -216,6 +241,40 @@ class Deduplicator:
                 if e is not winner:
                     self._merge_into(winner, e)
             out.append(winner)
+        return out
+
+    def _clean_org_surfaces(self, entities: list[Entity]) -> list[Entity]:
+        """Tidy ORG/INSTITUTION display names, then re-fold any that now collide.
+        Strip a leading 'the' always (the article is not part of the name);
+        singularize an org-suffix plural ONLY when the singular already exists as a
+        node, so a real plural name (Open Society Foundations) is left alone while a
+        slip (Knight Foundations next to Knight Foundation) folds. Runs last."""
+        singulars = {normalize_name(_strip_leading_the(e.canonical_name))
+                     for e in entities if e.label in ("ORG", "INSTITUTION")}
+        changed = False
+        for e in entities:
+            if e.label not in ("ORG", "INSTITUTION"):
+                continue
+            stripped = _strip_leading_the(e.canonical_name)
+            sing = _singularize_org(stripped)
+            cleaned = sing if sing != stripped and normalize_name(sing) in singulars else stripped
+            if cleaned != e.canonical_name:
+                if e.canonical_name not in e.aliases:
+                    e.aliases.append(e.canonical_name)
+                e.canonical_name = cleaned
+                changed = True
+        if not changed:
+            return entities
+        by_key: dict[tuple[str, str], Entity] = {}
+        out: list[Entity] = []
+        for e in entities:
+            key = (normalize_name(e.canonical_name), e.label)
+            prim = by_key.get(key)
+            if prim is None:
+                by_key[key] = e
+                out.append(e)
+            else:
+                self._merge_into(prim, e)
         return out
 
     # Fold bare first/last names into a unique full name.
@@ -436,6 +495,9 @@ class Deduplicator:
 
         # Fold third-person mentions of a named author into the author node.
         canonical = self._fold_author_mentions(canonical)
+
+        # Tidy ORG display names last ("the Lilly Endowment" -> "Lilly Endowment").
+        canonical = self._clean_org_surfaces(canonical)
 
         # Recompute stable ids and build name -> id index.
         name_to_id: dict[str, str] = {}

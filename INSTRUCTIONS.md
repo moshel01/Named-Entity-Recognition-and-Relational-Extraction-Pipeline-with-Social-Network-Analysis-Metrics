@@ -53,8 +53,8 @@ python -m spacy download de_core_news_lg        # German (for the NSDAP domain)
 **(b) GLiNER2** - automatic on first run; chosen by `foundation.gliner_model`.
 The original GLiNER (urchade/*) is deprecated and no longer loads:
 ```text
-English only ............ fastino/gliner2-large-v1   (default)
-Multilingual / German ... fastino/gliner2-multi-v1   (100+ langs; NSDAP config)
+Multilingual (default) .. fastino/gliner2-multi-v1   (100+ langs, mDeBERTa; EN+German)
+English-only, heavier ... fastino/gliner2-large-v1   (best English NER; ~2x the load)
 ```
 
 **(c) sentence-transformers** - automatic; only used by `mode: python_only`.
@@ -144,15 +144,35 @@ Set `mode:` in the config, or override with `--mode`.
 - **Setup:** nothing beyond §1. (Embeddings model auto-downloads.)
 - **Trade-off:** precision-oriented; lower relation recall than LLM modes.
 
-### Mode `api` (Claude / OpenAI / Bedrock)
-- Relationships + entity refinement + quality review by a hosted LLM.
+### Mode `api` (Claude / OpenAI / Bedrock / any OpenAI-compatible host)
+- Relationships + entity refinement + quality review by a hosted LLM. NER stays
+  local/free (GLiNER); only relation extraction hits the API.
 - **Setup:** set the key env var named in `intelligence.api.api_key_env`:
   ```powershell
   $env:ANTHROPIC_API_KEY = "sk-ant-..."      # or OPENAI_API_KEY, etc.
   ```
   Then in config: `intelligence.api.provider` (`anthropic|openai|bedrock`) and
   `model`. For Bedrock set `aws_region` and use standard AWS credentials.
-- **Best for:** highest relation quality.
+- **Cheap path (recommended for cost):** point `provider: openai` at any
+  OpenAI-compatible host with `base_url` + `json_mode`. DeepSeek example:
+  ```yaml
+  intelligence:
+    api:
+      provider: "openai"
+      model: "deepseek-chat"            # V3 - NOT deepseek-reasoner (R1): R1 burns
+      api_key_env: "DEEPSEEK_API_KEY"   # tokens on reasoning + breaks structured output
+      base_url: "https://api.deepseek.com"
+      json_mode: true                   # response_format=json_object, fewer repairs
+  ```
+  Same shape works for Together / Groq / OpenRouter / local vLLM - just change
+  `base_url` + `model`.
+- **Cost gate:** set `intelligence.skip_sparse_chunks: true` to skip the LLM call
+  for chunks too sparse to hold a relation (no two entities within
+  `sparse_window_words`). Free NER still runs and the co-occurrence floor is
+  untouched, so it's zero recall loss for fewer tokens. Off by default; turn it on
+  when paying per token.
+- **Best for:** highest relation quality (frontier models), or cheapest tokens
+  (deepseek-chat).
 - **Trade-off:** cost + sends text to a third party.
 
 ### Mode `ollama` (local LLM)
@@ -185,7 +205,7 @@ io:
   input_path: "./data/sample_en"
 foundation:
   spacy_model: "en_core_web_trf"
-  gliner_model: "fastino/gliner2-large-v1"
+  gliner_model: "fastino/gliner2-multi-v1"
   gliner_labels: ["person", "organization", "location", "event"]
 coreference:
   languages: ["en"]
@@ -357,7 +377,7 @@ In `output/<run_name>/`:
 | `timeline.csv` | Dated events, chronological. |
 | `codebook.xlsx` | Auto-generated SNA codebook: boundary spec, definition of every node/edge column, entity types, tie classes, the run's relation inventory with example evidence, evidence tiers. Hand this to anyone who has never seen the pipeline. |
 | `run_meta.json` | Which model/mode/config produced this run, with timestamp. |
-| `graph_report.json` | Graph-health QA + brokerage/bridge counts (when `export.graph_metrics` is on). |
+| `graph_report.json` | Graph-health QA + brokerage/bridge counts, plus a `quality_pillars` block (KGC-2026: provenance + consistency from real data; accuracy/completeness/timeliness as labelled coverage proxies). When `export.graph_metrics` is on. |
 | `raw_extractions.jsonl` | Per-document extractions (provenance / re-analysis). |
 | `checkpoints/` | Resume data. |
 
@@ -483,6 +503,33 @@ Other tags for different analyses:
 - **`attr_wikidata_qid`/`_url`/`_label`** — present when `linking.enabled: true`
   (off by default; makes network calls). Disambiguates entities against Wikidata
   for cross-dataset joins.
+
+---
+
+## 10b. Faithfulness tags — catching hallucinated edges
+
+Local (and cheap) models invent edges. Three deterministic guards run on every
+LLM/text-asserted relation and **tag** suspect edges so you can filter them in
+Gephi — they are not dropped (a real edge can trip a guard via coref or alias
+variation), except where noted:
+
+| Tag (edge attribute) | Set when | Why |
+|----------------------|----------|-----|
+| `evidence_unverified` | the model's evidence quote is not verbatim in the source chunk | the quote was paraphrased/fabricated |
+| `evidence_ungrounded` | the evidence quote names **neither** endpoint (anchor check, AEVS-style) | the model attached a real sentence that doesn't mention the pair |
+| `type_violation` | endpoint entity types contradict the relation's signature (`born_in`→org, `led`→place) | a likely misextraction |
+
+`type_violation` is the one you can turn into a hard filter:
+`ontology.drop_type_violations: true` drops instead of tags. The other two are
+tag-only by design. In Gephi, filter these columns out for a high-precision view;
+keep them in to audit what the model claimed. The narrator/author endpoint is
+exempt from `evidence_ungrounded` (first-person evidence legitimately says "I").
+
+The single source of truth for relation signatures is
+`postprocess/ontology.py` (`RELATION_TYPE_SIGNATURES`); loose relations
+(`supported`, `met_with`) have no signature and are never type-flagged. If a guard
+fires on edges you know are good, that relation's signature is too tight — loosen
+it there.
 
 ---
 

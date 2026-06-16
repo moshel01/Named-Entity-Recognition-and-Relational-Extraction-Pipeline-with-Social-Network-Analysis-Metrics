@@ -108,6 +108,66 @@ GENERIC_RELATION_GUIDE: dict[str, str] = {
 }
 
 
+# Type signatures for the constraining generic relations: (source types, target
+# types). A relation whose endpoint types contradict its signature is a likely
+# misextraction - a local model emitting "led" between two places, or "born_in"
+# pointing at an org. Inspired by the ASP consistency check in Tran et al. 2025
+# (LLM + ASP for joint entity-relation extraction): encode each relation's
+# argument types and reject the violations. Kept high-precision - only relations
+# with a reliable signature are listed; loose stance/interaction relations
+# (supported, opposed, met_with) are unconstrained on purpose. Membership
+# (member_of/joined/served_in) already has its own target-is-org check in
+# main.py (suspect_membership), so it stays out of here. A type outside
+# CORE_TYPES (a domain label we didn't model) never triggers a violation - it is
+# a wildcard, matching ASP's "no type_def for this slot -> accept".
+_PERSON = frozenset({"PERSON"})
+_ORG = frozenset({"ORG", "INSTITUTION"})
+_PLACE = frozenset({"LOCATION", "GPE"})
+CORE_TYPES = _PERSON | _ORG | _PLACE | frozenset({"EVENT"})
+RELATION_TYPE_SIGNATURES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "employed_by": (_PERSON, _ORG),
+    "led":         (_PERSON, _ORG),
+    "studied_at":  (_PERSON, _ORG),
+    "founded":     (_PERSON | _ORG, _ORG),
+    "founded_by":  (_ORG, _PERSON | _ORG),
+    "owns":        (_PERSON | _ORG, _ORG),
+    "owned_by":    (_ORG, _PERSON | _ORG),
+    "born_in":     (_PERSON, _PLACE),
+    "lived_in":    (_PERSON, _PLACE),
+    "died_in":     (_PERSON, _PLACE),
+    "located_in":  (_PERSON | _ORG, _PLACE),
+    "married_to":  (_PERSON, _PERSON),
+    "sibling_of":  (_PERSON, _PERSON),
+    "family_of":   (_PERSON, _PERSON),
+}
+
+
+def _slot_violation(actual: Optional[str], allowed: frozenset[str]) -> bool:
+    """A slot is violated only when the endpoint's type is a core type we model
+    AND it's not in the allowed set. Unknown/exotic types pass (wildcard)."""
+    return actual in CORE_TYPES and actual not in allowed
+
+
+def check_relation_types(relationships: list[Relationship],
+                         type_of: dict[str, str],
+                         drop: bool = False) -> tuple[list[Relationship], int]:
+    """Tag (or drop) relations whose endpoint types contradict their signature.
+    `type_of` maps entity_id -> canonical label. Returns the (possibly filtered)
+    list and the count flagged. Relations with no signature are never touched."""
+    out: list[Relationship] = []
+    flagged = 0
+    for r in relationships:
+        sig = RELATION_TYPE_SIGNATURES.get(r.rel_type)
+        if sig and (_slot_violation(type_of.get(r.source), sig[0])
+                    or _slot_violation(type_of.get(r.target), sig[1])):
+            flagged += 1
+            if drop:
+                continue
+            r.attributes["type_violation"] = True
+        out.append(r)
+    return out, flagged
+
+
 def resolve_relation_ontology(config, domain=None) -> dict[str, list[str]]:
     """Active relation ontology: config, else domain, else the generic default
     (unless ontology is disabled, which means free-form relations)."""

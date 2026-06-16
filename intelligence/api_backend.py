@@ -51,7 +51,10 @@ class ApiBackend(IntelligenceBackend):
             from openai import OpenAI
             if not key:
                 raise RuntimeError(f"Env var {self.cfg.api_key_env} is not set.")
-            return OpenAI(api_key=key, timeout=self.cfg.request_timeout)
+            # base_url empty -> OpenAI's own endpoint; set it for a cheap
+            # OpenAI-compatible host (DeepSeek, Together, Groq, OpenRouter, vLLM).
+            return OpenAI(api_key=key, base_url=self.cfg.base_url or None,
+                          timeout=self.cfg.request_timeout)
         if self.provider == "bedrock":
             import boto3
             return boto3.client("bedrock-runtime", region_name=self.cfg.aws_region)
@@ -87,7 +90,7 @@ class ApiBackend(IntelligenceBackend):
                 block.text for block in resp.content if getattr(block, "type", "") == "text"
             )
         if self.provider == "openai":
-            resp = self._client.chat.completions.create(
+            kwargs: dict[str, Any] = dict(
                 model=self.cfg.model,
                 max_tokens=self.cfg.max_tokens,
                 temperature=self.cfg.temperature,
@@ -96,6 +99,9 @@ class ApiBackend(IntelligenceBackend):
                     {"role": "user", "content": user},
                 ],
             )
+            if self.cfg.json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = self._client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
         if self.provider == "bedrock":
             body = {

@@ -2,7 +2,7 @@
 #
 #   python scripts/book_bench.py --book data/hobbit.txt --gold data/hobbit.gold.json
 #   python scripts/book_bench.py --book data/hobbit.txt --gold data/hobbit.gold.json \
-#       --mode ollama --ollama-model qwen3:8b --limit 10
+#       --mode ollama --ollama-model qwen3.5:9b --limit 10
 #
 # Splits the book into chapter documents (tolerant heading regex; falls back to
 # one document if no chapter structure is found), runs the pipeline with the
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gold", required=True, help="Gold JSON (evaluation schema).")
     ap.add_argument("--name", default="", help="Run tag (default: book filename stem).")
     ap.add_argument("--mode", default="python_only", choices=["python_only", "ollama"])
-    ap.add_argument("--ollama-model", default="qwen3:8b")
+    ap.add_argument("--ollama-model", default="qwen3.5:9b")
     ap.add_argument("--limit", type=int, default=0, help="Max chapters (0 = all).")
     ap.add_argument("--resume", action="store_true", help="Continue an interrupted run.")
     ap.add_argument("--constrain-relations", action="store_true",

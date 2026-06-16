@@ -90,6 +90,22 @@ def _overlap(a: set[str], b: set[str]) -> bool:
     return not a.isdisjoint(b)
 
 
+def _greedy_match(pred: list, gold: list, tmatch) -> tuple[int, set[int], set[int]]:
+    """Greedy 1:1 alignment: each pred consumes one still-free gold whose type
+    matches and surfaces overlap. Returns (tp, matched_pred_idx, used_gold_idx)."""
+    used_gold: set[int] = set()
+    matched_pred: set[int] = set()
+    for i, p in enumerate(pred):
+        for j, g in enumerate(gold):
+            if j in used_gold:
+                continue
+            if tmatch(p.type, g.type) and _overlap(p.surfaces, g.surfaces):
+                used_gold.add(j)
+                matched_pred.add(i)
+                break
+    return len(matched_pred), matched_pred, used_gold
+
+
 # Entity scoring
 def score_entities(
     gold: GoldSet, pred_entities: list[dict], type_sensitive: bool = True,
@@ -100,35 +116,25 @@ def score_entities(
     def tmatch(a: str, b: str) -> bool:
         return (a == b) if type_sensitive else True
 
-    # Recall: a gold node is hit if some pred node links to it.
-    fn: list[dict] = []
-    matched_gold = 0
-    for g in gnodes:
-        if any(tmatch(p.type, g.type) and _overlap(p.surfaces, g.surfaces) for p in pred):
-            matched_gold += 1
-        else:
-            fn.append({"name": g.rep_norm, "type": g.type})
+    # Greedy 1:1 matching: each predicted node consumes at most one gold node and
+    # vice versa. The old "any overlap" double-counted - 3 pred nodes all hitting
+    # one gold scored 3 TP and didn't penalize over-segmentation; a single bipartite
+    # match makes tp consistent for precision and recall and charges the splits.
+    tp, matched_pred, used_gold = _greedy_match(pred, gnodes, tmatch)
+    fp = [{"name": p.canonical_norm, "type": p.type}
+          for i, p in enumerate(pred) if i not in matched_pred]
+    fn = [{"name": g.rep_norm, "type": g.type}
+          for j, g in enumerate(gnodes) if j not in used_gold]
+    prf = PRF(tp=tp, fp=len(pred) - tp, fn=len(gnodes) - tp)
 
-    # Precision: a pred node is correct if it links to some gold node.
-    fp: list[dict] = []
-    matched_pred = 0
-    for p in pred:
-        if any(tmatch(p.type, g.type) and _overlap(p.surfaces, g.surfaces) for g in gnodes):
-            matched_pred += 1
-        else:
-            fp.append({"name": p.canonical_norm, "type": p.type})
-
-    prf = PRF(tp=matched_pred, fp=len(pred) - matched_pred, fn=len(gnodes) - matched_gold)
-
-    # Per-type (type-sensitive) breakdown.
+    # Per-type (type-sensitive) breakdown, same 1:1 matching within each type.
     per_type: dict[str, dict] = {}
     types = {g.type for g in gnodes} | {p.type for p in pred}
     for t in sorted(types):
         gt = [g for g in gnodes if g.type == t]
         pt = [p for p in pred if p.type == t]
-        tp_p = sum(1 for p in pt if any(_overlap(p.surfaces, g.surfaces) for g in gt))
-        tp_g = sum(1 for g in gt if any(_overlap(p.surfaces, g.surfaces) for p in pt))
-        per_type[t] = PRF(tp=tp_p, fp=len(pt) - tp_p, fn=len(gt) - tp_g).as_dict()
+        tp_t, _, _ = _greedy_match(pt, gt, lambda a, b: True)
+        per_type[t] = PRF(tp=tp_t, fp=len(pt) - tp_t, fn=len(gt) - tp_t).as_dict()
 
     return {"overall": prf.as_dict(), "per_type": per_type,
             "false_negatives": fn[:50], "false_positives": fp[:50],
@@ -156,8 +162,9 @@ def _name_to_pred_surfaces(pred: list[PredNode]) -> dict[str, set[str]]:
 
 def score_relations(
     gold: GoldSet, pred_entities: list[dict], pred_edges: list[dict],
-    type_sensitive: bool = True,
+    type_sensitive: bool = True, directed: bool = True,
 ) -> dict[str, Any]:
+    from postprocess import tie_classes
     pred = _build_pred_nodes(pred_entities)
     gnodes = _build_gold_nodes(gold)
     g_surface_id = _surface_to_gold_id(gnodes)
@@ -177,7 +184,14 @@ def score_relations(
         return f"p::{n}"
 
     def rel_key_from_ids(a: str, b: str, t: str) -> tuple:
-        return (tuple(sorted((a, b))), t if type_sensitive else "")
+        # Direction matters for asymmetric relations (X recruited Y != Y recruited
+        # X); symmetric ties (married_to, met_with) collapse either order. Ignoring
+        # direction inflates F1 vs the official directed scorers - default directed.
+        if directed and t and not tie_classes.is_symmetric(t):
+            pair = (a, b)
+        else:
+            pair = tuple(sorted((a, b)))
+        return (pair, t if type_sensitive else "")
 
     pred_set: set[tuple] = set()
     for e in pred_edges:
@@ -240,11 +254,14 @@ def score_relations(
 
 def score_all(
     gold: GoldSet, pred_entities: list[dict], pred_edges: list[dict],
+    directed: bool = True,
 ) -> dict[str, Any]:
     """Run the full evaluation and return a structured report."""
     return {
         "entities": score_entities(gold, pred_entities, type_sensitive=True),
         "entities_type_agnostic": score_entities(gold, pred_entities, type_sensitive=False),
-        "relations_typed": score_relations(gold, pred_entities, pred_edges, type_sensitive=True),
-        "relations_untyped": score_relations(gold, pred_entities, pred_edges, type_sensitive=False),
+        "relations_typed": score_relations(gold, pred_entities, pred_edges,
+                                            type_sensitive=True, directed=directed),
+        "relations_untyped": score_relations(gold, pred_entities, pred_edges,
+                                              type_sensitive=False, directed=directed),
     }

@@ -275,7 +275,7 @@ def build_config(
     spacy_model: str = "en_core_web_sm",
     gliner_model: str = "fastino/gliner2-large-v1",
     config_path: Path,
-    ollama_model: str = "qwen3:8b",
+    ollama_model: str = "qwen3.5:9b",
     ontology_relations: list[str] | None = None,
     min_entity_confidence: float = 0.0,
 ) -> Path:

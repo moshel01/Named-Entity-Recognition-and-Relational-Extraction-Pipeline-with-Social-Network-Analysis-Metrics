@@ -32,10 +32,21 @@ class InferenceEngine:
             for d in e.doc_ids:
                 doc_to_entities[d].add(e.entity_id)
 
+        # This is a one-mode projection of the entity x document bipartite graph.
+        # Newman (PNAS 2001, collaboration networks): a pair sharing a document of
+        # k entities gets 1/(k-1), so a 50-entity page doesn't forge 1225 ties as
+        # strong as a tete-a-tete. shared_docs still gates; strength weights.
         pair_docs: dict[frozenset[str], set[str]] = defaultdict(set)
+        pair_strength: dict[frozenset[str], float] = defaultdict(float)
         for doc_id, ent_ids in doc_to_entities.items():
+            k = len(ent_ids)
+            if k < 2:
+                continue
+            w = 1.0 / (k - 1)
             for a, b in itertools.combinations(sorted(ent_ids), 2):
-                pair_docs[frozenset((a, b))].add(doc_id)
+                fp = frozenset((a, b))
+                pair_docs[fp].add(doc_id)
+                pair_strength[fp] += w
 
         edges: list[Relationship] = []
         for pair, docs in pair_docs.items():
@@ -52,7 +63,9 @@ class InferenceEngine:
                     confidence=min(1.0, 0.3 + 0.1 * len(docs)),
                     directed=False,
                     origin="inferred",
-                    attributes={"shared_docs": len(docs), "edge_source": "rule_cooccurrence"},
+                    attributes={"shared_docs": len(docs),
+                                "cooccur_strength": round(pair_strength[pair], 4),
+                                "edge_source": "rule_cooccurrence"},
                 )
             )
         logger.info("Inferred %d co-occurrence edges", len(edges))
@@ -100,8 +113,13 @@ class InferenceEngine:
                     st["count"] += 1
                     st["min_gap"] = min(st["min_gap"], pos_j - pos_i)
 
+        floor = max(1, self.config.proximity_min_count)
         edges: list[Relationship] = []
+        dropped = 0
         for pair, st in pair_stat.items():
+            if st["count"] < floor:  # weakest layer: drop single accidental adjacencies
+                dropped += 1
+                continue
             a, b = tuple(pair)
             conf = min(0.6, 0.3 + 0.05 * st["count"])  # closer/more often -> higher
             edges.append(
@@ -119,8 +137,9 @@ class InferenceEngine:
                                 "min_gap_chars": st["min_gap"]},
                 )
             )
-        logger.info("Inferred %d proximity co-occurrence edges (window=%d)",
-                    len(edges), window)
+        logger.info("Inferred %d proximity co-occurrence edges (window=%d, "
+                    "min_count=%d, dropped %d below floor)",
+                    len(edges), window, floor, dropped)
         return edges
 
     def canonical_edges(
@@ -152,4 +171,8 @@ class InferenceEngine:
         if mentions is not None and name_to_id is not None:
             augmented.extend(self.proximity_edges(mentions, name_to_id))
         augmented.extend(self.canonical_edges(entities, edges))
+        # Disparity-filter backbone over the (dense) co-occurrence layer. Always
+        # stamps disparity_alpha; drops non-backbone edges only when alpha > 0.
+        from .backbone import disparity_filter
+        augmented, _ = disparity_filter(augmented, self.config.cooccurrence_backbone_alpha)
         return augmented

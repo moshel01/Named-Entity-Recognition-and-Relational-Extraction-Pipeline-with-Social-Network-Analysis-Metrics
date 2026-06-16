@@ -4,6 +4,237 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Generic relation ontology, smart-quote JSON repair, crawl data verified
+
+The InfluenceWatch ollama crawl verified end-to-end: 392 typed edges (funding /
+board / employment ties python_only can't produce - Henry Ford II trustee_of Ford
+Foundation, Ford Foundation granted_to NAACP LDF), and reference stripping cut
+publisher nodes to 5 vs the wiki run's 166. Two issues that run surfaced, both fixed.
+
+- **Relation-type sprawl -> a generic relation ontology** (`postprocess/ontology.py`,
+  after the two-stage scenario-prompt RE work, Zhao et al. 2025). The generic path
+  had no relation schema, so qwen invented a verb phrase per edge
+  (`sent_letters_to_requesting_compliance_info_about_funding_of_affiliates_of` ...) -
+  unusable as an SNA edge vocabulary. `resolve_relation_ontology` now falls back to a
+  31-relation default (canonical names aligned to the `tie_classes` maps; direction
+  kept - funded vs funded_by separate) when neither config nor domain supplies one.
+  It constrains the extraction prompt and fuzzy-aligns the verbose tail: on the real
+  crawl, provided_funding_to / granted_to / donates_to -> funded, president_of /
+  chairman_of -> led, trustee_of -> member_of, the 12-word letters one -> met_with.
+  Off-switch: `ontology.enabled: false` -> free-form. `drop_unmapped` stays false so
+  an unmatched relation still passes through.
+- **JSON repair: smart-quote value delimiters** (`json_repair.py`): qwen opened an
+  evidence value with a curly quote (`: "When ...,"`) instead of a straight one,
+  losing a whole chunk (43 entities, 26 relations). A new level straightens smart
+  double quotes then runs the inner-quote escaper; the captured dump recovers.
+
+Papers reviewed: LELA (LLM entity linking) declined - a heavyweight EL framework for
+a problem dedup/Wikidata already cover (the concrete win, article/plural ORG folding,
+noted for dedup). "Beyond Known Facts" (generating unseen temporal facts) declined - a
+benchmark-construction method in the invent-unseen-facts space the project excludes.
+Two-stage scenario-prompt RE adopted as the generic ontology above.
+
+---
+
+## Foundation segfault guard, JSON multi-block recovery, directed-scoring baseline
+
+From the qwen3.5 morning batch.
+
+- **Intermittent segfault loading foundation models on CPU** (crawl/ollama runs):
+  a transformer spaCy model (`en_core_web_trf`) co-resident with GLiNER2-large in
+  one CPU process aborts on a duplicate OpenMP init (thinc vs torch) - a native
+  crash, not a catchable error, so it only shows as "Segmentation fault" mid-load.
+  Set `KMP_DUPLICATE_LIB_OK` / `TOKENIZERS_PARALLELISM` at the top of `main.py`
+  before any torch/spacy import (thread count left alone - pinning it throttles CPU
+  inference). The English ollama path runs foundation on CPU so it was exposed; the
+  German path dodged it with a non-transformer spaCy model + the multilingual
+  GLiNER. `scratch/crawl_influencewatch.yaml` now uses that same stable pairing
+  (`en_core_web_lg` + `gliner2-multi-v1`).
+- **JSON repair lost a whole dedup batch** (`intelligence/json_repair.py`): qwen3.5
+  ignored `think:false`/`format:json` and emitted visible reasoning with two
+  ```json blocks - a discarded first attempt then the corrected answer last. The
+  repairer took the first (invalid) block. It now tries each fenced block
+  last-first, then the whole response, and dumps only if all fail. All 8 captured
+  failure fixtures recover.
+- **LLM review logs a sample of dropped entity names** so an aggressive batch is
+  auditable from the log (the oversized-drop guard already caps a hallucinated
+  batch wholesale; one fired at 127/150 on the Abel pilot).
+- **Directed vs undirected relation scoring, quantified** on the qwen3.5 runs:
+  typed F1 barely moves (Re-DocRED 0.159 directed / 0.162 undirected; DialogRE
+  0.046 / 0.059) - when the model gets a relation it orients it right, so the
+  directed-scoring fix was correctness insurance, not a number correction. Untyped
+  moves more (Re-DocRED 0.23 / 0.27) because undirected collapses reciprocal gold
+  pairs. The real ceiling is relation recall (Re-DocRED typed fn 501 vs tp 62) and
+  type-schema alignment (DialogRE's social-relation labels), not direction.
+- **Crawl ollama runs timed out (~90% failures)**: `scratch/crawl_influencewatch.yaml`
+  carried no `intelligence.ollama` block, so it inherited the 180s default
+  request_timeout while using 8000-char chunks - each qwen3.5 call on dense web
+  prose ran past 180s. Interspersed successes reset the consecutive-failure guard,
+  so the run limped on near-empty instead of aborting. Now 5000-char chunks +
+  `request_timeout: 600` (the Abel settings, which never time out).
+- **Polarity-conflict detection** (`graph_metrics.py`, after KARMA's conflict-edge
+  idea but as an offline rule, not a multi-agent LLM): dyads carrying both a
+  positive and a negative tie (allied_with + fought_against on the same pair) are
+  counted with a readable sample in `graph_report.json`. Signed balance drops them
+  as net-zero, so they were invisible; either an extraction error or a real
+  ambivalent/over-time relationship. Reported for review, not filtered.
+
+---
+
+## SNA/NER best-practice pass: backbone, projection weighting, balance, narrative networks, QID identity, directed scoring
+
+A second audit against the research_context papers, then a batch of fixes and
+research-grounded additions. "Tag, don't filter" relaxed where filtering is the
+correct default.
+
+Bug fixes:
+- **Scorer was direction-agnostic** (`evaluation/scorer.py`): relation matching
+  sorted endpoints, so a reversed prediction counted as correct - inflating F1 vs
+  the official directed scorers. Now directed by default, per-relation: asymmetric
+  relations must match orientation, symmetric ones (married_to, met_with) match
+  either way. `--undirected-relations` restores the old behavior. Past benchmark
+  numbers in this log were computed undirected; re-baseline before comparing.
+- **Entity scoring was many-to-many** ("any overlap"), so 3 predicted nodes all
+  hitting one gold entity scored 3 TP and didn't penalize over-segmentation. Now a
+  greedy 1:1 match - precision charges the splits.
+- **Burt brokerage was unweighted** (`graph_metrics.py`): `constraint` /
+  `effective_size` now pass `weight="weight"` (corroboration), as Burt defines them.
+- **Crawler `stay_under_path` could widen to the whole host**: a single-segment
+  seed ('/docs') took parent '/'. Fixed; a page seed still scopes to its parent dir.
+
+Additions (research-grounded):
+- **Disparity-filter backbone** (Serrano, Boguna, Vespignani, PNAS 2009),
+  `postprocess/backbone.py`: per-node significance test over the weighted
+  co-occurrence layer. Every co_occurs_with edge gets `disparity_alpha`; with
+  `inference.cooccurrence_backbone_alpha > 0`, non-backbone edges are dropped.
+  On the Wikipedia crawl: 20,260 -> 4,040 co-occurrence edges at alpha 0.10, 855 at
+  0.01 - principled where the global proximity floor was a blunt instrument.
+- **Newman projection weighting** (PNAS 2001), `canonical_inference.py`: cross-doc
+  co-mention is a one-mode projection of the entity x document bipartite graph; a
+  pair sharing a k-entity document now contributes 1/(k-1) (`cooccur_strength`),
+  so a 50-entity page no longer forges 1225 ties as strong as a tete-a-tete.
+- **Signed structural balance** (Cartwright-Harary), `graph_metrics.py`: the edge
+  `polarity` we already computed now feeds a balanced-triad fraction in
+  graph_report.json (balanced = friend-of-friend / enemy-of-enemy triangles).
+- **Narrative-sequence network** (Bearman & Stovel, Poetics 2000),
+  `postprocess/narrative.py`: the Abel autobiographies are their exact case. Builds
+  corpus-level element->element transitions from the timeline (war -> hardship ->
+  politics) -> narrative.gexf + narrative_transitions.csv. Opt-in
+  (`export.narrative_network`); on by default in the nazi_era config. v1: coarse
+  keyword element scheme, domain-overridable via `Domain.narrative_rules()`.
+- **Wikidata QID as identity** (`postprocess/wikidata.py`): linking was decorative
+  (tagged qid, ran after dedup). A shared QID is now a high-precision cross-doc
+  merge key - same-QID nodes fold and edges remap (`linking.consolidate_by_qid`).
+- **Reference-section stripping** (`core/preprocessor.py`): cut the trailing
+  References / Bibliography / External links / Einzelnachweise tail from web pages
+  before NER, so publishers and cited-author names never become top-mention nodes
+  in the first place. Back-half + half-length guards; the RTF path is untouched.
+  The name-shape `citation_artifact` tagger stays as a backstop.
+
+New edge columns: `cooccur_strength`, `disparity_alpha` (codebook updated). Ten new
+offline tests; suite green.
+
+## GEXF export no longer drops parallel edges
+
+Audit catch: `_write_gexf` wrote into a plain `nx.Graph`/`DiGraph`, so when a pair
+had two relation types (A met_with B *and* A supported B) the second `add_edge`
+overwrote the first - one edge and its weight vanished from every .gexf, and
+multi-relational pairs looked weaker than they were. graph_metrics.py already
+summed parallel edges, so the exported graph and the QA metrics disagreed. Fixed:
+on a repeat pair the exporter now sums the weight and unions rel_type / tie_class /
+connection_type / polarity / origin / edge_source (matching graph_metrics).
+The CSV edge table was always correct (one row per s,t,rel_type); this only
+affected the GEXF views. Regression test reads a written GEXF back and checks the
+summed weight + retained labels.
+
+## Citation/bibliography artifacts tagged out of the actor network
+
+Reviewing the 12-page Wikipedia crawl: the highest-mention "core" nodes were
+reference-list debris - publishers (Oxford University Press, Routledge, DK),
+archive services (the Wayback Machine, Google Books), and bibliographic author
+forms (Weeks, Marcus / Todd M. / Ripple WJ). These are real proper nouns, so the
+POS gate keeps them, and they accumulate mentions across every page's reference
+section, floating to the top as bogus hubs. Per tag-don't-filter: new
+`tag_citation_artifact` in `postprocess/tagger.py` (publisher-suffix + known
+publisher/archive set for ORG; inverted-comma / trailing-initials name shapes for
+PERSON). Filter `tag_citation_artifact=false` in Gephi for the substantive graph.
+On the crawl run it tagged 166/1637 nodes - several of them the top-mention ones -
+with no false positives on the real sociologists (Durkheim/Marx/Weber/Simmel) or
+on initial-bearing real names (J. R. R. Tolkien, George W. Bush, Malcolm X).
+Offline test asserts both the catches and the protected names.
+
+## Default ollama model bumped to qwen3.5:9b
+
+The shipped default was still `qwen3:8b`, so a plain `--mode ollama` ran the old
+model. qwen3.5:9b is the verified best fit for the 8 GB box (beats qwen3:8b on
+relations, still fits VRAM), so make it the default everywhere code picks a model:
+`OllamaConfig.model`, `LangExtractConfig.model_id`, and the `--ollama-model`
+defaults in `benchmarks/run_benchmark.py`, `benchmarks/common.py`,
+`scripts/book_bench.py`. Doc command examples updated to match. Historical
+CHANGELOG benchmark numbers keep their original model names (they record what ran).
+
+## Coref microservice: no more cold-start race
+
+First real use on a web run exposed a race: the service loaded its model lazily on
+the first /resolve, that cold call outlasted the client's 30s timeout, one timeout
+disabled the service for the whole run, and the in-process fallback is broken in
+the main env (transformers 5.x `all_tied_weights_keys`) - so the run silently used
+the heuristic resolver instead of neural coref.
+
+- **Service preloads at startup** (`@app.on_event("startup")`, opt-out
+  `COREF_PRELOAD=0`): `Application startup complete` now means the model is ready.
+- **Client warms the service once, up front**, with a generous budget
+  (`max(service_timeout, 180s)`) instead of racing the per-chunk timeout. A genuine
+  unreachable service still falls back immediately; a slow cold load is waited out,
+  not treated as failure. A per-chunk hiccup after warmup falls back for that chunk
+  only, keeping the service for the next. Offline test (monkeypatched urlopen).
+
+## Co-occurrence floor for dense corpora
+
+A 12-page Wikipedia crawl exposed a scaling hole: the within-doc proximity layer
+had no weight floor (cross-doc co-mention already had `min_shared_docs`), so dense
+encyclopedic pages produced 148k co-occurrence edges - 86k of them weight-1 (a
+single accidental within-window adjacency) - bloating the GEXF to 96 MB, past what
+Gephi will load. Only 212 of the 148k edges were typed relations.
+
+- New `inference.proximity_min_count` (default 1 = unchanged): drop proximity pairs
+  co-occurring fewer than N times. Typed/asserted edges are never touched - this
+  floors only the weakest layer. Set 2-3 on web/encyclopedic corpora.
+- Tuning a crawl run (`proximity_min_count: 2`, `cooccurrence_min_shared_docs: 3`,
+  `quality.min_entity_mentions: 2`) cut it from 5571 nodes / 148k edges / 96 MB to
+  1614 nodes / 20k edges / 14 MB, keeping every typed edge. Documented in
+  config_template.yaml; example in scratch/crawl_wiki_test.yaml.
+- Reminder surfaced by the same run: web text is third-person, so `narrator_resolution`
+  is a no-op - enable `coreference.pronoun_resolution` (via the coref microservice)
+  to resolve he/she/it/"the organization" on scraped pages. test added.
+
+## Whole-site crawler
+
+`--url` only ever fetched the exact pages you named. `core/crawler.py` adds
+bounded, polite whole-site ingestion: give it a seed and it expands into the
+subpages and merges them into one network (entities fold across pages).
+
+- **Discovery:** sitemap.xml first (incl. sitemap-index recursion), then scoped
+  breadth-first link following. Fetch-once - the page read for links is the page
+  kept, so the pipeline never double-fetches. Discovered URLs are cached in the
+  run dir; `--stage analyze` rebuilds id-only stubs from the cache, never re-crawls.
+- **Bounded:** `max_pages` (doc cap), `max_depth` (hops), `max_bytes` (per-page),
+  plus a hard request budget backstop. Visited-set dedup with URL normalization
+  (lowercase host, default-port + fragment + tracking-param strip, // collapse).
+- **Scoped:** same-host (folds `www.`), optional seed path-prefix, allow/deny
+  regex. Seeds are exempt from allow/deny/path (they define the scope); redirects
+  are re-checked against scope on the destination.
+- **Polite:** obeys robots.txt + `Crawl-delay`, per-host rate limit (`delay`),
+  identifying User-Agent. Fail-soft per page - one bad URL is logged, never raised.
+- Config `io.crawl` (documented in config_template.yaml); CLI `--crawl <seed>`
+  (repeatable), `--crawl-max-pages`, `--crawl-max-depth`. Local `.html` mirrors
+  already run through the same trafilatura cleaner, so wget/HTTrack + a folder is
+  the alternative for sites that forbid crawling.
+- 31 offline crawler tests (injected fetcher, no network): scope, depth, caps,
+  robots, sitemap+index, redirects in/out of scope, non-html skip, dedup,
+  doc_id parity with url ingestion. `fetch_url` also hardened for the requests
+  ISO-8859-1 charset fallback.
+
 ## Web ingestion: trafilatura main-content extraction
 
 The web path was `requests` + `BeautifulSoup.get_text` with a tag blocklist - it

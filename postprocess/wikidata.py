@@ -82,3 +82,65 @@ def link_entities(entities: list[Entity], config) -> list[Entity]:
     logger.info("Wikidata linking: %d linked, %d lookups, %d failures.",
                 n_linked, len(candidates), n_fail)
     return entities
+
+
+def consolidate_by_qid(entities, relationships, name_to_id=None):
+    """Merge entities that resolved to the same Wikidata QID into one node.
+
+    A high-precision cross-document identity signal that string dedup can miss:
+    "Goebbels", "Joseph Goebbels", "Dr. Goebbels" all link to Q2622 and are one
+    person. Folds the smaller mention nodes into the most-mentioned, remaps the
+    relationship endpoints (entity ids at this stage), and refreshes name_to_id.
+    Author/narrator nodes are per-document and never folded. Returns
+    (entities, relationships, name_to_id)."""
+    from collections import defaultdict
+
+    from core.schema import stable_id
+
+    from .aggregator import normalize_name
+    from .deduplicator import Deduplicator
+
+    groups: dict[str, list] = defaultdict(list)
+    for e in entities:
+        a = e.attributes or {}
+        qid = a.get("wikidata_qid")
+        if qid and not a.get("is_author") and not a.get("narrator"):
+            groups[qid].append(e)
+
+    id_remap: dict[str, str] = {}
+    drop: set[int] = set()
+    merged = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda e: e.mention_count, reverse=True)
+        primary = group[0]
+        for other in group[1:]:
+            Deduplicator._merge_into(primary, other)
+            drop.add(id(other))
+        new_id = stable_id(normalize_name(primary.canonical_name), primary.label,
+                           prefix="ent_", length=12)
+        for e in group:
+            id_remap[e.entity_id] = new_id
+        primary.entity_id = new_id
+        merged += 1
+
+    if not drop:
+        return entities, relationships, name_to_id
+
+    new_entities = [e for e in entities if id(e) not in drop]
+    new_rels = []
+    for r in relationships:
+        r.source = id_remap.get(r.source, r.source)
+        r.target = id_remap.get(r.target, r.target)
+        if r.source == r.target:        # self-loop after merge
+            continue
+        new_rels.append(r)
+    if name_to_id is not None:
+        for e in new_entities:
+            for nm in {e.canonical_name, *e.aliases}:
+                name_to_id[normalize_name(nm)] = e.entity_id
+
+    logger.info("Wikidata QID consolidation: merged %d group(s), %d -> %d entities.",
+                merged, len(entities), len(new_entities))
+    return new_entities, new_rels, name_to_id

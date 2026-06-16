@@ -15,7 +15,9 @@ runs:
 
 1. **Ingest / preprocess** (`core/preprocessor.py`) — RTF + mojibake repair,
    encoding detection. Books optionally via Docling (`io.use_docling`); web via
-   URL ingestion. Author/narrator detection in `core/foundation.py`.
+   URL fetch + trafilatura main-content extraction, or a bounded whole-site crawl
+   (`core/crawler.py`, `io.crawl` / `--crawl`). Author/narrator detection in
+   `core/foundation.py`.
 2. **Chunk** (`core/chunker.py`) — sentence-aligned, with a hard char split for
    boundary-less text. `max_chars` ~5-6k, `overlap_chars` 400-600 (~7-12%); the
    overlap is what lets a typed relation survive a chunk boundary.
@@ -28,22 +30,25 @@ runs:
    heuristic fallback. Coref is **chunk-local** (see the recall-ceiling note).
 5. **Relation extraction** (`intelligence/`) — one of four tiers selected by
    `--mode`: `api` (Anthropic/OpenAI/Bedrock), `ollama` (local; `think:false`
-   for qwen3), `python_only` (dependency rules + sentence co-occurrence, no LLM),
+   for qwen3.5), `python_only` (dependency rules + sentence co-occurrence, no LLM),
    `langextract` (few-shot + char-grounded). The LLM only does relations.
 6. **Aggregate + resolve** (`postprocess/aggregator.py`, `deduplicator.py`,
    `llm_dedup.py`, `identity_resolution.py`) — canonicalize and merge entities
    (author-fold, acronym/subset folds, demonym folding) under hallucination
    guards.
 7. **Classify + infer** (`ontology.py`, `tie_classes.py`,
-   `canonical_inference.py`) — align relations to the ontology; tag each edge
-   with tie-class, connection-type, polarity; add inferred layers (canonical
-   membership, window/cross-doc co-occurrence).
+   `canonical_inference.py`, `backbone.py`) — align relations to the ontology; tag
+   each edge with tie-class, connection-type, polarity; add inferred layers
+   (canonical membership, window/cross-doc co-occurrence with Newman projection
+   weighting); thin the dense co-occurrence layer with the disparity-filter backbone.
+   Optional Wikidata QID identity consolidation when linking is on.
 8. **Quality + tier** (`quality_review.py`, `evidence_tiers.py`) — guarded
-   entity/edge filtering (tag, don't drop); map every `edge_source` to an
-   evidence tier.
+   entity/edge filtering (tag by default, filter where the method demands it); map
+   every `edge_source` to an evidence tier.
 9. **Export** (`gephi_builder.py`, `exporter.py`, `graph_metrics.py`,
-   `codebook.py`) — nodes/edges CSV, multi-view GEXF, NetworkX structural
-   metrics, per-run codebook.xlsx.
+   `narrative.py`, `codebook.py`) — nodes/edges CSV, multi-view GEXF, NetworkX
+   structural metrics (weighted brokerage, bridges, signed balance), the
+   Bearman-Stovel narrative-sequence network, per-run codebook.xlsx.
 
 ## Tech stack (as built)
 - **NER:** GLiNER2 (`fastino/*`) + spaCy (`en_core_web_trf` / `de_core_news_lg`).
@@ -52,10 +57,13 @@ runs:
 - **Relation extraction:** Ollama (`qwen3.5:9b` on the 8 GB box; bigger models on
   the 16 GB machine) / Anthropic API / dependency rules / LangExtract.
 - **Graph/SNA:** NetworkX → GEXF for Gephi. NetworkX computes only what Gephi
-  cannot (Burt constraint, effective size, bridges, articulation points).
+  cannot (weighted Burt constraint/effective size, bridges, articulation points,
+  signed structural balance, disparity-filter backbone, Newman projection weights).
 - **Ingestion:** static fetch (`requests`) + trafilatura main-content extraction
   (drops nav/ads/sidebars/boilerplate), BeautifulSoup fallback; Docling
-  (books/PDF layout+OCR, optional). Not ScrapeGraphAI/Crawl4AI (see grounding).
+  (books/PDF layout+OCR, optional). Whole-site crawl in `core/crawler.py`
+  (sitemap+scoped-BFS, robots.txt, per-host rate limit, page/depth/size caps,
+  fetch-once). Not ScrapeGraphAI/Crawl4AI (see grounding).
 
 ## The fastcoref microservice
 fastcoref needs `transformers <5`; the main env runs `transformers 5.x` for
@@ -90,8 +98,17 @@ in-process fastcoref, then the heuristic resolver. Setup:
   deliberately not used — incompatible with zero-shot, swappable backends.
 - **Narrative networks (Bearman & Stovel 2000, "Becoming a Nazi").** "Becoming"
   is a process: edges carry temporal markers (`period`, `year`), and we emit a
-  timeline + dynamic GEXF. A full narrative-*sequence* network (life events as
-  nodes, narrative order as arcs) is deferred — see Possible future additions.
+  timeline + dynamic GEXF. The narrative-*sequence* network (`postprocess/
+  narrative.py`) builds it directly: event-element categories as nodes, narrative
+  order (timeline year, then telling order) as directed transitions aggregated
+  across the corpus -> narrative.gexf + narrative_transitions.csv. v1 element scheme
+  is coarse keyword buckets, refinable per domain via `Domain.narrative_rules()`.
+- **Weighted-network methods (Newman 2001; Serrano et al. 2009).** Co-mention is a
+  one-mode projection of an entity x document bipartite graph: pairs are Newman-
+  weighted 1/(k-1), and the dense layer is reduced to its disparity-filter backbone
+  rather than by a global cutoff.
+- **Signed networks (Cartwright & Harary).** Edge polarity feeds a structural-
+  balance fraction (balanced friend/enemy triads) in graph_report.json.
 - **Physical vs ideological connection (transnationalism, Toro 2024).**
   `tie_classes.connection_type` tags each edge physical / ideological /
   organizational / biographical — cross-cutting tie_class (e.g. `fought_against`
@@ -108,6 +125,26 @@ in-process fastcoref, then the heuristic resolver. Setup:
 - **KG construction (Choi & Jung 2025; Zavarella 2026).** Extraction ->
   canonicalization -> evaluation, with hallucination handling — the spine this
   pipeline already follows; the evaluation harness reports P/R/F1 by tier.
+- **Multi-agent KG enrichment (KARMA, Lu et al. 2025).** Their conflict-resolution
+  agent flags contradictory edges before integration; we take the detection half as
+  an offline rule (`graph_metrics._polarity_conflicts`): dyads that are both ally
+  and enemy, which signed balance otherwise drops as net-zero. The full nine-agent
+  verify/align/resolve loop is not adopted — it assumes API-scale compute, and
+  schema alignment (`ontology.py`) + the hallucination guards + quality review
+  already cover align/verify on the local box.
+- **Verified extraction (Serdiukov et al. 2026).** Schema-guided JSON with a
+  recovery module that rescues systematically corrupted output. Their finding —
+  most LLM extraction failures are correctable formatting, not semantic — is
+  exactly what `json_repair.py` does (the multi-`json`-block recovery included);
+  their nine-model benchmark also lands on a Qwen model as the best
+  efficiency/low-hallucination fit, matching the `qwen3.5:9b` default.
+- **Two-stage scenario-prompt RE (Zhao et al. 2025).** Zero-shot document-level RE
+  by constraining the LLM to a predefined relation schema instead of letting it
+  free-form. We adopt the schema half: the generic (non-domain) path falls back to
+  a default relation ontology (`ontology.GENERIC_RELATION_ONTOLOGY`) that constrains
+  the extraction prompt and aligns the verbose tail, so a web crawl yields a usable
+  edge vocabulary (funded/led/member_of...) instead of a unique verb phrase per edge.
+  Domain configs still supply their own ontology; `ontology.enabled: false` opts out.
 - **Membership-universe context (Bosshart et al. 2026, NBER).** The Abel corpus
   is an opt-in sample of committed early members, not a random draw — read the
   network as descriptive of this corpus, not inferential for the movement (the
@@ -116,15 +153,35 @@ in-process fastcoref, then the heuristic resolver. Setup:
 ## Possible future additions (deferred)
 Not on the current track; recorded so the rationale survives.
 
-- **Bearman narrative-sequence network.** Life events as nodes, narrative order
-  as arcs, built from the existing per-author timeline. Highest-value research
-  addition on the table. Deferred: needs a node/edge-semantics decision (what
-  counts as an event node, how arcs carry order vs. causation) before building —
-  it's a second graph model, not a tweak to the current one.
-- **JS-rendered / interactive web targets.** Current ingestion is static-fetch +
-  trafilatura (server-rendered HTML). Dynamic SPA sites would need a headless
-  browser or an LLM/agent scraper (ScrapeGraphAI, WebScraper-MLLM). Revisit only
-  if such targets appear; the LLM budget stays on relation extraction.
+- **Bearman narrative-sequence network — BUILT (v1).** `postprocess/narrative.py`
+  now emits it (element categories as nodes, timeline order as directed transitions
+  aggregated across the corpus). The deferred node-semantics decision was resolved
+  pragmatically for v1: an element is a coarse keyword-bucketed event category, an
+  arc is consecutive-in-time succession (not causation). Refinements still open:
+  finer/learned element abstraction, causal vs. sequential arcs, per-narrative
+  structural-equivalence (Bearman's blockmodel of role positions).
+- **JS-rendered / interactive web targets.** The whole-site crawler
+  (`core/crawler.py`) handles server-rendered HTML. Dynamic SPA sites (content
+  built client-side by JS) would still need a headless browser or an LLM/agent
+  scraper (ScrapeGraphAI, WebScraper-MLLM). Revisit only if such targets appear;
+  the LLM budget stays on relation extraction.
 - **KG link prediction / completion** is deliberately out of scope: inventing
   edges breaks the evidence-faithful, tag-don't-filter design. Listed here so
   it's a decision on record, not an oversight.
+- **Graph-indexed RAG (LightRAG, Guo et al. 2024).** A retrieval/QA system: it
+  builds a KG index over a corpus for dual-level query answering. Different problem
+  — this pipeline extracts a static SNA graph, it doesn't answer queries — so not
+  adopted. The one transferable piece, incremental graph update without a full
+  rebuild, is already covered by checkpoint/resume + the fetch-once crawl.
+- **LLM entity linking (LELA, Haffoudhi et al. 2026).** A modular EL framework
+  (zero-shot NER -> candidate generation -> LLM reranking/disambiguation against a
+  KB). The disambiguation passes would spend the LLM budget reserved for relations,
+  and entity resolution is already handled by dedup/identity_resolution + optional
+  Wikidata QID linking. Not adopted as a framework; its lesson — fold article/plural
+  ORG variants ("the Rockefeller Foundation", "Knight foundations") — is a cheap
+  dedup tweak, tracked separately.
+- **Generating unseen temporal facts (Amalvy & Huang 2026).** A method for building
+  contamination-free TKGE benchmarks by forecasting future quadruples then generating
+  text for them. Useful for benchmark hygiene, but it's synthetic fact generation in
+  the invent-unseen-edges space this pipeline excludes, and the harness already scores
+  against real gold. Not adopted.

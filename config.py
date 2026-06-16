@@ -10,6 +10,26 @@ from pydantic import BaseModel, Field, field_validator
 
 
 # Sub-models
+class CrawlConfig(BaseModel):
+    """Whole-site crawl: expand seed URLs into their subpages before extraction.
+    Off by default - the pipeline still takes explicit `urls`. Bounded + polite
+    (robots.txt, per-host rate limit, page/depth/size caps). See core/crawler.py."""
+    enabled: bool = False
+    seeds: list[str] = Field(default_factory=list)    # start URLs to expand
+    max_pages: int = 50                       # documents to fetch (hard cap)
+    max_depth: int = 3                        # link hops from a seed
+    stay_on_host: bool = True                 # don't leave the seed's host
+    stay_under_path: bool = False             # also require the seed's dir prefix
+    allow: list[str] = Field(default_factory=list)    # regex; URL must match one
+    deny: list[str] = Field(default_factory=list)     # regex; URL dropped if matched
+    delay: float = 1.0                        # min seconds between requests per host
+    respect_robots: bool = True               # obey robots.txt + crawl-delay
+    use_sitemap: bool = True                  # seed from sitemap.xml when present
+    user_agent: str = ""                      # blank -> pipeline default UA
+    timeout: int = 30
+    max_bytes: int = 5_000_000                # per-page download ceiling
+
+
 class IOConfig(BaseModel):
     input_path: str = ""                      # file, directory, or http(s) URL
     input_glob: str = "**/*"
@@ -17,6 +37,7 @@ class IOConfig(BaseModel):
     encoding: str = "auto"
     urls: list[str] = Field(default_factory=list)   # web pages / PDFs to fetch
     urls_file: str = ""                       # path to a newline-delimited URL list
+    crawl: CrawlConfig = Field(default_factory=CrawlConfig)   # whole-site expansion
     request_timeout: int = 30
     metadata_file: str = ""                   # xlsx of per-doc metadata, keyed by letter_id
     use_docling: bool = False                 # structure-aware ingestion (PDF tables/OCR); fail-soft
@@ -90,7 +111,7 @@ class ApiConfig(BaseModel):
 
 class OllamaConfig(BaseModel):
     host: str = "http://localhost:11434"
-    model: str = "qwen3:8b"
+    model: str = "qwen3.5:9b"
     temperature: float = 0.0
     request_timeout: int = 180
     num_ctx: int = 8192
@@ -108,7 +129,7 @@ class LangExtractConfig(BaseModel):
     # examples + char-level source grounding. An alternative to the ollama/api
     # backends - same underlying model, different extraction machinery. A/B it.
     provider: Literal["ollama", "gemini", "openai"] = "ollama"
-    model_id: str = "qwen3:8b"
+    model_id: str = "qwen3.5:9b"
     model_url: str = "http://localhost:11434"   # Ollama server (ignored for cloud)
     api_key_env: str = ""                        # env var for gemini/openai
     temperature: float = 0.0
@@ -183,6 +204,20 @@ class InferenceConfig(BaseModel):
     # stays the weakest evidence tier (full only). 0 disables.
     enable_proximity_edges: bool = True
     proximity_window_chars: int = 600
+    # Drop proximity pairs that co-occur fewer than this many times across the
+    # corpus. 1 = keep every single windowed adjacency (default, tag-don't-filter).
+    # Raise to 2-3 on dense/web corpora: a single accidental adjacency is the
+    # weakest possible signal and on entity-dense pages it dominates the edge set
+    # (a Wikipedia crawl yields ~60% weight-1 proximity edges). Typed/asserted
+    # edges are never affected - this floors only the within-doc co-occurrence layer.
+    proximity_min_count: int = 1
+    # Disparity-filter backbone (Serrano et al. 2009) over the co-occurrence layer.
+    # Every co_occurs_with edge is stamped with `disparity_alpha`; when this is > 0,
+    # edges that aren't statistically significant for either endpoint at this level
+    # are dropped, leaving the weighted backbone. 0 = off (tag only). 0.05-0.30 is
+    # the useful band on dense/web corpora; smaller = sparser backbone. Typed edges
+    # are never touched.
+    cooccurrence_backbone_alpha: float = 0.0
     enable_canonical_inference: bool = False
     # How the corpus-level mandatory-membership assumption is applied by domains
     # that implement one (e.g. nazi_era NSDAP). "authors_only" is the defensible
@@ -218,6 +253,9 @@ class LinkingConfig(BaseModel):
     types: list[str] = Field(default_factory=lambda: ["PERSON", "ORG", "LOCATION"])
     lang: str = "en"                  # Wikidata search language
     request_timeout: int = 8
+    # Merge entities that resolved to the same QID (cross-doc identity). A shared
+    # Wikidata id is stronger than any string match; folds variants dedup missed.
+    consolidate_by_qid: bool = True
 
 
 class DomainConfig(BaseModel):
@@ -230,6 +268,10 @@ class ExportConfig(BaseModel):
     # Precompute SNA metrics Gephi can't (Burt's constraint/effective_size,
     # bridges, articulation points) + a graph-health QA report. Fail-soft.
     graph_metrics: bool = False
+    # Build the narrative-sequence network (Bearman & Stovel 2000): corpus-level
+    # element->element transitions from the timeline. Writes narrative.gexf +
+    # narrative_transitions.csv. Best on first-person life narratives. Fail-soft.
+    narrative_network: bool = False
     # Write codebook.xlsx into the run dir: variable definitions + this run's
     # type/tie-class/relation inventories, for readers new to the data. Fail-soft.
     codebook: bool = True

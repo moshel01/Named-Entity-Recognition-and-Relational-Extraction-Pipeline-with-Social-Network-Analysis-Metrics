@@ -92,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="Comma-separated edge_source values to drop (only edges "
                          "with NO other source go). Use 'metadata' to score what "
                          "the text recovered vs the spreadsheet-derived gold.")
+    ap.add_argument("--undirected-relations", action="store_true",
+                    help="Score relations direction-agnostically (legacy). Default "
+                         "is directed: asymmetric relations must match orientation, "
+                         "symmetric ones (married_to, met_with) match either way.")
     ap.add_argument("--out", help="Write the full JSON report to this path.")
     args = ap.parse_args(argv)
 
@@ -113,11 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     exclude = {s.strip() for s in args.exclude_edge_source.split(",") if s.strip()}
     pred_edges = _filter_edges(_load_edges(edge_path), args.edge_sources, exclude)
 
-    report = score_all(gold, pred_entities, pred_edges)
+    report = score_all(gold, pred_entities, pred_edges,
+                       directed=not args.undirected_relations)
     report["meta"] = {
         "gold": str(args.gold), "entities": str(ent_path), "edges": str(edge_path),
         "edge_tier": args.edge_sources, "n_pred_edges_after_filter": len(pred_edges),
         "excluded_edge_sources": sorted(exclude),
+        "relation_scoring": "undirected" if args.undirected_relations else "directed",
         "n_gold_documents": len(gold.documents),
     }
 

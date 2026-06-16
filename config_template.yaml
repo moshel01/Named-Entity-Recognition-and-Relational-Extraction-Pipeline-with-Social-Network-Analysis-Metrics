@@ -23,6 +23,26 @@ io:
   urls: []                       # Web pages / PDFs to fetch, e.g. ["https://..."]
   urls_file: ""                  # Path to a newline-delimited list of URLs
   request_timeout: 30            # Per-URL fetch timeout (seconds)
+  # Whole-site crawl: expand seed URLs into their subpages, fetch-once, merge into
+  # one network. Off by default. Bounded + polite by construction (robots.txt,
+  # per-host rate limit, page/depth/size caps). The discovered URL list is cached
+  # in the run dir so re-analysis (--stage analyze) does not re-crawl.
+  # CLI shortcut: --crawl <seed> [--crawl-max-pages N] [--crawl-max-depth N].
+  crawl:
+    enabled: false               # Master switch (or pass --crawl on the CLI)
+    seeds: []                     # Start URLs, e.g. ["https://example.org/topic/"]
+    max_pages: 50                # Hard cap on documents fetched
+    max_depth: 3                 # Link hops from a seed
+    stay_on_host: true           # Don't leave the seed's host (www. folded)
+    stay_under_path: false       # Also require the seed's directory prefix
+    allow: []                    # Regex allowlist; if set, a URL must match one
+    deny: []                     # Regex denylist; URL dropped if it matches any
+    delay: 1.0                   # Min seconds between requests to one host (be polite)
+    respect_robots: true         # Obey robots.txt + Crawl-delay. Leave on.
+    use_sitemap: true            # Seed the frontier from sitemap.xml when present
+    user_agent: ""               # Blank -> pipeline default UA
+    timeout: 30                  # Per-page fetch timeout (seconds)
+    max_bytes: 5000000           # Skip a page once its download exceeds this
   # Structure-aware ingestion via Docling (layout + tables -> markdown, OCR for
   # scanned PDFs). Best for research papers / complex PDFs / images. Heavy
   # (downloads torch models on first use) and opt-in; falls back to the
@@ -135,6 +155,17 @@ inference:
   # ollama/api mode. Co-occurrence stays full-tier only. 0 disables.
   enable_proximity_edges: true
   proximity_window_chars: 600
+  # Floor on the within-doc layer: drop pairs co-occurring fewer than N times.
+  # 1 = keep every adjacency (default). On dense/web corpora a single accidental
+  # adjacency dominates the edge set (a Wikipedia crawl was ~60% weight-1) and can
+  # bloat the GEXF past what Gephi will load - set 2-3 there. Typed edges untouched.
+  proximity_min_count: 1
+  # Disparity-filter backbone (Serrano et al. 2009) over the co-occurrence layer.
+  # Every co_occurs_with edge is stamped with disparity_alpha; with alpha > 0,
+  # edges not statistically significant for either endpoint are dropped, leaving
+  # the weighted backbone. 0 = off (tag only). 0.05-0.30 on dense/web corpora
+  # (a Wikipedia crawl went 20k -> 4k edges at 0.10). Typed edges untouched.
+  cooccurrence_backbone_alpha: 0.0
   enable_canonical_inference: false   # Domain rules add membership edges
   # Domain mandatory-membership assumption: authors_only | all | off
   mandatory_membership: "authors_only"
@@ -144,9 +175,12 @@ inference:
 # modes) constrain extraction to it. If `relations` is null the ontology comes
 # from the active domain; generic domain has none, so this is a no-op by default.
 ontology:
-  enabled: true
+  enabled: true                    # false = free-form relations (no schema at all)
   fuzzy_threshold: 0.82
   drop_unmapped: false             # true = drop edges that match no canonical type
+  # null + no domain -> a built-in generic schema (funded/led/member_of...) so a
+  # web crawl gets a usable edge vocabulary instead of a unique verb phrase per
+  # edge. Set your own to override; ontology.enabled:false to turn it off.
   relations: null                  # dict{canonical:[synonyms]} | list[str] | null
 
 # Optional Wikidata entity linking (adds attr_wikidata_qid/url/label). Off by
@@ -158,6 +192,9 @@ linking:
   types: ["PERSON", "ORG", "LOCATION"]
   lang: "en"                       # Wikidata search language
   request_timeout: 8
+  # A shared QID is a high-precision cross-doc identity key: fold same-QID nodes
+  # string dedup kept apart ("Goebbels" + "Joseph Goebbels"). Only acts when linking is on.
+  consolidate_by_qid: true
 
 # Domain plugin
 domain:
@@ -171,6 +208,10 @@ export:
   # (structural-hole brokerage), bridges, articulation points, + a graph-health
   # QA report (graph_report.json). Standard centrality/community: let Gephi do it.
   graph_metrics: true
+  # Narrative-sequence network (Bearman & Stovel 2000): corpus-level element->
+  # element transitions from the timeline (war -> hardship -> politics). Writes
+  # narrative.gexf + narrative_transitions.csv. Best on first-person life stories.
+  # narrative_network: false
   # codebook: true                 # codebook.xlsx (variable definitions; on by default)
   # codebook_note: ""              # corpus caveat shown in the codebook overview
                                    # (sampling frame, known biases)

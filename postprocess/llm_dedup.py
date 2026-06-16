@@ -75,7 +75,13 @@ def apply_llm_merges(
     for label, group in by_type.items():
         if len(group) < 2:
             continue
-        ranked = sorted(group, key=lambda e: e.mention_count, reverse=True)[:max_per_type]
+        # Don't spend an LLM call asking it to dedup dates/numbers: they're vetoed
+        # at merge time anyway (_is_numeric_alias), and a long list of years sends
+        # some reasoning models into a visible chain-of-thought that breaks JSON.
+        ranked = [e for e in sorted(group, key=lambda e: e.mention_count, reverse=True)
+                  if not _is_numeric_alias(e.canonical_name)][:max_per_type]
+        if len(ranked) < 2:
+            continue
         name_to_ent = {normalize_name(e.canonical_name): e for e in ranked}
         try:
             suggestions = backend.suggest_merges(label, [e.canonical_name for e in ranked])

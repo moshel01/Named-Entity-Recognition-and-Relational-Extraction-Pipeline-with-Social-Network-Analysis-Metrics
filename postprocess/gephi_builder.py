@@ -56,13 +56,23 @@ def _aggregate_edges(
                 "n_mentions": 0, "directed": r.directed, "doc_ids": set(),
                 "origins": set(), "edge_sources": set(), "confidence": 0.0,
                 "evidence": r.evidence, "year": None, "suspect_membership": False,
-                "evidence_unverified": False,
+                "evidence_unverified": False, "cooccur_strength": None,
+                "disparity_alpha": None,
             }
             agg[key] = bucket
         if r.attributes.get("suspect_membership"):
             bucket["suspect_membership"] = True
         if r.attributes.get("evidence_unverified"):
             bucket["evidence_unverified"] = True
+        # Co-occurrence backbone signals (None for typed edges). Keep the strongest
+        # tie strength and the most-significant (smallest) disparity alpha.
+        cs = r.attributes.get("cooccur_strength")
+        if cs is not None:
+            bucket["cooccur_strength"] = max(bucket["cooccur_strength"] or 0.0, cs)
+        da = r.attributes.get("disparity_alpha")
+        if da is not None:
+            prev = bucket["disparity_alpha"]
+            bucket["disparity_alpha"] = da if prev is None else min(prev, da)
         bucket["n_mentions"] += 1
         for d in (r.doc_id or "").split(";"):
             if d:
@@ -188,6 +198,8 @@ class GephiBuilder:
                 "Weight": b["weight"],                 # distinct documents (corroboration)
                 "n_mentions": b["n_mentions"],         # raw supporting mentions
                 "n_sources": b["n_sources"],           # distinct letters
+                "cooccur_strength": b.get("cooccur_strength"),  # Newman projection weight
+                "disparity_alpha": b.get("disparity_alpha"),    # backbone significance
                 "reciprocal": b["reciprocal"],
                 "suspect_membership": b.get("suspect_membership", False),
                 "evidence_unverified": b.get("evidence_unverified", False),

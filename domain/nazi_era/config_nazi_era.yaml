@@ -105,6 +105,11 @@ quality:
 inference:
   enable_cooccurrence_edges: true
   cooccurrence_min_shared_docs: 2
+  # Disparity-filter backbone (Serrano 2009) over the co-occurrence layer. 0 = off
+  # (just stamp disparity_alpha for manual filtering). The Abel letters aren't
+  # entity-dense like a web crawl, so the default is off; raise to ~0.1 to keep
+  # only statistically significant co-mentions.
+  cooccurrence_backbone_alpha: 0.0
   # Turn on evidence-based membership + structural edges for this corpus.
   enable_canonical_inference: true
   # Mandatory NSDAP membership assumption (documents are NSDAP autobiographies):
@@ -137,7 +142,10 @@ domain:
 export:
   formats: ["csv", "json", "gexf", "jsonl"]
   gephi: true
-  graph_metrics: true      # brokerage/bridges/articulation + graph_report.json
+  graph_metrics: true      # brokerage/bridges/articulation + signed balance + graph_report.json
+  # These are first-person life narratives - Bearman & Stovel's (2000) exact case.
+  # Build the corpus-level narrative-sequence network (war -> hardship -> politics).
+  narrative_network: true
   codebook_note: >-
     Theodore Abel Papers: autobiographical essays submitted to Abel's 1934
     contest for early NSDAP members. Opt-in sample of committed members, not

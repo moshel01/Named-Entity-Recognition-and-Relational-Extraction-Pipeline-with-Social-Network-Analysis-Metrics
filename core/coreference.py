@@ -47,6 +47,7 @@ class CoreferenceResolver:
         self._fcoref = None
         self._fcoref_failed = False
         self._service_failed = False
+        self._service_warmed = False
 
     # Narrator (always available)
     def narrator_mentions(
@@ -141,26 +142,64 @@ class CoreferenceResolver:
             )
         return extra
 
-    def _service_clusters(self, text: str):
-        """POST a chunk to the coref microservice. Returns its clusters
-        ``[[[s,e],...],...]`` or None on any failure (then stop retrying)."""
+    def _post_resolve(self, text: str, timeout: int):
+        import json
+        import urllib.request
+        req = urllib.request.Request(
+            self.service_url + "/resolve",
+            data=json.dumps({"texts": [text]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))["clusters"][0]
+
+    def _warm_service(self) -> bool:
+        """One-time: confirm the service is reachable and its model is loaded.
+
+        The model loads lazily on first /resolve, and a cold load can exceed the
+        per-chunk timeout - which would otherwise time out the very first chunk and
+        disable the service for the whole run. So absorb the cold start here, once,
+        with a generous budget. Unreachable -> give up (in-process/heuristic); a
+        slow load is waited out, not treated as failure."""
+        if self._service_warmed:
+            return not self._service_failed
+        self._service_warmed = True
         import json
         import urllib.request
 
-        try:
-            req = urllib.request.Request(
-                self.service_url + "/resolve",
-                data=json.dumps({"texts": [text]}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=self.service_timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data["clusters"][0]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("coref service %s failed (%s); falling back to "
-                           "in-process/heuristic for the rest of the run.",
-                           self.service_url, exc)
+        try:  # reachability + loaded? (cheap)
+            with urllib.request.urlopen(self.service_url + "/health", timeout=10) as resp:
+                health = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - service down -> fall back for the run
+            logger.warning("coref service %s unreachable (%s); using in-process/"
+                           "heuristic for the run.", self.service_url, exc)
             self._service_failed = True
+            return False
+
+        if not health.get("loaded"):
+            budget = max(self.service_timeout, 180)  # cold model load can be slow
+            logger.info("Warming coref service %s (loading model, up to %ds)...",
+                        self.service_url, budget)
+            try:
+                self._post_resolve("He met Tom in Berlin.", budget)
+            except Exception as exc:  # noqa: BLE001 - load too slow / broken -> fall back
+                logger.warning("coref service warmup failed (%s); using in-process/"
+                               "heuristic for the run.", exc)
+                self._service_failed = True
+                return False
+        logger.info("coref service ready at %s.", self.service_url)
+        return True
+
+    def _service_clusters(self, text: str):
+        """Coref clusters for one chunk from the microservice, or None. The service
+        is warmed once up front; a per-chunk hiccup after that falls back for that
+        chunk only (the service stays enabled for the next)."""
+        if not self._warm_service():
+            return None
+        try:
+            return self._post_resolve(text, self.service_timeout)
+        except Exception as exc:  # noqa: BLE001 - transient: heuristic for this chunk
+            logger.debug("coref service chunk failed (%s); heuristic this chunk.", exc)
             return None
 
     def _get_clusters(self, text: str):

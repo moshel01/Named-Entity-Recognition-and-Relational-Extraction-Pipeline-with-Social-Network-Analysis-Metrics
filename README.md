@@ -11,7 +11,7 @@ The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
 |------|-----------|-------------------|---------------|----------|
 | `api`         | GLiNER2 + spaCy | Claude / OpenAI / Bedrock | LLM, structured prompts | none |
 | `python_only` | GLiNER2 + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
-| `ollama`      | GLiNER2 + spaCy | local LLM (qwen3, gemma4, ...) | LLM, same prompts as `api` | local |
+| `ollama`      | GLiNER2 + spaCy | local LLM (qwen3.5, gemma4, ...) | LLM, same prompts as `api` | local |
 | `langextract` | GLiNER2 + spaCy | LangExtract over Ollama/Gemini/OpenAI | LLM + char-level source grounding | local/cloud |
 
 > **Optional add-ons:** `io.use_docling` for structure-aware PDF/DOCX/OCR
@@ -81,16 +81,20 @@ The pipeline ingests, in any combination:
 | Books / documents | `.pdf` (PyMuPDF), `.docx`, `.rtf` |
 | Saved web pages | `.html` / `.htm` (boilerplate stripped) |
 | **Live web pages / PDFs** | `--url https://...` (repeatable), or `io.urls` / `io.urls_file` |
+| **A whole site (subpages)** | `--crawl https://...` (bounded, polite); or `io.crawl` |
 | **Direct / pasted text** | `--text "..."` |
 
 ```bash
 python main.py --config config.yaml --url https://en.wikipedia.org/wiki/Weimar_Republic
+python main.py --config config.yaml --crawl https://example.org/topic/ --crawl-max-pages 40
 python main.py --config config.yaml --text "Hitler met Goebbels in Munich in 1926."
 ```
 
-Large books are chunked automatically. **Limits:** web ingestion fetches the
-given page(s) - it does not crawl/follow links; and PDFs must contain a real text
-layer (scanned/image-only PDFs need OCR first, which is not bundled).
+Large books are chunked automatically. **Crawling** a site follows links from the
+seed(s) into one merged network - bounded (page/depth/size caps) and polite
+(robots.txt, per-host rate limit, sitemap-aware) by default; tune in `io.crawl`.
+**Limit:** PDFs must contain a real text layer (scanned/image-only PDFs need OCR
+first, which is not bundled).
 
 ---
 
@@ -107,12 +111,14 @@ Outputs land in `output/<run_name>/`:
 |------|-------------|
 | `documents.csv` | Per-doc manifest: `doc_id, letter_id, author, filename` (join key to external metadata). |
 | `gephi_nodes.csv` | Nodes with `type`, `mention_count`, `doc_count`, `first_year`/`last_year`, a degree split by tie class (`deg_interaction`, `deg_affiliation`, ...), `tag_*`, `attr_*` (incl. `attr_wikidata_qid` when linking is on). Standard centralities are **not** precomputed — Gephi computes those on whichever view you load. |
-| `gephi_edges.csv` | Edges with `tie_class`, `connection_type` (physical/ideological/organizational/biographical), `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. |
+| `gephi_edges.csv` | Edges with `tie_class`, `connection_type` (physical/ideological/organizational/biographical), `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. Co-occurrence edges also carry `cooccur_strength` (Newman projection weight) and `disparity_alpha` (backbone significance). |
 | `network.gexf` | Full single-file graph for Gephi / Cytoscape. |
 | `network_dynamic.gexf` | Same graph with `start` years on nodes/edges for Gephi's timeline (when datable). |
 | `graph_interaction.gexf` | **Interpersonal social network** (person↔person ties only) — the headline SNA. |
 | `graph_affiliation.gexf` | Two-mode membership/biography network (person→org/event/place). |
 | `graph_discourse.gexf` | Stance + co-occurrence layer (attitudes, co-presence). |
+| `narrative.gexf` / `narrative_transitions.csv` | Bearman-Stovel narrative-sequence network: event-element transitions across the corpus (opt-in `export.narrative_network`). |
+| `graph_report.json` | NetworkX QA: components, weighted brokerage, bridges, articulation points, signed structural balance (opt-in `export.graph_metrics`). |
 | `timeline.csv` | Chronological dated events (`letter_id` included). |
 | `entities.json` | Full resolved entity records with aliases, tags, attributes. |
 | `raw_extractions.jsonl` | Per-document extractions (provenance). |

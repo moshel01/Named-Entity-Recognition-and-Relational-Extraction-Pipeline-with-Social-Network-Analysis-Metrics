@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gliner-model", default="",
                     help="Default: adapter's preferred model, else "
                          "fastino/gliner2-large-v1.")
-    ap.add_argument("--ollama-model", default="qwen3:8b")
+    ap.add_argument("--ollama-model", default="qwen3.5:9b")
     ap.add_argument("--types", default="",
                     help="Comma-separated target types (default per dataset), "
                          "e.g. PERSON,ORG,LOCATION. Trims GLiNER labels + gold.")

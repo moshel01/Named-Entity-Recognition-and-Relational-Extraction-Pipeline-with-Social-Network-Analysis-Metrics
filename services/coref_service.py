@@ -42,6 +42,15 @@ def _get_model():
     return _model
 
 
+@app.on_event("startup")
+def _preload() -> None:
+    # Load at boot so "Application startup complete" means ready - otherwise the
+    # model loads on the first /resolve and that cold call can outlast the client's
+    # timeout. Set COREF_PRELOAD=0 to defer to first request.
+    if os.environ.get("COREF_PRELOAD", "1") != "0":
+        _get_model()
+
+
 class ResolveRequest(BaseModel):
     texts: list[str]
 

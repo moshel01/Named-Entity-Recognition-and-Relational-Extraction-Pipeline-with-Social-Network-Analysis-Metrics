@@ -65,7 +65,7 @@ class OllamaBackend(IntelligenceBackend):
             "model": self.cfg.model,
             "stream": False,
             "format": "json",
-            # Disable "thinking" so reasoning models (Qwen3, etc.) emit clean JSON
+            # Disable "thinking" so reasoning models (Qwen3.5, etc.) emit clean JSON
             # instead of <think> traces that break parsing. Ignored by models that
             # don't support it.
             "think": False,

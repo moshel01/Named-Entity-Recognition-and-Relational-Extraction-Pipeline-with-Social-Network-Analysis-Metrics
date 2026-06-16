@@ -46,6 +46,11 @@ class BaseDomain(ABC):
         """Map a year to a named period for temporal slicing, or "" if none."""
         return ""
 
+    def narrative_rules(self):
+        """Element-category keyword rules for the narrative-sequence network
+        (list[(label, (keywords,))]), or None to use the generic default."""
+        return None
+
     # Foundation tuning
     def gliner_labels(self) -> Optional[list[str]]:
         """Return domain GLiNER labels, or None to keep the config defaults."""

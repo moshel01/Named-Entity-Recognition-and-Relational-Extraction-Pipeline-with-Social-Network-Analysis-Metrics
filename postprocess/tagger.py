@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 
 from core.schema import Entity, Relationship
@@ -17,6 +18,31 @@ _IDEOLOGICAL_TYPES = {
     "supports", "support", "endorses", "endorsed", "opposes", "opposed",
     "allied_with", "sympathizes_with", "aligned_with", "promotes",
 }
+
+# Citation/bibliography artifacts: publishers, archives, and the inverted or
+# initials-only author-name forms NER lifts out of reference lists. They are real
+# entities, but not actors in the network - on a scraped/encyclopedic corpus they
+# pass the POS gate, rack up mentions across reference sections, and float to the
+# top as bogus core nodes. Tag them so Gephi can filter (tag, don't drop).
+_PUB_SUFFIXES = ("press", "publishing", "publishers", "verlag", "books")
+_PUB_NAMES = {
+    "routledge", "springer", "elsevier", "wiley", "john wiley & sons", "sage",
+    "sage publications", "palgrave", "palgrave macmillan", "macmillan", "pearson",
+    "norton", "w w norton", "penguin", "penguin books", "harpercollins",
+    "mcgraw-hill", "blackwell", "wiley-blackwell", "taylor & francis", "dk",
+    "prentice hall", "academic press", "oup",
+}
+_ARCHIVE_NAMES = {
+    "the wayback machine", "wayback machine", "internet archive", "jstor",
+    "google books", "google scholar", "researchgate", "semantic scholar",
+    "crossref", "pubmed", "arxiv", "worldcat", "doi", "isbn",
+}
+# PERSON bibliographic forms, matched on the cased name (comma/initials kept).
+# Deliberately narrow so real narrative names never match: J. R. R. Tolkien,
+# George W. Bush, Malcolm X, Martin Luther King Jr. must all stay untagged.
+_BIB_INVERTED = re.compile(r"^[^\s,]+,\s+[A-Z]")      # "Weeks, Marcus"
+_BIB_TRAIL_CAPS = re.compile(r"\s[A-Z]{2,3}$")        # "Olsson PE"
+_BIB_TRAIL_INIT = re.compile(r"\s[A-Z]\.$")           # "Todd M."
 
 
 def _percentile_thresholds(values: list[float]) -> tuple[float, float]:
@@ -52,6 +78,7 @@ class Tagger:
 
         self._tag_entities(entities, degree)
         self._tag_reference_figures(entities, reference_figures or set())
+        self._tag_citation_artifacts(entities)
         self._tag_edges(relationships)
         return entities, relationships
 
@@ -71,6 +98,31 @@ class Tagger:
             if name in known or len(e.doc_ids) >= cutoff:
                 e.attributes["reference_figure"] = True
                 e.tags["reference_figure"] = True
+
+    # Publishers / archives / bibliographic author forms (reference-list noise).
+    @staticmethod
+    def _tag_citation_artifacts(entities: list[Entity]) -> None:
+        n = 0
+        for e in entities:
+            if e.attributes.get("is_author"):     # the narrator is never a citation
+                continue
+            hit = False
+            if e.label in ("ORG", "INSTITUTION"):
+                norm = normalize_name(e.canonical_name)
+                hit = (norm in _PUB_NAMES or norm in _ARCHIVE_NAMES
+                       or any(norm == s or norm.endswith(" " + s)
+                              for s in _PUB_SUFFIXES))
+            elif e.label == "PERSON":
+                name = e.canonical_name.strip()
+                hit = bool(_BIB_INVERTED.search(name)
+                           or _BIB_TRAIL_CAPS.search(name)
+                           or _BIB_TRAIL_INIT.search(name))
+            if hit:
+                e.attributes["citation_artifact"] = True
+                e.tags["citation_artifact"] = True
+                n += 1
+        if n:
+            logger.info("Tagged %d citation/bibliography artifacts (filterable).", n)
 
     # Entities
     def _tag_entities(self, entities: list[Entity], degree: Counter[str]) -> None:

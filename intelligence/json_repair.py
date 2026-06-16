@@ -27,12 +27,8 @@ _MISSING_COMMA_RE = re.compile(
 _MISSING_COMMA_NUM_RE = re.compile(r'(\d)\s*\n(\s*["{\[])')
 
 
-def _extract_json_blob(text: str) -> str:
-    """Return the substring most likely to be the JSON payload."""
-    fence = _FENCE_RE.search(text)
-    if fence:
-        text = fence.group(1)
-    # Find the outermost { } or [ ] span.
+def _outermost_span(text: str) -> str:
+    """Trim a blob to its outermost { } / [ ] span, dropping prose either side."""
     starts = [i for i, c in enumerate(text) if c in "{["]
     ends = [i for i, c in enumerate(text) if c in "}]"]
     if starts and ends:
@@ -180,6 +176,16 @@ def _escape_inner_quotes(text: str) -> str:
     return "".join(out)
 
 
+# Curly/smart double quotes a model uses as a string delimiter (`: "When ...,"
+# noted ...,"`) - JSON needs straight quotes. Singles/guillemets included; smart
+# singles stay valid string content so they are left alone.
+_SMART_DQUOTE = {ord(c): '"' for c in "“”„‟«»″"}
+
+
+def _normalize_smart_quotes(text: str) -> str:
+    return text.translate(_SMART_DQUOTE)
+
+
 def _balance_and_close(text: str) -> str:
     """Truncate at last sane point and append closing brackets in order."""
     stack: list[str] = []
@@ -239,22 +245,15 @@ def _balance_and_close(text: str) -> str:
     return candidate
 
 
-def repair_json(text: str) -> Optional[Any]:
-    """Attempt to parse possibly-malformed JSON, returning the object or None."""
-    if text is None:
-        return None
-    text = text.strip()
-    if not text:
-        return None
+def _repair_blob(blob: str) -> Optional[Any]:
+    """Run the repair ladder on one candidate blob; None if unrecoverable.
 
-    # Level 0: direct.
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    No failure dump here - repair_json tries several candidates and dumps once
+    only if all of them fail.
+    """
+    blob = _outermost_span(blob)
 
-    # Level 1: extract blob.
-    blob = _extract_json_blob(text)
+    # Level 1: direct parse of the trimmed blob.
     try:
         return json.loads(blob)
     except json.JSONDecodeError:
@@ -351,6 +350,15 @@ def repair_json(text: str) -> Optional[Any]:
     except json.JSONDecodeError:
         pass
 
+    # Level 5.7: curly/smart quotes used as a value delimiter (`: "When ...,"
+    # noted ...,"`). Straighten them, then let the inner-quote escaper tell the
+    # real closing delimiter from the quote marks now inside the value.
+    fixed57 = _escape_inner_quotes(_normalize_smart_quotes(fixed4))
+    try:
+        return json.loads(fixed57)
+    except json.JSONDecodeError:
+        pass
+
     # Level 6: truncation - close an open string and any open brackets.
     fixed6 = _balance_and_close(fixed5)
     try:
@@ -369,9 +377,44 @@ def repair_json(text: str) -> Optional[Any]:
     fixed8 = _balance_and_close(_DANGLING_KEY_RE.sub("", fixed4))
     try:
         return json.loads(fixed8)
+    except json.JSONDecodeError:
+        return None
+
+
+def repair_json(text: str) -> Optional[Any]:
+    """Attempt to parse possibly-malformed JSON, returning the object or None.
+
+    A reasoning model (qwen3.5, with think:false ignored) emits visible working
+    with several ```json blocks: a discarded first attempt, then the corrected
+    answer last. Try each fenced block last-first, then the whole response; dump
+    the raw only if every candidate fails.
+    """
+    if text is None:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+
+    # Level 0: direct.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Candidate blobs: each fenced block (last first), then the whole response.
+    candidates = list(reversed(_FENCE_RE.findall(text)))
+    candidates.append(text)
+    for cand in candidates:
+        obj = _repair_blob(cand)
+        if obj is not None:
+            return obj
+
+    # All candidates exhausted; save the raw for offline analysis.
+    try:
+        json.loads(_balance_and_close(_outermost_span(text)))
     except json.JSONDecodeError as exc:
         _dump_failure(text, exc)
-        return None
+    return None
 
 
 def _dump_failure(raw: str, exc: Exception, cap: int = 50) -> None:

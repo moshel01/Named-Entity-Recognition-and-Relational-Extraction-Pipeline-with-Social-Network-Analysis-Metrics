@@ -161,7 +161,7 @@ Set `mode:` in the config, or override with `--mode`.
   ```powershell
   # install Ollama from ollama.com, then:
   ollama serve
-  ollama pull qwen3:8b           # or gemma4:12b, llama3.1, ...
+  ollama pull qwen3.5:9b         # or gemma4:12b, llama3.1, ...
   ```
   Config: `intelligence.ollama.model` + `host`.
 - **Best for:** LLM quality without sending data out.
@@ -254,10 +254,10 @@ to *see* the run. `--run-name` keeps each model's output in its own directory;
 ```powershell
 $env:PYTHONUTF8 = 1
 
-# Abel pilot, choose the model (qwen3:8b fits an 8 GB GPU; gemma4:12b will
+# Abel pilot, choose the model (qwen3.5:9b fits an 8 GB GPU; gemma4:12b will
 # spill and run ~5x slower but extracts richer stance/polarity edges)
 python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
-  --ollama-model qwen3:8b   --run-name abel_qwen3_8b   --limit 25 --resume
+  --ollama-model qwen3.5:9b --run-name abel_qwen3_5_9b --limit 25 --resume
 python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
   --ollama-model gemma4:12b --run-name abel_gemma4_12b --limit 25 --resume
 
@@ -269,23 +269,27 @@ python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
 
 # re-run post-processing only (dedup/quality/export tweaks; no re-extraction)
 python main.py --config domain/nazi_era/config_nazi_era.yaml --mode ollama `
-  --run-name abel_qwen3_8b --stage analyze
+  --run-name abel_qwen3_5_9b --stage analyze
 
 # score a run against gold annotations (entity/relation P/R/F1 by tier)
+# Relations are scored DIRECTED by default (asymmetric relations must match
+# orientation; symmetric ones match either way). Add --undirected-relations for
+# the old direction-agnostic behavior. Entities use 1:1 matching (over-splitting
+# costs precision).
 python -m evaluation.evaluate --gold evaluation/gold_template.json `
-  --run-dir output/abel_qwen3_8b --edge-sources conservative
+  --run-dir output/abel_qwen3_5_9b --edge-sources conservative
 
 # public IE benchmark: prepares inputs+gold, runs the pipeline, scores it
 python -m benchmarks.run_benchmark --dataset redocred --limit 25 --run --eval
 python -m benchmarks.run_benchmark --dataset redocred --limit 10 --mode ollama `
-  --ollama-model qwen3:8b --constrain-relations --run --eval
+  --ollama-model qwen3.5:9b --constrain-relations --run --eval
 # German historical NER (closest public proxy for the Abel corpus):
 python -m benchmarks.run_benchmark --dataset hipe --limit 20 --run --eval
 # modern German NER (pairs with hipe - the two bracket the Abel register):
 python -m benchmarks.run_benchmark --dataset germeval --limit 20 --run --eval
 # interpersonal ties in dialogue:
 python -m benchmarks.run_benchmark --dataset dialogre --limit 30 --mode ollama `
-  --ollama-model qwen3:8b --constrain-relations --run --eval
+  --ollama-model qwen3.5:9b --constrain-relations --run --eval
 
 # book vs gold; --relation-guide gives the LLM contrastive label definitions
 # (A/B the typed-relation accuracy vs the bare-label run):
@@ -299,7 +303,7 @@ python -m evaluation.calibration --gold data/bench/redocred.gold.json `
 
 ## Scaling up (larger test -> full corpus)
 
-Extraction is the cost (ollama qwen3:8b on an 8 GB GPU is ~75 s/letter, so ~540
+Extraction is the cost (ollama qwen3.5:9b on an 8 GB GPU is ~75 s/letter, so ~540
 letters is roughly 11-12 h). It is checkpointed per document, so:
 
 ```powershell
@@ -387,10 +391,15 @@ Configured under `coreference:`.
   `transformers <5`, which conflicts with the main env's GLiNER2; the microservice
   keeps it isolated and light. In a separate venv:
   `pip install -r services/requirements-coref.txt` then
-  `uvicorn services.coref_service:app --port 8000`, and set
-  `coreference.service_url: "http://127.0.0.1:8000"`. An unreachable service falls
+  `uvicorn services.coref_service:app --port 8000`. **Start it first and wait for
+  `Application startup complete`** - it preloads the model at boot, so that line
+  means it's ready (no cold-start race). Then set
+  `coreference.service_url: "http://127.0.0.1:8000"`. The pipeline warms the service
+  once up front (generous budget) before extraction; if it's unreachable it falls
   back to in-process fastcoref, then the heuristic resolver, so it's safe to leave
-  configured.
+  configured. NB: in-process fastcoref is broken in the main env (transformers 5.x:
+  `all_tied_weights_keys`), so the service is the real path - if it's down you get
+  the heuristic, not neural coref.
 
 Turn it all off with `coreference.enabled: false`.
 
@@ -513,6 +522,7 @@ entity types you care about (they are plain English phrases; GLiNER is zero-shot
 | A book as PDF/EPUB-export/txt | drop it in the folder; it's chunked automatically |
 | A web page or online PDF | `--url https://...` (repeatable) or `io.urls: ["https://..."]` |
 | Many URLs | put them (one per line) in a file -> `--urls-file urls.txt` or `io.urls_file` |
+| A whole site + its subpages | `--crawl https://site/section/` or `io.crawl.{enabled,seeds}` |
 | A raw string / pasted text | `--text "Hitler met Goebbels in 1926."` |
 
 ```powershell
@@ -522,6 +532,8 @@ python main.py --config config.yaml            # with io.input_path: "./books/me
 python main.py --config config.yaml --url https://en.wikipedia.org/wiki/Weimar_Republic
 # A batch of pages + your local corpus together:
 python main.py --config config.yaml --urls-file sources.txt
+# A whole site section (bounded crawl, one merged network):
+python main.py --config config.yaml --crawl https://example.org/topic/ --crawl-max-pages 40
 ```
 
 The **generic domain** (`domain: {name: "generic"}`) carries an English common-noun
@@ -532,10 +544,42 @@ page gets the same clean, fully-tagged output as the tuned Nazi-era corpus, minu
 the domain-specific aliases. Use `--mode ollama`/`api` for best entity resolution
 on fiction (no prebuilt alias list), e.g. merging "Bilbo"/"Mr. Baggins".
 
-Caveats: web ingestion fetches the page(s) you give - it does **not** crawl or
-follow links. PDFs need a real text layer; **scanned/image PDFs require OCR
-first** (e.g. `ocrmypdf` -> then feed the OCR'd PDF). Very large books work but
-take proportionally longer; use `--limit` while tuning.
+Caveats: `--url` fetches exactly the page(s) you give. To pull a **whole site**,
+use `--crawl` (below). PDFs need a real text layer; **scanned/image PDFs require
+OCR first** (e.g. `ocrmypdf` -> then feed the OCR'd PDF). Very large books work
+but take proportionally longer; use `--limit` while tuning.
+
+#### Crawling a whole site
+`--crawl <seed>` (repeatable) expands a seed URL into its subpages and merges them
+into one network (entities fold across pages: "Ford Foundation" on page A = page B).
+It is **bounded and polite by default** so a crawl can't run away or hammer a host:
+
+- **Bounds:** `max_pages` (document cap, default 50), `max_depth` (link hops, 3),
+  `max_bytes` (per-page download ceiling). A hard request budget backstops all three.
+- **Scope:** stays on the seed's host (`stay_on_host`, folds `www.`); optional
+  `stay_under_path` keeps only the seed's directory; `allow`/`deny` are regex lists.
+- **Politeness:** obeys `robots.txt` + `Crawl-delay`; `delay` (s) rate-limits per
+  host; seeds from `sitemap.xml` when present. Identifies with a clear User-Agent.
+- **Fetch-once:** the page read for links is the page kept (no double fetch). The
+  discovered URL list is cached in the run dir, so `--stage analyze` never re-crawls.
+
+```powershell
+# CLI: crawl one section, cap at 40 pages, 2 hops deep.
+python main.py --config config.yaml --crawl https://example.org/topic/ `
+  --crawl-max-pages 40 --crawl-max-depth 2
+
+# Or in the config (io.crawl) for repeatable runs + finer scope:
+#   io:
+#     crawl:
+#       enabled: true
+#       seeds: ["https://example.org/topic/"]
+#       stay_under_path: true
+#       deny: ["/tag/", "/author/"]
+```
+
+Respect the target's terms of service and robots.txt. Leave `respect_robots: true`
+and a non-zero `delay` unless you own the site or have permission; an unthrottled
+crawl can get your IP blocked.
 
 ### b) A different language
 - Set `foundation.spacy_model` to that language's spaCy model
@@ -587,6 +631,10 @@ python main.py --config <path> [options]
   --limit N          Process only the first N documents (quick tests).
   --url URL          Fetch + analyze a web page / PDF URL (repeatable).
   --urls-file PATH   Newline-delimited list of URLs to fetch.
+  --crawl URL        Crawl a site from this seed, analyze its subpages (repeatable;
+                     enables crawling). Tune scope/bounds in io.crawl.
+  --crawl-max-pages N   Override io.crawl.max_pages.
+  --crawl-max-depth N   Override io.crawl.max_depth.
   --text "..."       Analyze a raw text string directly.
   -v, --verbose      DEBUG logging.
 
@@ -609,6 +657,7 @@ python -m evaluation.evaluate --gold gold.json --run-dir output/abel_papers --ed
 | Symptom | Fix |
 |---------|-----|
 | `OSError: [E050] Can't find model 'de_core_news_lg'` | `python -m spacy download de_core_news_lg` (or set `spacy_model: de_core_news_sm`). It also auto-falls back to `en_core_web_sm`/blank. |
+| `Segmentation fault` while "Loading foundation models" (CPU) | `en_core_web_trf` co-loaded with GLiNER2 clashes on a duplicate OpenMP runtime. `main.py` now sets `KMP_DUPLICATE_LIB_OK=TRUE` to allow it; for ollama/crawl runs (foundation on CPU) prefer a non-transformer spaCy model (`en_core_web_lg`/`_sm`) + `gliner2-multi-v1`. |
 | Very few German entities | You're on an English-only GLiNER. Set `gliner_model: fastino/gliner2-multi-v1`. |
 | `Env var ANTHROPIC_API_KEY is not set` | Export the key, or switch `--mode python_only`. |
 | `Could not reach Ollama` | `ollama serve` running? `ollama pull <model>` done? Check `host`. |

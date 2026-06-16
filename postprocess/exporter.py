@@ -189,9 +189,30 @@ class Exporter:
             G.add_node(nid, **attrs)
 
         for edge in sel:
+            s_, t_ = str(edge["Source"]), str(edge["Target"])
+            w = edge.get("Weight", 1) or 1
+            if G.has_edge(s_, t_):
+                # Same pair, different rel_type (e.g. met_with AND supported): a
+                # plain Graph drops the earlier edge (last write wins) and loses its
+                # weight. Sum the weight and union the provenance so the GEXF agrees
+                # with graph_metrics, which also sums parallel edges.
+                d = G[s_][t_]
+                d["weight"] = d.get("weight", 1) + w
+                for k in ("rel_type", "tie_class", "connection_type", "polarity",
+                          "origin", "edge_source"):
+                    parts = [x for x in str(d.get(k, "")).split(";") if x]
+                    add = str(edge.get(k, "") or "")
+                    if add and add not in parts:
+                        parts.append(add)
+                    d[k] = ";".join(parts)
+                d["label"] = d.get("rel_type", d.get("label", ""))
+                d["confidence"] = max(d.get("confidence", 0.0), edge.get("confidence", 0.0))
+                if dynamic and edge.get("year"):
+                    d["start"] = min(d.get("start", int(edge["year"])), int(edge["year"]))
+                continue
             attrs = {
                 "label": edge.get("Label", ""),
-                "weight": edge.get("Weight", 1),
+                "weight": w,
                 "rel_type": edge.get("rel_type", ""),
                 "tie_class": edge.get("tie_class", ""),
                 "connection_type": edge.get("connection_type", ""),
@@ -204,6 +225,6 @@ class Exporter:
             }
             if dynamic and edge.get("year"):
                 attrs["start"] = int(edge["year"])
-            G.add_edge(str(edge["Source"]), str(edge["Target"]), **attrs)
+            G.add_edge(s_, t_, **attrs)
 
         nx.write_gexf(G, path)

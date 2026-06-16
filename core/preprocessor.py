@@ -53,6 +53,38 @@ def _extract_rtf(path: Path, encoding: str) -> str:
     return rtf_to_text(raw)
 
 
+# Section headings that begin reference/citation/navigation tails. A bibliography
+# is full of publishers and cited-author names - real entities, but not actors in
+# the page's social network. Cutting the tail at the source beats tagging it after
+# NER has already lifted "Oxford University Press" into a top-mention node. German
+# included for de.wikipedia. The whole-word/line match + back-half + half-length
+# guards keep a legitimate mid-document "Notes" from truncating the body.
+_REF_HEADINGS = {
+    "references", "reference", "bibliography", "notes", "footnotes", "sources",
+    "works cited", "further reading", "external links", "citations", "see also",
+    "literature", "literatur", "weblinks", "einzelnachweise", "quellen",
+}
+
+
+def _strip_trailing_sections(text: str) -> str:
+    lines = text.split("\n")
+    n = len(lines)
+    if n < 10:
+        return text
+    cut = None
+    for i in range(n // 2, n):       # only the back half can be a reference tail
+        ln = lines[i].strip().lstrip("#").strip().rstrip(":").strip().lower()
+        if ln in _REF_HEADINGS:
+            cut = i
+            break
+    if cut is None:
+        return text
+    kept = "\n".join(lines[:cut]).strip()
+    if len(kept) < 0.5 * len(text):  # never nuke more than half the document
+        return text
+    return kept
+
+
 def _clean_html(raw: str) -> str:
     """HTML -> readable main text.
 
@@ -61,19 +93,21 @@ def _clean_html(raw: str) -> str:
     get_text dumps all the boilerplate too, which feeds noise into NER/RE on
     scraped pages. trafilatura is optional (`pip install trafilatura`); a missing
     package or an empty extraction falls back to the BeautifulSoup tag strip.
+    Either way the trailing reference/citation sections are cut (see above).
     """
+    text = ""
     try:
         import trafilatura
-        text = trafilatura.extract(raw, include_comments=False, include_tables=True)
-        if text and text.strip():
-            return text
+        text = trafilatura.extract(raw, include_comments=False, include_tables=True) or ""
     except Exception:  # noqa: BLE001 - not installed / extraction failure -> fallback
-        pass
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(raw, "html.parser")
-    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "form"]):
-        tag.decompose()
-    return soup.get_text(separator="\n")
+        text = ""
+    if not text.strip():
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw, "html.parser")
+        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "form"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n")
+    return _strip_trailing_sections(text)
 
 
 def _extract_html(path: Path, encoding: str) -> str:

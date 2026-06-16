@@ -45,6 +45,84 @@ def _build_graph(node_ids, edges, keep_classes: set[str] | None):
     return G
 
 
+def _signed_balance(edges, *, max_triangles: int = 200_000) -> dict[str, Any]:
+    """Cartwright-Harary structural balance on the signed tie graph.
+
+    A triangle is balanced when the product of its three edge signs is positive
+    ("the friend of my friend is my friend; the enemy of my enemy is my friend").
+    We only use edges that carry a polarity (positive/negative); neutral ties are
+    not signed. Reports the balanced fraction - high = a polarized, balanced
+    network; low = lots of frustrated triads. Bounded triangle enumeration.
+    """
+    import networkx as nx
+    sign = {"positive": 1, "negative": -1}
+    G = nx.Graph()
+    for e in edges:
+        s, t = e.get("Source"), e.get("Target")
+        sg = sign.get(str(e.get("polarity") or ""))
+        if not s or not t or s == t or sg is None:
+            continue
+        # Collapse parallel signed edges by sign sum; net 0 -> drop (ambiguous).
+        if G.has_edge(s, t):
+            G[s][t]["s"] += sg
+        else:
+            G.add_edge(s, t, s=sg)
+    balanced = unbalanced = 0
+    seen: set[frozenset] = set()
+    for u, v in G.edges():
+        if G[u][v]["s"] == 0:
+            continue
+        for w in set(G[u]) & set(G[v]):
+            tri = frozenset((u, v, w))
+            if w == u or w == v or tri in seen:
+                continue
+            s1, s2, s3 = G[u][v]["s"], G[u][w].get("s", 0), G[v][w].get("s", 0)
+            if s1 == 0 or s2 == 0 or s3 == 0:
+                continue
+            seen.add(tri)
+            if (1 if s1 > 0 else -1) * (1 if s2 > 0 else -1) * (1 if s3 > 0 else -1) > 0:
+                balanced += 1
+            else:
+                unbalanced += 1
+            if len(seen) >= max_triangles:
+                break
+        if len(seen) >= max_triangles:
+            break
+    total = balanced + unbalanced
+    return {"signed_edges": G.number_of_edges(), "triangles": total,
+            "balanced": balanced, "unbalanced": unbalanced,
+            "balanced_pct": round(100.0 * balanced / total, 1) if total else 0.0}
+
+
+def _polarity_conflicts(edges, id_to_name=None, *, sample: int = 20) -> dict[str, Any]:
+    """Dyads carrying BOTH a positive and a negative tie - contradictory signed
+    edges on the same pair (e.g. allied_with + fought_against). Either an
+    extraction error or a genuinely ambivalent / over-time relationship; either
+    way worth a look. Signed balance collapses these to net-zero and drops them,
+    so they are otherwise invisible. Reported, not filtered - the analyst decides.
+    """
+    id_to_name = id_to_name or {}
+    pos: dict[frozenset, set] = {}
+    neg: dict[frozenset, set] = {}
+    for e in edges:
+        s, t = e.get("Source"), e.get("Target")
+        if not s or not t or s == t:
+            continue
+        pol = str(e.get("polarity") or "")
+        bucket = pos if pol == "positive" else neg if pol == "negative" else None
+        if bucket is None:
+            continue
+        bucket.setdefault(frozenset((s, t)), set()).add(
+            e.get("rel_type") or e.get("tie_class") or "?")
+    conflicts = []
+    for pair in set(pos) & set(neg):
+        a, b = tuple(pair)
+        conflicts.append({"source": id_to_name.get(a, a), "target": id_to_name.get(b, b),
+                          "positive": sorted(pos[pair]), "negative": sorted(neg[pair])})
+    conflicts.sort(key=lambda c: (c["source"], c["target"]))
+    return {"conflicting_dyads": len(conflicts), "sample": conflicts[:sample]}
+
+
 def _qa(G) -> dict[str, Any]:
     import networkx as nx
     n = G.number_of_nodes()
@@ -94,14 +172,16 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     sub_nodes = [v for v in g_sub.nodes if g_sub.degree(v) > 0]
     if 0 < len(sub_nodes) <= max_constraint_nodes:
         active = g_sub.subgraph(sub_nodes)
+        # Weighted: edge weight = corroboration (distinct docs). Burt's constraint
+        # and effective size are defined on the weighted ego network, so pass it.
         try:
-            for v, c in nx.constraint(active).items():
+            for v, c in nx.constraint(active, weight="weight").items():
                 if c == c:  # filter NaN
                     constraint[v] = round(float(c), 4)
         except Exception as exc:  # noqa: BLE001
             logger.debug("constraint failed: %s", exc)
         try:
-            for v, s in nx.effective_size(active).items():
+            for v, s in nx.effective_size(active, weight="weight").items():
                 if s == s:
                     effective[v] = round(float(s), 3)
         except Exception as exc:  # noqa: BLE001
@@ -125,6 +205,22 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     report["brokerage_nodes"] = len(constraint)
     report["bridges"] = len(bridges)
     report["articulation_points"] = len(articulation)
+
+    # Signed structural balance over the full edge set (stance edges carry the
+    # sign; substantive-only would drop them since stance is non-social).
+    try:
+        report["balance"] = _signed_balance(tables.edges)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("structural balance failed: %s", exc)
+
+    # Contradictory signed dyads (same pair, both ally and enemy). A QA signal,
+    # not a filter - balance drops them as net-zero, so surface the count + a
+    # readable sample here for review.
+    try:
+        id_to_name = {n["Id"]: n.get("Label", n["Id"]) for n in tables.nodes}
+        report["conflicts"] = _polarity_conflicts(tables.edges, id_to_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("polarity conflicts failed: %s", exc)
 
     # Merge onto rows.
     for n in tables.nodes:

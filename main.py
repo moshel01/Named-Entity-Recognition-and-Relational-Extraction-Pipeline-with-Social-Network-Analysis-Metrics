@@ -4,6 +4,17 @@
 
 from __future__ import annotations
 
+import os
+
+# spaCy (thinc) and GLiNER2 (torch) each bundle an OpenMP runtime. With a
+# transformer spaCy model (en_core_web_trf) and GLiNER2 sharing one CPU process
+# the duplicate libiomp init aborts the process - an intermittent segfault while
+# loading foundation models (hits the English ollama/crawl path: foundation runs
+# on CPU there). Allow the duplicate runtime; do NOT pin thread count (that would
+# throttle CPU inference). Must be set before torch/spacy are imported below.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import logging
 import sys
 from pathlib import Path
@@ -17,7 +28,7 @@ from rich.table import Table
 from config import Config, load_config
 from core.foundation import FoundationLayer
 from core.preprocessor import gather_documents
-from core.schema import DocumentExtraction
+from core.schema import Document, DocumentExtraction, stable_id
 from checkpoint.manager import CheckpointManager
 from domain.base_domain import load_domain
 from intelligence.base import IntelligenceBackend
@@ -85,11 +96,11 @@ class Pipeline:
     # Stage: extract
     def run_extract(self, resume: bool, limit: int = 0,
                     extra_urls: tuple[str, ...] = (), urls_file: str = "",
-                    text: str = "") -> list[DocumentExtraction]:
+                    text: str = "", crawl_seeds: tuple[str, ...] = ()) -> list[DocumentExtraction]:
         """Run foundation + intelligence over all documents with checkpointing."""
         from tqdm import tqdm
 
-        documents = self._gather(limit, extra_urls, urls_file, text)
+        documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds)
         if not documents:
             console.print("[yellow]No documents found.[/yellow]")
             return []
@@ -130,8 +141,11 @@ class Pipeline:
 
     # Document gathering (shared by extract + analyze)
     def _gather(self, limit: int = 0, extra_urls: tuple[str, ...] = (),
-                urls_file: str = "", text: str = ""):
-        """Collect the current run's documents (files + URLs + text), honoring --limit."""
+                urls_file: str = "", text: str = "", crawl_seeds: tuple[str, ...] = (),
+                for_extract: bool = True):
+        """Collect the current run's documents (files + URLs + crawl + text),
+        honoring --limit. Dedups by doc_id so the same URL from two sources is one
+        node."""
         io = self.config.io
         documents = gather_documents(
             input_path=io.input_path or None,
@@ -143,10 +157,60 @@ class Pipeline:
             timeout=io.request_timeout,
             use_docling=io.use_docling,
         )
+        documents.extend(self._gather_crawl(crawl_seeds, for_extract))
+
+        # Dedup by doc_id (a crawled url may also be in io.urls / a file mirror).
+        seen: set[str] = set()
+        documents = [d for d in documents
+                     if not (d.doc_id in seen or seen.add(d.doc_id))]
+
         if limit and limit > 0:
             documents = documents[:limit]
             console.print(f"[yellow]--limit active: {len(documents)} documents.[/yellow]")
         return documents
+
+    def _gather_crawl(self, crawl_seeds: tuple[str, ...], for_extract: bool) -> list[Document]:
+        """Expand seed URLs into subpage Documents via the crawler. On extract,
+        crawl and cache the discovered URL list; on analyze, rebuild lightweight
+        id-only stubs from that cache so re-analysis never re-crawls."""
+        cc = self.config.io.crawl
+        seeds = list(cc.seeds) + list(crawl_seeds)
+        if not seeds or not (cc.enabled or crawl_seeds):
+            return []
+
+        cache = self.run_dir / "crawled_urls.txt"
+        if not for_extract and cache.exists():
+            urls = [u.strip() for u in cache.read_text(encoding="utf-8").splitlines() if u.strip()]
+            console.print(f"[cyan]Crawl: reusing {len(urls)} cached urls (no re-crawl).[/cyan]")
+            return [Document(doc_id=stable_id(u, prefix="url_", length=10),
+                             source_path=u, text="",
+                             meta={"filename": u, "source_type": "url"}) for u in urls]
+
+        from core.crawler import Crawler
+        console.print(f"[cyan]Crawling {len(seeds)} seed(s) "
+                      f"(max_pages={cc.max_pages}, depth={cc.max_depth}, "
+                      f"robots={'on' if cc.respect_robots else 'OFF'})...[/cyan]")
+        docs = Crawler(self._crawl_opts()).crawl(seeds)
+        console.print(f"[green]Crawl: {len(docs)} page(s) fetched.[/green]")
+        try:
+            cache.write_text("\n".join(d.source_path for d in docs), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - cache is a nicety, not load-bearing
+            pass
+        return docs
+
+    def _crawl_opts(self):
+        from core.crawler import CrawlOptions
+        from core.preprocessor import _USER_AGENT
+        cc = self.config.io.crawl
+        return CrawlOptions(
+            max_pages=cc.max_pages, max_depth=cc.max_depth,
+            stay_on_host=cc.stay_on_host, stay_under_path=cc.stay_under_path,
+            allow=tuple(cc.allow), deny=tuple(cc.deny), delay=cc.delay,
+            respect_robots=cc.respect_robots, use_sitemap=cc.use_sitemap,
+            user_agent=cc.user_agent or _USER_AGENT,
+            timeout=cc.timeout or self.config.io.request_timeout,
+            max_bytes=cc.max_bytes,
+        )
 
     # Stage: analyze
     def run_analyze(self, extractions: list[DocumentExtraction]) -> dict[str, str]:
@@ -244,9 +308,14 @@ class Pipeline:
                                 subtypes=self.domain.entity_subtypes()).run(entities, self.backend)
 
         # 3c. Optional Wikidata linking (off by default; network, fail-soft).
+        # When on, a shared QID is a high-precision cross-doc identity key: fold
+        # same-QID nodes string dedup kept apart, before inference reads the ids.
         if self.config.linking.enabled:
-            from postprocess.wikidata import link_entities
+            from postprocess.wikidata import consolidate_by_qid, link_entities
             entities = link_entities(entities, self.config.linking)
+            if self.config.linking.consolidate_by_qid:
+                entities, relationships, _name_to_id = consolidate_by_qid(
+                    entities, relationships, _name_to_id)
 
         # 4. Inference (co-occurrence + proximity + canonical edges). Pass the
         # raw mentions + dedup name map so within-document window co-occurrence
@@ -318,6 +387,16 @@ class Pipeline:
             self.run_dir, self.config.export.formats, gephi=self.config.export.gephi
         )
         written = exporter.export(tables, entities, extractions, manifest=manifest)
+
+        # 7a2. Narrative-sequence network (Bearman & Stovel 2000): element->element
+        # transitions across the corpus timeline. Opt-in; fail-soft.
+        if getattr(self.config.export, "narrative_network", False) and agg.timeline:
+            try:
+                from postprocess.narrative import _ELEMENT_RULES, write_narrative
+                rules = self.domain.narrative_rules() or _ELEMENT_RULES
+                written.update(write_narrative(self.run_dir, agg.timeline, rules=rules))
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[yellow]Narrative network skipped: {exc}[/yellow]")
 
         # 7b. Codebook: variable definitions + this run's value inventories.
         if self.config.export.codebook:
@@ -423,7 +502,8 @@ class Pipeline:
 
     # Full run
     def run(self, stage: str, resume: bool, limit: int = 0,
-            extra_urls: tuple[str, ...] = (), urls_file: str = "", text: str = "") -> None:
+            extra_urls: tuple[str, ...] = (), urls_file: str = "", text: str = "",
+            crawl_seeds: tuple[str, ...] = ()) -> None:
         self._write_run_meta(stage, resume, limit)
         ckpt = CheckpointManager(
             self.run_dir / "checkpoints",
@@ -434,14 +514,15 @@ class Pipeline:
         if stage in ("all", "ingest", "extract"):
             extractions = self.run_extract(resume=resume, limit=limit,
                                            extra_urls=extra_urls, urls_file=urls_file,
-                                           text=text)
+                                           text=text, crawl_seeds=crawl_seeds)
             if stage == "ingest":
                 console.print("[green]Ingest/extract stage finished.[/green]")
                 return
         else:
             # Analyze-only: score exactly the current input set (respecting
             # --limit), filtering the checkpoint rather than dumping all of it.
-            documents = self._gather(limit, extra_urls, urls_file, text)
+            documents = self._gather(limit, extra_urls, urls_file, text,
+                                     crawl_seeds, for_extract=False)
             current_ids = {d.doc_id for d in documents}
             all_ckpt = ckpt.load_all()
             extractions = [ex for ex in all_ckpt if ex.doc_id in current_ids]
@@ -471,6 +552,14 @@ class Pipeline:
               help="Fetch and analyze a web page / PDF URL (repeatable).")
 @click.option("--urls-file", default="",
               help="Path to a newline-delimited list of URLs to fetch.")
+@click.option("--crawl", "crawl_seeds", multiple=True,
+              help="Crawl a site from this seed URL and analyze its subpages "
+                   "(repeatable). Enables crawling; tune depth/pages/scope in the "
+                   "config's io.crawl block.")
+@click.option("--crawl-max-pages", "crawl_max_pages", type=int, default=None,
+              help="Override io.crawl.max_pages (page cap for --crawl).")
+@click.option("--crawl-max-depth", "crawl_max_depth", type=int, default=None,
+              help="Override io.crawl.max_depth (link hops for --crawl).")
 @click.option("--text", "direct_text", default="",
               help="Analyze a raw text string directly (e.g. pasted input).")
 @click.option("--min-entity-confidence", "min_entity_confidence", type=float, default=None,
@@ -482,7 +571,9 @@ class Pipeline:
               "e.g. to A/B models without overwriting each other.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose (DEBUG) logging.")
 def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
-        limit: int, urls: tuple[str, ...], urls_file: str, direct_text: str,
+        limit: int, urls: tuple[str, ...], urls_file: str,
+        crawl_seeds: tuple[str, ...], crawl_max_pages: Optional[int],
+        crawl_max_depth: Optional[int], direct_text: str,
         min_entity_confidence: Optional[float], ollama_model: str, metadata_file: str,
         run_name: str, verbose: bool) -> None:
     """Run the NER + SNA extraction pipeline."""
@@ -513,12 +604,19 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
     if run_name:
         config.run_name = run_name
         console.print(f"[cyan]Override: run_name = {run_name}[/cyan]")
+    if crawl_seeds:
+        config.io.crawl.enabled = True
+    if crawl_max_pages is not None:
+        config.io.crawl.max_pages = crawl_max_pages
+    if crawl_max_depth is not None:
+        config.io.crawl.max_depth = crawl_max_depth
 
     console.rule(f"[bold]NER + SNA Pipeline - run '{config.run_name}' (mode={config.mode})")
     pipeline = Pipeline(config)
     try:
         pipeline.run(stage=stage, resume=resume, limit=limit,
-                     extra_urls=urls, urls_file=urls_file, text=direct_text)
+                     extra_urls=urls, urls_file=urls_file, text=direct_text,
+                     crawl_seeds=crawl_seeds)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted. Progress is saved in the checkpoint; "
                       "re-run with --resume to continue.[/yellow]")

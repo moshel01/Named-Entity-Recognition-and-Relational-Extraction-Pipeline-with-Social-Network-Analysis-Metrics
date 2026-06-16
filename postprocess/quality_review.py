@@ -222,9 +222,11 @@ class QualityReviewer:
                 continue
             kept_edges.append(r)
 
+        dropped_names = [e.canonical_name for e in entities if e.entity_id not in kept_ids]
         logger.info(
-            "LLM review dropped %d entities, %d edges",
+            "LLM review dropped %d entities, %d edges%s",
             len(entities) - len(kept_entities), len(edges) - len(kept_edges),
+            (" - e.g. " + ", ".join(dropped_names[:12])) if dropped_names else "",
         )
         return kept_entities, kept_edges
 

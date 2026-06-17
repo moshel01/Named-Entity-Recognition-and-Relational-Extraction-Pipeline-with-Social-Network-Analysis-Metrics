@@ -60,8 +60,10 @@ python -m evaluation.evaluate --gold gold.json \
 ## What you get
 
 - **Entities** - P/R/F1 overall, a type-agnostic variant, and a per-type table.
-- **Relations** - typed (endpoints + relation type must match) and untyped
-  (endpoints only) P/R/F1. Endpoints are matched undirected and alias-resolved.
+- **Relations** - three views, P/R/F1: typed (endpoints + exact relation label),
+  family (endpoints + tie-class, so `located_in` matches a `born_in` gold but not a
+  `member_of` one), and untyped (endpoints only). Asymmetric relations are matched
+  directed; endpoints are alias-resolved.
 - Up to 50 false positives / false negatives per metric for error inspection
   (in the `--out` JSON report).
 
@@ -100,9 +102,10 @@ python -m evaluation.evaluate --gold output/abel_papers/metadata_gold.json \
     --exclude-edge-source metadata
 ```
 
-Read **`relations_untyped` recall** as the headline: the text labels these its own
-way (`located_in` for a birthplace, `joined` for `member_of`), so endpoints-only
-is the honest match. **Precision is not meaningful** - the prose asserts many true
+Read **`relations_family` recall** as the headline: the text labels these its own
+way (`located_in` for a birthplace, `joined` for `member_of`), so exact-label
+(`relations_typed`) understates it; family scoring credits the right tie-class
+while still requiring more than bare endpoints. **Precision is not meaningful** - the prose asserts many true
 ties the four spreadsheet fields never list, so every one of them scores as a
 false positive. `member_of` recall is the load-bearing number; it validates the
 membership extraction that feeds the affiliation network.

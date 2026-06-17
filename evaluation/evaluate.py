@@ -52,7 +52,7 @@ def _print_report(report: dict[str, Any], tier: str) -> None:
         console = Console()
         console.rule(f"[bold]Evaluation (edge tier: {tier})")
         for section in ("entities", "entities_type_agnostic",
-                        "relations_typed", "relations_untyped"):
+                        "relations_typed", "relations_family", "relations_untyped"):
             o = report[section]["overall"]
             t = Table(title=section, show_header=True, header_style="bold cyan")
             for col in ("precision", "recall", "f1", "tp", "fp", "fn"):
@@ -73,7 +73,7 @@ def _print_report(report: dict[str, Any], tier: str) -> None:
     except Exception:  # noqa: BLE001 - fall back to plain text
         print(f"=== Evaluation (edge tier: {tier}) ===")
         for section in ("entities", "entities_type_agnostic",
-                        "relations_typed", "relations_untyped"):
+                        "relations_typed", "relations_family", "relations_untyped"):
             o = report[section]["overall"]
             print(f"\n[{section}] P={o['precision']:.3f} R={o['recall']:.3f} "
                   f"F1={o['f1']:.3f} (tp={o['tp']} fp={o['fp']} fn={o['fn']})")

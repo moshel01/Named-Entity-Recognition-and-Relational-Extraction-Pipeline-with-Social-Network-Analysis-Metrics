@@ -234,13 +234,42 @@ class Pipeline:
             agg.entities, agg.relationships
         )
 
-        # 1a. Enforce configured entity types at analyze time too. This lets an
-        # already-extracted checkpoint benefit from restrict_to_label_types
-        # (dropping spaCy's off-target DATE/EVENT/etc.) without re-extraction.
-        # Relations to dropped entities are removed later by the dedup remap.
-        if self.config.foundation.restrict_to_label_types:
-            allowed = set(self.config.foundation.label_map.values())
-            allowed |= set(self.domain.gliner_label_map().values())
+        # 1a0. Network expansion: load the schema of an existing graph and lock this
+        # run to it - the relation vocabulary ("strict edge formatting") and the
+        # entity kinds. Grows a curated network from new documents without it
+        # drifting into new relation types or off-target entity types. No-op unless
+        # enabled. Runs in analyze too, so you can re-lock an existing checkpoint.
+        expand_types: Optional[set[str]] = None
+        expand_relations: Optional[set[str]] = None
+        if self.config.expansion.enabled:
+            from postprocess.expansion import load_network_schema
+            ex = self.config.expansion
+            schema = load_network_schema(ex.source)
+            if schema.empty:
+                console.print(f"[yellow]Expansion on but no schema loaded from "
+                              f"'{ex.source}' - locks are no-ops.[/yellow]")
+            else:
+                if ex.entity_types:
+                    expand_types = {t.upper() for t in ex.entity_types}
+                elif ex.lock_entity_types:
+                    expand_types = set(schema.entity_types)
+                if ex.lock_relations:
+                    expand_relations = set(schema.relation_types)
+                console.print(
+                    f"[cyan]Expansion: locking to {len(expand_relations or [])} "
+                    f"relation types, {len(expand_types or [])} entity kinds "
+                    f"from '{ex.source}'.[/cyan]")
+
+        # 1a. Enforce entity types at analyze time: the configured label set, or
+        # the expansion entity-kind lock when active. Lets an already-extracted
+        # checkpoint be narrowed without re-extraction (drops spaCy's off-target
+        # DATE/EVENT/...); relations to dropped entities go later in the dedup remap.
+        if expand_types is not None or self.config.foundation.restrict_to_label_types:
+            if expand_types is not None:
+                allowed = expand_types
+            else:
+                allowed = set(self.config.foundation.label_map.values())
+                allowed |= set(self.domain.gliner_label_map().values())
             before = len(agg.entities)
             agg.entities = [e for e in agg.entities if e.label in allowed]
             if before != len(agg.entities):
@@ -248,13 +277,21 @@ class Pipeline:
                               f"{before} entities (types {sorted(allowed)}).[/cyan]")
 
         # 1b. Ontology alignment: normalize relation-type vocabulary (domain or
-        # config supplied). No-op when no ontology is configured (generic path).
-        if self.config.ontology.enabled:
+        # config supplied). With expansion, restrict that vocabulary to the
+        # relation types already in the source network (keeping their synonyms so
+        # surface forms still map), and drop anything off-vocabulary if configured.
+        if self.config.ontology.enabled or expand_relations is not None:
             from postprocess.ontology import OntologyAligner, resolve_relation_ontology
-            onto = resolve_relation_ontology(self.config, self.domain)
+            if expand_relations is not None:
+                base = resolve_relation_ontology(self.config, self.domain)
+                onto = {rt: base.get(rt, []) for rt in expand_relations}
+                drop_unmapped = self.config.expansion.drop_unmapped_relations
+            else:
+                onto = resolve_relation_ontology(self.config, self.domain)
+                drop_unmapped = self.config.ontology.drop_unmapped
             if onto:
                 aligner = OntologyAligner(onto, self.config.ontology.fuzzy_threshold,
-                                          self.config.ontology.drop_unmapped)
+                                          drop_unmapped)
                 agg.relationships = aligner.apply(agg.relationships)
 
         # 2. Deduplicate (+ remap relationships onto entity ids).

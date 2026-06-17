@@ -163,6 +163,91 @@ in-process fastcoref, then the heuristic resolver. Setup:
   is an opt-in sample of committed early members, not a random draw — read the
   network as descriptive of this corpus, not inferential for the movement (the
   codebook note states this).
+- **Two-mode affiliation networks (Breiger 1974).** In affiliation-dense corpora
+  (political boards/PACs, multi-agency disaster response) actors connect THROUGH a
+  shared group, not directly. `postprocess/bipartite.project_affiliations` projects
+  the actor×group two-mode graph onto an actor×actor one — actors in the same
+  org/institution/event get a `co_affiliated` edge, Newman 1/(k-1) weighted, summed
+  over shared groups. Opt-in (`inference.enable_affiliation_projection`); full tier
+  (a co-presence, not a direct tie). Generalizes the document co-occurrence Newman
+  projection from shared-document to shared-affiliation. The actor/group kinds are
+  configurable (`affiliation_actor_kinds` / `affiliation_group_kinds`): the default
+  projects people through orgs/events; multi-agency disaster response (OREM/OPAL)
+  sets actors to ORG/INSTITUTION over an EVENT group, so two agencies that responded
+  to the same fire link directly - the inter-organizational network, not an
+  interpersonal one.
+- **Spatiotemporal / financial edge qualifiers (Yang et al. 2026 urban-flood records;
+  the InfluenceWatch dark-money use case).** A relation can carry domain-declared
+  optional qualifiers — `monetary_value`, `jurisdiction`, `location`, `time` — that
+  the LLM fills only when the text states them. Declared in `intelligence.edge_qualifiers`,
+  captured under the `qual_` namespace, carried through aggregation to the Gephi/GEXF
+  export as typed edge columns. Generalizes the flood paper's (place + time + value)
+  record and serves any spatiotemporal/financial grounding without a data-model change
+  (cf. the deferred hyper-relational LLHKG item — this is the light version).
+- **Causal links (Ronco et al. 2026 disaster storylines; Pividori-style narrative
+  causality).** A `causal` tie-class (`caused` / `caused_by` / `contributed_to` /
+  `prevented`) for driver→impact and cause→effect content, in the generic ontology.
+  Directed, substantive, but excluded from the interpersonal substantive set (it's
+  event-content, not a social tie) — surfaced and filterable, not folded into
+  brokerage/centrality. Serves disaster storylines, news narratives, political
+  consequences, and plot/event chains in scripts/books.
+- **Structure-aware extraction (SALE, electronics-15-01187 2026; Tran et al. 2025).**
+  A general LLM has no inductive bias for rigid argument-type constraints and emits
+  schema-violating edges (born_in pointing at a person, located_in into an org).
+  We already tag these after the fact (`type_violation`); the cheaper lever is to
+  give the model the constraint up front. `intelligence.type_hints` renders each
+  constrained relation's signature next to it in the prompt (born_in: person->place),
+  from the same `RELATION_TYPE_SIGNATURES` the post-hoc gate uses. Opt-in; A/B it
+  against `type_violations_by_relation` in graph_report.json. Loose stance/interaction
+  types stay unconstrained (no signature, no hint).
+- **Document-level zero-shot RE (Chanthran et al. 2026, DocZSRE w/ entity side info;
+  Zhao et al. 2025).** Confirms our measured bottleneck: doc-level relation recall,
+  worse in low-resource languages (the German path). We take the structure-prior half
+  (type hints above; the fixed relation ontology) rather than their synthetic-data-for-
+  unseen-labels route, which trades the hallucination risk we guard against.
+
+Also reviewed, not separately adopted (rationale on record):
+- **Entity linking (LELA 2026, 2605.26956).** Domain-agnostic zero-shot EL library.
+  Our wikidata linking + QID identity consolidation + identity_resolution already cover
+  this for the Wikidata KB; LELA is the swap-in if KB-agnostic linking is ever needed.
+- **Event extraction as code (Agent-Event-Coder, Guo et al. AAAI-26; SALE DEE).**
+  Multi-agent iterative event extraction. Grounds the event-hyperedge near-term item
+  below; the multi-agent verify loop is API-scale, deferred.
+- **Multilingual RE survey (public.pdf).** Frames the low-resource gap the German path
+  lives in; `scripts/metadata_gold.py` (gold without hand annotation) is the practical
+  answer it calls for.
+- **General text->KG / efficiency (KGGen 2502.09956; PLM-KG 2604.19137; in-context
+  triplets computers-15-00178; small-LM mining 2510.01427; Chain-of-Agents 19782).**
+  Overlap the extract->canonicalize->evaluate spine already in place; Chain-of-Agents'
+  long-context idea is noted against the chunk-local coref recall ceiling.
+- **Retrieval/QA (LightRAG 2410.05779; the GraphRAG/Neo4j/BenchmarkQED material).**
+  RAG systems consume the graph; we build it. Aspirational, not on the extraction path.
+- **Verified extraction (algorithms-19-00214 DNA probes; temporal-contamination eval
+  2601.13658).** Same correctable-formatting lesson as Serdiukov (already grounded in
+  json_repair); the eval-contamination point is benchmark-integrity, eval-side.
+
+## Near-term additions (runnable now, not yet built)
+On the track; recorded so the design is decided before the code. These are
+implementation work, not resource bets (those live in ASPIRATIONAL.md).
+
+- **Event-centric hyperedges (OREM disaster response; storyline papers).** An event
+  is a node and participants link with `participated_in`; a 4-ary fact ("Agency A
+  distributed Grant B to Community C during Event D") flattens to binary edges. Plan:
+  reify the event as a hyperedge node with role-typed spokes (agent / recipient /
+  instrument / time), and let NetworkX project it down to the binary actor graph on
+  demand. A data-model change (edges become reifiable); the binary set already holds
+  the pairwise ties, so this is a richer view, not a missing one.
+- **Lifecycle / spatiotemporal phase tags (TyphoonKGent entity→stage→state→attribute;
+  disaster warning→response→recovery).** A domain-declared phase scheme stamped per
+  edge/event so the graph slices by phase and an event's state evolution is trackable.
+  The narrative-sequence net is the cheap general version already shipped; this adds
+  an explicit per-domain phase axis. Needs a phase scheme + reliable temporal ordering.
+- **Dynamic schema routing (Ontology Factory; OMD-GraphRAG ontology-guided extraction).**
+  Domain is explicit today (`--config domain/X.yaml`), so no cross-contamination. A
+  lightweight per-document classifier could route a genuinely mixed corpus to the right
+  schema; deferred because the operator runs one domain per job and a misroute silently
+  applies the wrong schema. The ontology-guided-extraction half is already how the
+  pipeline constrains the LLM (relation ontology + guide + the expansion schema-lock).
 
 ## Possible future additions (deferred)
 Not on the current track; recorded so the rationale survives.

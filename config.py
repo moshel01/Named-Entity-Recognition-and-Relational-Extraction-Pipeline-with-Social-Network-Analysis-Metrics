@@ -159,6 +159,21 @@ class IntelligenceConfig(BaseModel):
     skip_sparse_chunks: bool = False
     sparse_window_words: int = 200
     sparse_min_entities: int = 2
+    # Optional per-edge qualifier fields the LLM is asked to fill when present in
+    # the text: a typed attribute on a relation, not a new relation. Generic - the
+    # domain/config declares the names, the model fills them, and they ride through
+    # to the Gephi/GEXF export as `qual_<name>` edge columns. Examples:
+    # `monetary_value` (InfluenceWatch PAC->shell funding), `jurisdiction` (OREM
+    # disaster coordination scope), `location`/`time` (any spatiotemporal record),
+    # `weapon`/`setting` (a narrative/script). Empty = no qualifiers (default).
+    edge_qualifiers: list[str] = Field(default_factory=list)
+    # Show the model each constrained relation's argument types in the prompt
+    # (born_in: person->place, employed_by: person->org, ...) so it forms fewer
+    # type-violating edges at the source instead of being tagged after the fact
+    # (postprocess.ontology.RELATION_TYPE_SIGNATURES). Only affects relations that
+    # have a signature; loose stance/interaction types are unconstrained. Off by
+    # default - flip on and A/B against type_violations_by_relation in the report.
+    type_hints: bool = False
 
 
 class DedupConfig(BaseModel):
@@ -234,6 +249,23 @@ class InferenceConfig(BaseModel):
     # the useful band on dense/web corpora; smaller = sparser backbone. Typed edges
     # are never touched.
     cooccurrence_backbone_alpha: float = 0.0
+    # Two-mode (affiliation) projection: people/agencies who share a formal group
+    # (an org, institution, or event they're both tied to) get a `co_affiliated`
+    # edge - the classic Breiger two-mode -> one-mode actor network. Newman 1/(k-1)
+    # weighting (a 50-member org doesn't forge ties as strong as a 2-person board).
+    # Off by default; a co-presence layer (full tier, not a direct asserted tie),
+    # like co-occurrence but over shared affiliations instead of shared documents.
+    # Built for affiliation-dense domains (boards/PACs, multi-agency disaster
+    # response) where direct person-person ties are rare.
+    enable_affiliation_projection: bool = False
+    affiliation_min_shared: int = 1   # min shared groups to draw a co_affiliated edge
+    # Which entity kinds are the actors vs the shared groups in the projection.
+    # Default: people share orgs/events. Disaster response makes agencies the
+    # actors sharing a response EVENT (actor_kinds: ["ORG","INSTITUTION"],
+    # group_kinds: ["EVENT"]) so co_affiliated links agencies, not just people.
+    affiliation_actor_kinds: list[str] = Field(default_factory=lambda: ["PERSON"])
+    affiliation_group_kinds: list[str] = Field(
+        default_factory=lambda: ["ORG", "INSTITUTION", "EVENT"])
     enable_canonical_inference: bool = False
     # How the corpus-level mandatory-membership assumption is applied by domains
     # that implement one (e.g. nazi_era NSDAP). "authors_only" is the defensible
@@ -262,6 +294,23 @@ class OntologyConfig(BaseModel):
     # Make confusable labels contrastive ("associate: companions, NOT friends").
     # Local models default to intuitive labels; definitions pin the coding scheme.
     relation_guide: Any = None         # dict[str, str] | None
+
+
+class ExpansionConfig(BaseModel):
+    """Grow an existing network instead of building one from scratch. Point at a
+    prior run dir (or its gephi_edges.csv / network.gexf) and the new documents
+    are constrained to the schema already there - the relation vocabulary
+    ("strict edge formatting") and the entity kinds - so the expansion stays
+    consistent with what you already have. Off by default. See
+    postprocess/expansion.py."""
+    enabled: bool = False
+    source: str = ""                  # prior run dir, its gephi_edges.csv, or a .gexf
+    lock_relations: bool = True       # only keep relation types present in the source
+    # Strict: a new edge whose type is not in the locked set is dropped, not kept
+    # as an off-vocabulary tag. Set false to tag (ontology=unmapped) and keep.
+    drop_unmapped_relations: bool = True
+    lock_entity_types: bool = True    # keep only the entity kinds present in the source
+    entity_types: list[str] = Field(default_factory=list)  # explicit override of kinds
 
 
 class LinkingConfig(BaseModel):
@@ -321,6 +370,7 @@ class Config(BaseModel):
     quality: QualityConfig = Field(default_factory=QualityConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     ontology: OntologyConfig = Field(default_factory=OntologyConfig)
+    expansion: ExpansionConfig = Field(default_factory=ExpansionConfig)
     linking: LinkingConfig = Field(default_factory=LinkingConfig)
     domain: DomainConfig = Field(default_factory=DomainConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from core.schema import Entity, Relationship
 
-from .canonical_inference import MembershipInferenceEngine
+from .canonical_inference import MembershipInferenceEngine, infer_biographical_edges
 from .org_hierarchy import PARENT_OF, classify_unit
 
 _engine = MembershipInferenceEngine()
@@ -70,8 +70,12 @@ def infer_edges(
     ``options`` may carry ``mandatory_membership`` ("authors_only" | "all" |
     "off"); defaults to the principled "authors_only".
     """
-    scope = (options or {}).get("mandatory_membership", "authors_only")
+    opts = options or {}
+    scope = opts.get("mandatory_membership", "authors_only")
     membership = _engine.infer(entities, edges, mandatory_scope=scope)
     seen = {(r.source, r.target) for r in edges} | {(r.source, r.target) for r in membership}
     structural = _structural_unit_edges(entities, seen)
-    return membership + structural
+    # Birth/residence preamble edges (needs the raw mentions for sentence context).
+    biographical = infer_biographical_edges(
+        entities, edges, opts.get("mentions") or [], opts.get("name_to_id") or {})
+    return membership + structural + biographical

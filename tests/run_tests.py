@@ -33,6 +33,12 @@ def test_json_repair() -> None:
         ("truncated", '{"a": [1, 2', {"a": [1, 2]}),
         ("dangling key", '{"a": 1, "b":', {"a": 1}),
         ("paren annotation", '{"e": "arrest" (implied), "k": 2}', {"e": "arrest", "k": 2}),
+        # Stray sentence punctuation the model leaks after a value's close quote,
+        # before the next key (`"...powerful;".` then a newline + "confidence").
+        ("stray dot after value", '{"e": "all-powerful;".\n  "k": 2}',
+         {"e": "all-powerful;", "k": 2}),
+        # A period that legitimately ENDS the string content must be left alone.
+        ("period inside string", '{"e": "He left.", "k": 2}', {"e": "He left.", "k": 2}),
         ("paren in string", '{"e": "real (aside) inside", "k": 3}',
          {"e": "real (aside) inside", "k": 3}),
         ("multi-string 2", '{"e": "s1", "s2", "k": 1}', {"e": "s1 ... s2", "k": 1}),
@@ -138,6 +144,29 @@ def test_dedup_folds() -> None:
     merged, _, _ = d.resolve(ents, [])
     check("article variants merge", len(merged) == 1,
           str([e.canonical_name for e in merged]))
+
+    # Cross-type folds (real InfluenceWatch / OREM artifacts). "the Berger Action
+    # Fund" (ORG) and "Berger Action Fund" (PERSON) are one entity; the "Fund"
+    # marker makes ORG the winner over the default person-preference.
+    ents = [ent("the Berger Action Fund", "ORG", 1), ent("Berger Action Fund", "PERSON", 1)]
+    out = d._resolve_cross_type(ents)
+    check("the-prefixed org folds with bare person", len(out) == 1,
+          str([(e.canonical_name, e.label) for e in out]))
+    check("org marker wins the cross-type tie", out and out[0].label == "ORG",
+          str([(e.canonical_name, e.label) for e in out]))
+
+    # Trailing acronym gloss: "X (OEM)" folds with "X"; higher mentions wins.
+    ents = [ent("Oregon Department of Emergency Management", "ORG", 3),
+            ent("Oregon Department of Emergency Management (OEM)", "INSTITUTION", 1)]
+    out = d._resolve_cross_type(ents)
+    check("parenthetical-acronym variant folds", len(out) == 1,
+          str([(e.canonical_name, e.label) for e in out]))
+
+    # A real person mistyped ORG (no org marker) still resolves to PERSON.
+    ents = [ent("Eric Kessler", "PERSON", 2), ent("Eric Kessler", "ORG", 1)]
+    out = d._resolve_cross_type(ents)
+    check("person without org marker stays person", out and out[0].label == "PERSON",
+          str([(e.canonical_name, e.label) for e in out]))
 
 
 def test_relation_guide() -> None:
@@ -735,6 +764,52 @@ def test_scorer_directed_relations() -> None:
     check("undirected: both match (tp=2)", u["overall"]["tp"] == 2, str(u["overall"]))
 
 
+def test_relation_family_scoring() -> None:
+    from evaluation.gold_schema import GoldDocument, GoldEntity, GoldRelation, GoldSet
+    from evaluation.scorer import score_relations
+    print("-- scorer relation-family (tie-class) matching")
+    gold = GoldSet([GoldDocument("d",
+        entities=[GoldEntity("Hans", "PERSON"), GoldEntity("Berlin", "LOCATION"),
+                  GoldEntity("NSDAP", "ORG")],
+        relations=[GoldRelation("Hans", "Berlin", "born_in"),      # biographical
+                   GoldRelation("Hans", "NSDAP", "member_of")])])  # affiliation
+    pred_entities = [{"canonical_name": "Hans", "label": "PERSON"},
+                     {"canonical_name": "Berlin", "label": "LOCATION"},
+                     {"canonical_name": "NSDAP", "label": "ORG"}]
+    # Text labels differ but the tie-class is the same: located_in~born_in
+    # (biographical), joined~member_of (affiliation).
+    pred_edges = [{"source_name": "Hans", "target_name": "Berlin", "rel_type": "located_in"},
+                  {"source_name": "Hans", "target_name": "NSDAP", "rel_type": "joined"}]
+    typed = score_relations(gold, pred_entities, pred_edges, type_sensitive=True)
+    check("typed: differing labels miss (tp=0)", typed["overall"]["tp"] == 0,
+          str(typed["overall"]))
+    fam = score_relations(gold, pred_entities, pred_edges, type_sensitive=True, family=True)
+    check("family: same tie-class credited (tp=2)", fam["overall"]["tp"] == 2,
+          str(fam["overall"]))
+    # Wrong family must not be credited: located_in (biographical) vs gold
+    # member_of (affiliation) on the same pair.
+    wrong = [{"source_name": "Hans", "target_name": "NSDAP", "rel_type": "located_in"}]
+    fam2 = score_relations(gold, pred_entities, wrong, type_sensitive=True, family=True)
+    check("family: wrong tie-class not credited (tp=0)", fam2["overall"]["tp"] == 0,
+          str(fam2["overall"]))
+
+    # Unmodeled vocab (e.g. a benchmark's Wikidata types) all fall into the "other"
+    # catch-all. Family must NOT let two different unknown types collide - it falls
+    # back to the exact label there, degrading to typed, never above it.
+    g2 = GoldSet([GoldDocument("d",
+        entities=[GoldEntity("A", "PERSON"), GoldEntity("B", "ORG")],
+        relations=[GoldRelation("A", "B", "country")])])  # unmodeled type
+    pe2 = [{"canonical_name": "A", "label": "PERSON"}, {"canonical_name": "B", "label": "ORG"}]
+    diff = [{"source_name": "A", "target_name": "B", "rel_type": "has_part"}]  # also unmodeled
+    f3 = score_relations(g2, pe2, diff, type_sensitive=True, family=True)
+    check("family: unmodeled types don't collide (tp=0)", f3["overall"]["tp"] == 0,
+          str(f3["overall"]))
+    same = [{"source_name": "A", "target_name": "B", "rel_type": "country"}]
+    f4 = score_relations(g2, pe2, same, type_sensitive=True, family=True)
+    check("family: unmodeled exact label still matches (tp=1)", f4["overall"]["tp"] == 1,
+          str(f4["overall"]))
+
+
 def test_scorer_entity_one_to_one() -> None:
     from evaluation.gold_schema import GoldDocument, GoldEntity, GoldSet
     from evaluation.scorer import score_entities
@@ -770,6 +845,96 @@ def test_newman_cooccurrence() -> None:
     spq = by_pair.get(frozenset(("P", "Q")))
     check("small-doc pair strength 1.0", sxy == 1.0, str(sxy))
     check("big-doc pair down-weighted", spq is not None and spq < 0.2, str(spq))
+
+
+def test_affiliation_projection() -> None:
+    from core.schema import Entity, Relationship
+    from postprocess.bipartite import project_affiliations
+    print("-- two-mode affiliation projection")
+    ents = [Entity("a", "Alice", "PERSON"), Entity("b", "Bob", "PERSON"),
+            Entity("c", "Carol", "PERSON"), Entity("pac", "PAC X", "ORG"),
+            Entity("ev", "Almeda Fire", "EVENT")]
+    # Alice & Bob share PAC X (board); Bob & Carol share the response event.
+    edges = [Relationship("a", "pac", "member_of", "d"),
+             Relationship("b", "pac", "member_of", "d"),
+             Relationship("b", "ev", "participated_in", "d"),
+             Relationship("c", "ev", "participated_in", "d")]
+    proj = project_affiliations(ents, edges, min_shared=1)
+    pairs = {frozenset((r.source, r.target)): r for r in proj}
+    check("Alice-Bob linked via shared org", frozenset(("a", "b")) in pairs, str(list(pairs)))
+    check("Bob-Carol linked via shared event", frozenset(("b", "c")) in pairs, "")
+    check("Alice-Carol not linked (no shared group)", frozenset(("a", "c")) not in pairs, "")
+    check("tagged affiliation_projected (full tier)",
+          all(r.attributes["edge_source"] == "affiliation_projected" for r in proj), "")
+    check("rel_type co_affiliated", all(r.rel_type == "co_affiliated" for r in proj), "")
+    ab = pairs[frozenset(("a", "b"))]
+    check("Newman strength 1.0 for a 2-person group",
+          ab.attributes["affiliation_strength"] == 1.0, str(ab.attributes))
+    # Cross-tier check: co_affiliated must NOT pass the conservative filter.
+    from postprocess.evidence_tiers import tier_allows
+    check("co_affiliated excluded from conservative tier",
+          not tier_allows("affiliation_projected", "conservative"), "")
+    proj2 = project_affiliations(ents, edges, min_shared=2)
+    check("min_shared=2 drops single-group pairs", proj2 == [], str(proj2))
+
+
+def test_org_actor_projection() -> None:
+    # OREM/OPAL: agencies (orgs) are the actors, sharing a disaster EVENT.
+    from core.schema import Entity, Relationship
+    from postprocess.bipartite import project_affiliations
+    print("-- org-as-actor projection (disaster response)")
+    ents = [Entity("od", "ODHS", "INSTITUTION"), Entity("rc", "Red Cross", "ORG"),
+            Entity("ngo", "Local NGO", "ORG"), Entity("fire", "Almeda Fire", "EVENT"),
+            Entity("mgr", "A. Manager", "PERSON")]
+    edges = [Relationship("od", "fire", "responded_to", "d"),
+             Relationship("rc", "fire", "responded_to", "d"),
+             Relationship("ngo", "fire", "responded_to", "d"),
+             Relationship("mgr", "od", "employed_by", "d")]
+    # Default (PERSON actors) finds nothing - the responders are orgs.
+    default = project_affiliations(ents, edges, min_shared=1)
+    check("default person-actor projection finds no agency tie", default == [], str(default))
+    # Org-as-actor: the three responders link pairwise through the shared event.
+    proj = project_affiliations(ents, edges, min_shared=1,
+                                actor_labels=frozenset({"ORG", "INSTITUTION"}),
+                                group_labels=frozenset({"EVENT"}))
+    pairs = {frozenset((r.source, r.target)) for r in proj}
+    check("ODHS-RedCross linked via shared event", frozenset(("od", "rc")) in pairs, str(pairs))
+    check("three responders -> three pairs", len(proj) == 3, str(len(proj)))
+    check("co_affiliated edge_source", all(
+        r.attributes["edge_source"] == "affiliation_projected" for r in proj), "")
+
+
+def test_new_domain_packages() -> None:
+    from domain.base_domain import load_domain
+    print("-- influencewatch / orem_opal domain packages")
+    for name, must_have in (
+        ("influencewatch", ("funded", "donated_to", "board_member_of", "lobbied")),
+        ("orem_opal", ("coordinated_with", "responded_to", "operates_in", "granted")),
+    ):
+        dom = load_domain(name)
+        onto = dom.relation_ontology()
+        guide = dom.relation_guide()
+        labels = dom.gliner_labels() or []
+        lmap = dom.gliner_label_map()
+        check(f"{name} loaded (not generic fallback)", dom.name == name, dom.name)
+        check(f"{name} has gliner labels", len(labels) > 5, str(len(labels)))
+        check(f"{name} every label maps to a type", all(l in lmap for l in labels),
+              str([l for l in labels if l not in lmap]))
+        for rt in must_have:
+            check(f"{name} ontology has {rt}", rt in onto, str(list(onto)[:6]))
+        check(f"{name} guide covers its ontology",
+              all(k in onto for k in guide), str([k for k in guide if k not in onto]))
+
+    # The domain relations classify into the intended tie classes (global map).
+    from postprocess import tie_classes as tc
+    check("lobbied is stance (not affiliation)", tc.classify("lobbied", "PERSON", "ORG") == "stance", "")
+    check("responded_to org->event is participation",
+          tc.classify("responded_to", "ORG", "EVENT") == "participation", "")
+    check("board_member_of person->org is affiliation",
+          tc.classify("board_member_of", "PERSON", "ORG") == "affiliation", "")
+    check("coordinated_with is symmetric", tc.is_symmetric("coordinated_with"), "")
+    check("donated_to is a physical (material) connection",
+          tc.connection_type("donated_to") == "physical", "")
 
 
 def test_disparity_backbone() -> None:
@@ -829,6 +994,22 @@ def test_polarity_conflicts() -> None:
     check("conflict pair names mapped", {s["source"], s["target"]} == {"Alpha", "Beta"}, str(s))
     check("conflict lists both signs",
           s["positive"] == ["allied_with"] and s["negative"] == ["fought_against"], str(s))
+
+
+def test_causal_tie_class() -> None:
+    from postprocess import tie_classes
+    from postprocess.ontology import OntologyAligner, GENERIC_RELATION_ONTOLOGY
+    print("-- causal tie class + vocabulary")
+    check("caused -> causal", tie_classes.classify("caused") == "causal", "")
+    check("caused_by -> causal", tie_classes.classify("caused_by") == "causal", "")
+    check("contributed_to -> causal", tie_classes.classify("contributed_to") == "causal", "")
+    check("causal is directed", not tie_classes.is_symmetric("caused"), "")
+    check("causal not in interpersonal substantive set",
+          "causal" not in (tie_classes.SOCIAL | tie_classes.STRUCTURAL), "")
+    al = OntologyAligner(GENERIC_RELATION_ONTOLOGY, 0.82)
+    check("'led to' aligns to caused", al.align("led to") == "caused", str(al.align("led to")))
+    check("'resulted from' aligns to caused_by",
+          al.align("resulted from") == "caused_by", str(al.align("resulted from")))
 
 
 def test_generic_ontology() -> None:
@@ -934,6 +1115,118 @@ def test_relation_type_signatures() -> None:
     out2, n2 = check_relation_types([R("p1", "l1", "led")], type_of, drop=True)
     check("violation dropped when drop=True", len(out2) == 0 and n2 == 1, str(len(out2)))
 
+    # located_in is permissive on the source (place-in-place containment and
+    # person/org-in-place are all valid - the domain treats person->place as
+    # biographical). The target must be a place: located_in pointing at a
+    # person/org is the misextraction.
+    lt = {"l1": "LOCATION", "l2": "LOCATION", "p1": "PERSON", "o1": "ORG"}
+    pip = R("l1", "l2", "located_in")    # place in place: valid containment
+    ppl = R("p1", "l1", "located_in")    # person in place: valid (biographical)
+    bad = R("p1", "o1", "located_in")    # located_in into an org: violation
+    _, nlo = check_relation_types([pip, ppl, bad], lt, drop=False)
+    check("place-in-place not flagged", "type_violation" not in pip.attributes, "")
+    check("person-in-place not flagged", "type_violation" not in ppl.attributes, "")
+    check("located_in into org flagged", bad.attributes.get("type_violation") is True, "")
+    check("located_in: one of three flagged", nlo == 1, str(nlo))
+
+    # promoted_to targets a RANK, not an org/place.
+    rt = {"p1": "PERSON", "r1": "RANK", "o1": "ORG"}
+
+    def Rp(s, t):
+        return Relationship(source=s, target=t, rel_type="promoted_to",
+                            doc_id="d", evidence="e")
+    okp, badp = Rp("p1", "r1"), Rp("p1", "o1")
+    _, np = check_relation_types([okp, badp], rt, drop=False)
+    check("promoted_to->rank ok", "type_violation" not in okp.attributes, "")
+    check("promoted_to->org flagged", badp.attributes.get("type_violation") is True, "")
+    check("promoted_to: one flagged", np == 1, str(np))
+
+
+def test_type_hint_prompt() -> None:
+    from intelligence.prompts import build_extraction_prompt
+    from postprocess.ontology import relation_signature_hints
+    print("-- structure-aware type hints in prompt")
+
+    hints = relation_signature_hints(["born_in", "employed_by", "promoted_to",
+                                      "located_in", "supported"])
+    check("born_in signature rendered", hints.get("born_in") == "person->place", str(hints))
+    check("employed_by signature rendered", hints.get("employed_by") == "person->org", "")
+    check("promoted_to signature rendered", hints.get("promoted_to") == "person->rank", "")
+    check("located_in permissive source", hints.get("located_in") == "person/org/place->place", "")
+    check("loose relation has no signature", "supported" not in hints, str(hints))
+
+    labels = ["born_in", "supported"]
+    # On: the hint rides next to the type even with no guide text.
+    p = build_extraction_prompt("x", [], ["PERSON"], relation_types=labels,
+                                type_signatures=hints)
+    check("hint shown in prompt", "born_in (person->place)" in p, "")
+    check("unconstrained type listed plain", "- supported" in p and "supported (" not in p, "")
+    # Off: bare comma list, no parenthetical signatures (default behavior).
+    off = build_extraction_prompt("x", [], ["PERSON"], relation_types=labels)
+    check("no hints when disabled", "(person->place)" not in off, "")
+
+
+def test_biographical_inference() -> None:
+    from core.schema import Entity, EntityMention, Relationship
+    from domain.nazi_era.canonical_inference import infer_biographical_edges
+    print("-- nazi_era birth/residence inference")
+    author = Entity(entity_id="a1", canonical_name="Hans Müller", label="PERSON",
+                    doc_ids=["d1"], attributes={"is_author": True, "author_doc": "d1"})
+    berlin = Entity(entity_id="p1", canonical_name="Berlin", label="LOCATION", doc_ids=["d1"])
+    hamburg = Entity(entity_id="p2", canonical_name="Hamburg", label="LOCATION", doc_ids=["d1"])
+    ents = [author, berlin, hamburg]
+    name_to_id = {"berlin": "p1", "hamburg": "p2"}
+
+    def M(text, sent):
+        return EntityMention(text=text, label="LOCATION", start_char=0, end_char=0,
+                             chunk_id="c", doc_id="d1", sentence=sent)
+
+    edges = infer_biographical_edges(ents, [], [
+        M("Berlin", "Geboren bin ich am 5.5.1898 in Berlin."),  # narrator birth
+        M("Hamburg", "Mein Vater wurde in Hamburg geboren."),   # relative -> skip
+    ], name_to_id)
+    by = {(r.source, r.target): r.rel_type for r in edges}
+    check("birth cue -> narrator born_in place", by.get(("a1", "p1")) == "born_in", str(by))
+    check("relative's birthplace skipped", ("a1", "p2") not in by, str(by))
+    check("edge is conservative-tier rule_extracted",
+          all(r.attributes.get("edge_source") == "rule_extracted" for r in edges), "")
+    res = infer_biographical_edges(ents, [], [
+        M("Berlin", "Ich wohnte bis 1930 in Berlin.")], name_to_id)
+    check("residence cue -> resided_in", bool(res) and res[0].rel_type == "resided_in", str(res))
+    dup = infer_biographical_edges(
+        ents, [Relationship(source="a1", target="p1", rel_type="born_in", doc_id="d1")],
+        [M("Berlin", "Geboren in Berlin.")], name_to_id)
+    check("existing biographical edge not duplicated", dup == [], str(dup))
+
+
+def test_expansion_schema_load() -> None:
+    import json as _json
+    import csv as _csv
+    import tempfile
+    from pathlib import Path
+    from postprocess.expansion import load_network_schema
+    print("-- network expansion schema load")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "entities.json").write_text(_json.dumps([
+            {"entity_id": "e1", "canonical_name": "Valjean", "label": "PERSON"},
+            {"entity_id": "e2", "canonical_name": "Paris", "label": "LOCATION"},
+        ]), encoding="utf-8")
+        with (d / "gephi_edges.csv").open("w", encoding="utf-8", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=["Source", "Target", "rel_type"])
+            w.writeheader()
+            w.writerow({"Source": "e1", "Target": "e2", "rel_type": "lived_in"})
+            # co_occurs_with is structural, must not become a locked relation type
+            w.writerow({"Source": "e1", "Target": "e2", "rel_type": "co_occurs_with"})
+        sch = load_network_schema(str(d))
+        check("relation types loaded", sch.relation_types == {"lived_in"}, str(sch.relation_types))
+        check("co_occurs_with excluded", "co_occurs_with" not in sch.relation_types, "")
+        check("entity kinds loaded", sch.entity_types == {"PERSON", "LOCATION"},
+              str(sch.entity_types))
+        check("names mapped to type", sch.entity_names.get("Valjean") == "PERSON", "")
+    empty = load_network_schema("does/not/exist")
+    check("missing source -> empty (locks no-op)", empty.empty, "")
+
 
 def test_quality_pillars() -> None:
     from types import SimpleNamespace
@@ -942,7 +1235,8 @@ def test_quality_pillars() -> None:
     edges = [
         {"edge_source": "llm_extracted"},                 # asserted
         {"edge_source": "metadata"},                       # asserted
-        {"edge_source": "rule_cooccurrence", "type_violation": True},  # weak + bad
+        {"edge_source": "rule_cooccurrence", "rel_type": "led",
+         "type_violation": True},                          # weak + bad
         {"edge_source": ""},                               # no provenance
     ]
     tables = SimpleNamespace(edges=edges)
@@ -955,6 +1249,9 @@ def test_quality_pillars() -> None:
           str(qp["provenance"]))
     check("type violations counted", qp["consistency"]["type_violations"] == 1,
           str(qp["consistency"]))
+    check("type violations broken out by relation",
+          qp["consistency"]["type_violations_by_relation"] == {"led": 1},
+          str(qp["consistency"].get("type_violations_by_relation")))
     check("polarity conflicts surfaced", qp["consistency"]["polarity_conflicts"] == 1, "")
     check("completeness carries cc%", qp["completeness_proxy"]["largest_cc_pct"] == 80.0, "")
 
@@ -1041,6 +1338,117 @@ def test_narrative_transitions() -> None:
     check("self-transitions collapsed", ("war_combat", "war_combat") not in trans)
 
 
+def test_faithfulness_tags_exported() -> None:
+    # Regression: the type gate (ontology) and the anchor check (intelligence)
+    # set r.attributes["type_violation"] / ["evidence_ungrounded"], but the edge
+    # table only copies an allowlist of attributes. Both tags were set upstream
+    # yet never reached the table, so quality_pillars always read 0 and Gephi
+    # had no column to filter on. Lock the propagation here.
+    from core.schema import Entity, Relationship
+    from postprocess.gephi_builder import GephiBuilder
+
+    print("-- faithfulness tags reach the edge table")
+    ents = [Entity(entity_id="p1", canonical_name="Hans", label="PERSON"),
+            Entity(entity_id="l1", canonical_name="Berlin", label="LOCATION")]
+
+    def R(rt, **attrs):
+        return Relationship(source="p1", target="l1", rel_type=rt, doc_id="d",
+                            evidence="e", attributes=dict(attrs))
+
+    rels = [R("led", type_violation=True),
+            R("born_in", evidence_ungrounded="true"),
+            R("met_with")]  # clean
+    tables = GephiBuilder().build(ents, rels, [])
+    by_rt = {e["rel_type"]: e for e in tables.edges}
+    check("type_violation exported", by_rt["led"].get("type_violation") is True,
+          str(by_rt["led"].get("type_violation")))
+    check("evidence_ungrounded exported",
+          by_rt["born_in"].get("evidence_ungrounded") is True,
+          str(by_rt["born_in"].get("evidence_ungrounded")))
+    check("clean edge flags default False",
+          by_rt["met_with"].get("type_violation") is False
+          and by_rt["met_with"].get("evidence_ungrounded") is False, "")
+    check("both columns present on every edge",
+          all("type_violation" in e and "evidence_ungrounded" in e
+              for e in tables.edges), "")
+
+    # Same allowlist class: the two-mode projection weight (affiliation_strength /
+    # shared_groups) on a co_affiliated edge must reach the table, not be dropped.
+    ents2 = [Entity(entity_id="a", canonical_name="Alice", label="PERSON"),
+             Entity(entity_id="b", canonical_name="Bob", label="PERSON")]
+    co = Relationship(source="a", target="b", rel_type="co_affiliated", doc_id="",
+                      directed=False, evidence="share 2",
+                      attributes={"edge_source": "affiliation_projected",
+                                  "affiliation_strength": 1.5, "shared_groups": 2})
+    t2 = GephiBuilder().build(ents2, [co], [])
+    ce = t2.edges[0]
+    check("affiliation_strength exported", ce.get("affiliation_strength") == 1.5,
+          str(ce.get("affiliation_strength")))
+    check("shared_groups exported", ce.get("shared_groups") == 2, str(ce.get("shared_groups")))
+
+    # GEXF round-trip: Gephi reads flags from the GEXF, not just the CSV. The
+    # three edges share one pair, so the writer merges them - the merged edge must
+    # OR the flags (tainted by led's type_violation and born_in's ungrounded).
+    try:
+        import networkx as nx
+        import tempfile
+        from pathlib import Path
+        from postprocess.exporter import Exporter
+    except Exception:  # noqa: BLE001
+        print("   (gexf flag round-trip skipped: no networkx)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.gexf"
+        Exporter._write_gexf(tables, p)
+        G = nx.read_gexf(p)
+        ed = G["p1"]["l1"]
+        check("gexf edge carries type_violation",
+              str(ed.get("type_violation")).lower() == "true", str(ed.get("type_violation")))
+        check("gexf edge carries evidence_ungrounded",
+              str(ed.get("evidence_ungrounded")).lower() == "true",
+              str(ed.get("evidence_ungrounded")))
+
+
+def test_edge_qualifiers() -> None:
+    from intelligence.api_backend import _map_extraction
+    from core.schema import Entity, Relationship
+    from postprocess.gephi_builder import GephiBuilder
+    print("-- per-edge qualifiers (qual_ namespace)")
+    data = {"entities": [], "relationships": [
+        {"source": "PAC X", "target": "Shell Co", "type": "funded",
+         "monetary_value": "$50,000", "jurisdiction": "Oregon", "noise": "drop me"}]}
+    _, rels, _ = _map_extraction(data, [], "c", "d", ["PERSON", "ORG"],
+                                 qualifiers=["monetary_value", "jurisdiction"])
+    attrs = rels[0].attributes
+    check("declared qualifier captured", attrs.get("qual_monetary_value") == "$50,000", str(attrs))
+    check("second qualifier captured", attrs.get("qual_jurisdiction") == "Oregon", "")
+    check("undeclared key not captured", "qual_noise" not in attrs, str(attrs))
+    # No qualifiers configured -> nothing captured (no behavior change).
+    _, rels2, _ = _map_extraction(data, [], "c", "d", ["PERSON", "ORG"], qualifiers=None)
+    check("no qualifiers -> none captured",
+          not any(k.startswith("qual_") for k in rels2[0].attributes), "")
+    # Passthrough to the edge table.
+    ents = [Entity("p1", "PAC X", "ORG"), Entity("s1", "Shell Co", "ORG")]
+    rel = Relationship(source="p1", target="s1", rel_type="funded", doc_id="d",
+                       attributes={"edge_source": "llm_extracted",
+                                   "qual_monetary_value": "$50,000"})
+    e = GephiBuilder().build(ents, [rel], []).edges[0]
+    check("qualifier reaches edge table column", e.get("qual_monetary_value") == "$50,000", str(e))
+
+    # Regression: the model only fills a qualifier if it sees the slot in the JSON
+    # schema example (it copies the example literally). A real ollama run left
+    # $1,415,274 in the evidence with no monetary_value key because the schema
+    # example lacked the slot. The qualifier keys must be IN the schema block.
+    from intelligence.prompts import build_extraction_prompt
+    p = build_extraction_prompt("x", [], ["PERSON", "ORG"], relation_types=["funded"],
+                                edge_qualifiers=["monetary_value", "jurisdiction"])
+    i = p.find('"relationships"')
+    sch = p[i:i + 320]
+    check("qualifier slot in schema example", '"monetary_value"' in sch and '"jurisdiction"' in sch, sch)
+    bare = build_extraction_prompt("x", [], ["PERSON", "ORG"], relation_types=["funded"])
+    check("no qualifier slot when none declared", '"monetary_value"' not in bare, "")
+
+
 def test_gexf_parallel_edges() -> None:
     import tempfile
     from pathlib import Path
@@ -1088,18 +1496,28 @@ def main() -> int:
     test_gexf_parallel_edges()
     test_crawler_dir_prefix()
     test_scorer_directed_relations()
+    test_relation_family_scoring()
     test_scorer_entity_one_to_one()
     test_newman_cooccurrence()
+    test_affiliation_projection()
+    test_org_actor_projection()
+    test_new_domain_packages()
     test_disparity_backbone()
     test_signed_balance()
     test_polarity_conflicts()
+    test_causal_tie_class()
     test_generic_ontology()
     test_org_name_cleanup()
     test_sparse_chunk_gate()
     test_edge_consolidation()
     test_relation_type_signatures()
+    test_type_hint_prompt()
+    test_biographical_inference()
+    test_expansion_schema_load()
     test_quality_pillars()
     test_evidence_grounding()
+    test_faithfulness_tags_exported()
+    test_edge_qualifiers()
     test_qid_consolidation()
     test_reference_stripping()
     test_narrative_transitions()

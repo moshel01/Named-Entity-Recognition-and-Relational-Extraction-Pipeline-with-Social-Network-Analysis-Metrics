@@ -478,6 +478,7 @@ A mention is not a social tie. Every edge carries a `tie_class`:
 | `participation` | person→event (fought_in, participated_in) | two-mode event network |
 | `biographical` | person→place/rank (born_in, resided_in) | attributes, geography |
 | `stance` | attitude (supported, opposed, influenced_by) | discourse / ideology, **not** a social tie |
+| `causal` | one thing brings about another (caused, caused_by, contributed_to, prevented) | driver→impact / cause→effect; substantive content, **not** interpersonal |
 | `cooccurrence` | names co-present only | weakest layer, **not** a tie |
 
 **Compute interpersonal centrality on `graph_interaction.gexf`** (run Gephi's
@@ -525,11 +526,94 @@ tag-only by design. In Gephi, filter these columns out for a high-precision view
 keep them in to audit what the model claimed. The narrator/author endpoint is
 exempt from `evidence_ungrounded` (first-person evidence legitimately says "I").
 
+All four flags (these three plus `suspect_membership`) ship as boolean columns in
+`gephi_edges.csv` and as edge attributes in the GEXF, so you can filter on them in
+either import path. `type_violation` is also counted in
+`graph_report.json` → `quality_pillars.consistency` (`type_violations`,
+`clean_pct`) — a fast way to gauge extraction precision without opening Gephi.
+
 The single source of truth for relation signatures is
 `postprocess/ontology.py` (`RELATION_TYPE_SIGNATURES`); loose relations
 (`supported`, `met_with`) have no signature and are never type-flagged. If a guard
 fires on edges you know are good, that relation's signature is too tight — loosen
-it there.
+it there. `graph_report.json` → `quality_pillars.consistency.type_violations_by_relation`
+shows which relations violate most — one relation dominating usually means its
+signature is too tight, not that the model is hallucinating.
+
+To cut violations at the source instead of just tagging them, set
+`intelligence.type_hints: true`. It shows the model each constrained relation's
+argument types in the extraction prompt (`born_in (person->place)`), rendered from
+the same `RELATION_TYPE_SIGNATURES`. Off by default; A/B it against
+`type_violations_by_relation` to confirm it helps your model before leaving it on.
+
+---
+
+## 10c. Expanding an existing network (instead of starting fresh)
+
+When you already have a curated network and want to grow it from new documents
+*without it drifting* — no new relation types, no off-target entity kinds — turn on
+expansion. It reads the schema of the existing network and locks this run to it.
+
+```yaml
+expansion:
+  enabled: true
+  source: "./output/abel_papers"   # a prior run dir, its gephi_edges.csv, or a network.gexf
+  lock_relations: true             # only keep relation types already in the source
+  drop_unmapped_relations: true    # strict: drop a new edge whose type isn't in that set
+  lock_entity_types: true          # keep only the entity kinds already in the source
+  entity_types: []                 # or pin explicitly, e.g. ["PERSON","ORG"]
+```
+
+What it does:
+- **Strict edge vocabulary.** New documents can only produce relation types the
+  existing network already uses. Synonyms still resolve (`"worked for"` →
+  `employed_by` if that's in the set), so you keep recall on surface variants but
+  never introduce a new edge type. Anything off-vocabulary is dropped (or tagged
+  `ontology=unmapped` if you set `drop_unmapped_relations: false`).
+- **Only certain kinds of entities.** Keeps only the entity types present in the
+  source network (or exactly the `entity_types` you pin). Off-target kinds are
+  dropped before dedup.
+
+`source` can be a run directory (reads `entities.json` + `gephi_edges.csv`), a bare
+edge CSV, or a `.gexf`. A missing/empty source makes the locks no-ops (the run
+proceeds normally, with a warning). Works in `--stage analyze` too, so you can
+re-lock an existing checkpoint without re-extracting. The network's own
+`co_occurs_with` layer is never treated as a lockable relation type.
+
+> Note: this constrains the *output* network. The LLM/NER still look broadly during
+> extraction; the locks apply in post-processing. The resulting graph conforms to
+> the existing schema either way.
+
+---
+
+## 10d. Affiliation projection & edge qualifiers
+
+Two opt-in features for affiliation-dense and quantitative corpora.
+
+**Two-mode (affiliation) projection.** When direct person-person ties are rare and
+actors connect through shared groups — political boards/PACs, agencies sharing a
+disaster-response event — turn on the projection: actors tied to the same
+org/institution/event get a `co_affiliated` edge (Newman 1/(k-1) weighted by group
+size, summed over shared groups). It's a co-presence, not a direct tie (full tier).
+
+```yaml
+inference:
+  enable_affiliation_projection: true
+  affiliation_min_shared: 1     # raise to 2 on a corpus with a universal group
+                                # (e.g. every NSDAP author shares NSDAP) to drop the near-clique
+```
+Filter `gephi_edges.csv` to `rel_type = co_affiliated` (or `edge_source = affiliation_projected`), sort by `affiliation_strength`.
+
+**Edge qualifiers.** To capture a typed value *on* a relation — a funding amount, a
+jurisdiction, a spatiotemporal value — declare the field names; the LLM fills them
+only when the text states them, and they ride through as `qual_<name>` edge columns.
+
+```yaml
+intelligence:
+  edge_qualifiers: ["monetary_value", "jurisdiction"]   # InfluenceWatch / OREM
+  # ["location", "time"] for spatiotemporal records; ["weapon", "setting"] for a script
+```
+Empty by default (no behavior change). The model is told to omit a field it can't find — it won't guess.
 
 ---
 

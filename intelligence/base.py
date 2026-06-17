@@ -158,6 +158,15 @@ class IntelligenceBackend(ABC):
         self.relation_types: list[str] = sorted(onto.keys())
         # Optional per-label definitions rendered next to the allowed types.
         self.relation_guide: dict[str, str] = resolve_relation_guide(config, domain)
+        # Optional per-edge qualifier fields the model fills when present in text.
+        self.edge_qualifiers: list[str] = list(config.intelligence.edge_qualifiers or [])
+        # Argument-type hints in the prompt (structure-aware extraction). Rendered
+        # once - only the relation types in this ontology that have a signature.
+        if config.intelligence.type_hints:
+            from postprocess.ontology import relation_signature_hints
+            self.type_signatures = relation_signature_hints(self.relation_types)
+        else:
+            self.type_signatures: dict[str, str] = {}
         # (month_words, season_words, pivot_max) for normalizing LLM timeline dates.
         v = domain.temporal_vocab() if domain is not None else {}
         self._date_vocab = (v.get("months", {}), v.get("seasons", {}), v.get("pivot_max"))

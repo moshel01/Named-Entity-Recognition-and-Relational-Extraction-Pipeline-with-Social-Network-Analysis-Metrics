@@ -1,0 +1,128 @@
+# Pipeline config for the InfluenceWatch domain: modern US political-influence
+# networks (dark money, PAC/shell funding, boards, lobbying).
+#
+#   python main.py --config domain/influencewatch/config_influencewatch.yaml --mode ollama
+#
+# Source is scraped profiles + news, not first-person, so narrator resolution is
+# off. The money-flow and board-affiliation layers are the point: affiliation
+# projection is ON, and monetary_value rides as an edge qualifier.
+
+run_name: "influencewatch"
+mode: "python_only"        # set ollama/api for relation extraction
+
+io:
+  input_path: "./data/influencewatch"   # dir of text/markdown, or use urls/crawl
+  input_glob: "**/*"
+  output_dir: "./output"
+  encoding: "auto"
+  # Whole-site crawl of a profile DB (off by default; fill seeds + flip enabled).
+  crawl:
+    enabled: false
+    seeds: []
+    max_pages: 200
+    stay_on_host: true
+    respect_robots: true
+    delay: 1.0
+
+chunking:
+  max_chars: 6000
+  overlap_chars: 400
+  respect_sentences: true
+
+foundation:
+  spacy_model: "en_core_web_trf"   # falls back to sm/blank if not installed
+  gliner_model: "fastino/gliner2-multi-v1"
+  gliner_threshold: 0.45
+  # gliner_labels/label_map below are OVERRIDDEN by the domain (21 labels in
+  # domain/influencewatch/gliner_labels.py). Kept for documentation.
+  gliner_labels: ["person", "organization", "location"]
+  label_map:
+    person: "PERSON"
+    organization: "ORG"
+    location: "LOCATION"
+  use_spacy_ner: true
+  device: "auto"
+
+coreference:
+  enabled: true
+  narrator_resolution: false       # not first-person
+  pronoun_resolution: false        # flip on (needs fastcoref) for he/she/they in articles
+  languages: ["en"]
+
+intelligence:
+  ollama:
+    host: "http://localhost:11434"
+    model: "qwen3.5:9b"
+    temperature: 0.0
+    request_timeout: 600
+    num_ctx: 8192
+  python_only:
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    cooccurrence_window: "sentence"
+    min_relationship_confidence: 0.30
+  # Capture funding amounts and the date a flow/role is stated. Generic qual_*
+  # columns - no per-field code. monetary_value is the InfluenceWatch lever.
+  edge_qualifiers: ["monetary_value", "date"]
+  # Surface relation argument types in the prompt to cut type-violating edges.
+  # A/B against quality_pillars.consistency.type_violations_by_relation.
+  type_hints: true
+
+dedup:
+  fuzzy_thresholds:
+    PERSON: 0.85
+    ORG: 0.78           # org names vary (Inc/LLC/Foundation suffixes); a bit looser
+    LOCATION: 0.85
+    INSTITUTION: 0.80
+  llm_assist: true
+
+enrichment:
+  enabled: true
+  batch_size: 40
+
+quality:
+  enabled: true
+  min_entity_mentions: 1
+  min_edge_weight: 1
+  llm_review: "auto"
+
+inference:
+  enable_cooccurrence_edges: true
+  cooccurrence_min_shared_docs: 2
+  cooccurrence_backbone_alpha: 0.0
+  enable_canonical_inference: true
+  mandatory_membership: "off"      # not a membership corpus
+  # The headline for this domain: actors on the same board/PAC get a co_affiliated
+  # edge (Breiger two-mode -> one-mode). min_shared 1 = any shared org links them.
+  enable_affiliation_projection: true
+  affiliation_min_shared: 1
+
+ontology:
+  enabled: true
+  fuzzy_threshold: 0.82
+  drop_unmapped: false
+  relations: null                  # null => use the domain ontology
+
+linking:
+  enabled: false                   # flip on to add wikidata_qid to well-known orgs
+  min_mentions: 3
+  types: ["PERSON", "ORG"]
+  lang: "en"
+
+domain:
+  name: "influencewatch"
+
+export:
+  formats: ["csv", "json", "gexf", "jsonl"]
+  gephi: true
+  graph_metrics: true
+  narrative_network: false
+  codebook_note: >-
+    InfluenceWatch-style influence network. Edges are claims extracted from
+    profiles/news, not verified filings - treat funding/board ties as asserted,
+    not adjudicated. monetary_value (qual_*) is whatever the text stated, not a
+    reconciled total. co_affiliated edges are co-membership projections, not
+    direct ties.
+
+checkpoint:
+  enabled: true
+  flush_every: 1

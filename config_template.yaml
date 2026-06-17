@@ -130,6 +130,17 @@ intelligence:
   skip_sparse_chunks: false        # true to save tokens on a paid endpoint
   sparse_window_words: 200         # a relation needs 2 entities within this window
   sparse_min_entities: 2
+  # Optional per-edge qualifier fields the LLM fills when the text states them - a
+  # typed attribute on a relation, not a new relation. They ride through to the
+  # Gephi/GEXF export as `qual_<name>` edge columns. Empty = none (default).
+  # Examples: monetary_value (funding amounts), jurisdiction (disaster scope),
+  # location/time (spatiotemporal record), weapon/setting (a script).
+  edge_qualifiers: []              # e.g. ["monetary_value", "jurisdiction"]
+  # Show each constrained relation's argument types in the prompt
+  # (born_in: person->place, employed_by: person->org) so the model forms fewer
+  # type-violating edges at the source. Only relations with a signature get a hint;
+  # loose stance/interaction types are unconstrained. A/B vs type_violations_by_relation.
+  type_hints: false
   # Mode 3: ollama
   ollama:
     host: "http://localhost:11434"
@@ -183,6 +194,21 @@ inference:
   # the weighted backbone. 0 = off (tag only). 0.05-0.30 on dense/web corpora
   # (a Wikipedia crawl went 20k -> 4k edges at 0.10). Typed edges untouched.
   cooccurrence_backbone_alpha: 0.0
+  # Two-mode (affiliation) projection: actors sharing a formal group (org/event)
+  # get a `co_affiliated` edge - the classic Breiger two-mode -> one-mode actor
+  # network, Newman 1/(k-1) weighted. For affiliation-dense domains where direct
+  # person-person ties are rare (political boards/PACs, multi-agency disaster
+  # response). Full tier (a co-presence, not a direct asserted tie). On a domain
+  # with a universal group (e.g. every NSDAP author shares NSDAP) raise
+  # affiliation_min_shared to 2 so the near-clique drops out.
+  enable_affiliation_projection: false
+  affiliation_min_shared: 1
+  # Which entity kinds are the actors vs the shared groups. Default: people share
+  # orgs/events. Multi-agency disaster response makes the AGENCIES the actors over
+  # a shared response EVENT (actor_kinds: ["ORG","INSTITUTION"], group_kinds:
+  # ["EVENT"]) - two agencies on the same fire link directly.
+  affiliation_actor_kinds: ["PERSON"]
+  affiliation_group_kinds: ["ORG", "INSTITUTION", "EVENT"]
   enable_canonical_inference: false   # Domain rules add membership edges
   # Domain mandatory-membership assumption: authors_only | all | off
   mandatory_membership: "authors_only"
@@ -204,6 +230,19 @@ ontology:
   # web crawl gets a usable edge vocabulary instead of a unique verb phrase per
   # edge. Set your own to override; ontology.enabled:false to turn it off.
   relations: null                  # dict{canonical:[synonyms]} | list[str] | null
+
+# Network expansion: grow an EXISTING network from new documents instead of
+# building a fresh one. Reads the schema of a prior run and locks this run to it -
+# the relation vocabulary ("strict edge formatting") and the entity kinds - so the
+# new material stays consistent with what you already curated. Off by default.
+# Works in `--stage analyze` too (re-lock an existing checkpoint).
+expansion:
+  enabled: false
+  source: ""                       # prior run dir, its gephi_edges.csv, or a network.gexf
+  lock_relations: true             # only keep relation types already in the source
+  drop_unmapped_relations: true    # strict: drop a new edge whose type isn't in that set
+  lock_entity_types: true          # keep only the entity kinds already in the source
+  entity_types: []                 # explicit override, e.g. ["PERSON","ORG"] (wins over lock_entity_types)
 
 # Optional Wikidata entity linking (adds attr_wikidata_qid/url/label). Off by
 # default - it makes network calls. Bounded and fail-soft (never breaks a run).

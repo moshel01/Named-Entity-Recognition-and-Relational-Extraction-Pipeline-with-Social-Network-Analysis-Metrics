@@ -207,6 +207,10 @@ class Exporter:
                     d[k] = ";".join(parts)
                 d["label"] = d.get("rel_type", d.get("label", ""))
                 d["confidence"] = max(d.get("confidence", 0.0), edge.get("confidence", 0.0))
+                # OR the per-edge flags: one bad parallel rel_type taints the pair.
+                for k in ("suspect_membership", "evidence_unverified",
+                          "type_violation", "evidence_ungrounded"):
+                    d[k] = bool(d.get(k)) or bool(edge.get(k))
                 if dynamic and edge.get("year"):
                     d["start"] = min(d.get("start", int(edge["year"])), int(edge["year"]))
                 continue
@@ -222,7 +226,23 @@ class Exporter:
                 "origin": edge.get("origin", ""),
                 "edge_source": edge.get("edge_source", ""),
                 "confidence": edge.get("confidence", 0.0),
+                # Per-edge filterable flags - Gephi reads these from the GEXF, not
+                # just the CSV. Always bool so the GEXF attribute type is stable.
+                "suspect_membership": bool(edge.get("suspect_membership", False)),
+                "evidence_unverified": bool(edge.get("evidence_unverified", False)),
+                "type_violation": bool(edge.get("type_violation", False)),
+                "evidence_ungrounded": bool(edge.get("evidence_ungrounded", False)),
+                # Per-edge qualifiers (monetary_value, jurisdiction, ...) as primitives.
+                **{k: (v if isinstance(v, (int, float, str, bool)) else str(v))
+                   for k, v in edge.items() if k.startswith("qual_")},
             }
+            # Two-mode projection weights on co_affiliated edges. Sparse (most edges
+            # lack them), so add only when present to keep the GEXF attribute typing
+            # stable - Gephi can then size/filter the affiliation network by these.
+            for k in ("affiliation_strength", "shared_groups"):
+                v = edge.get(k)
+                if isinstance(v, (int, float)):
+                    attrs[k] = v
             if dynamic and edge.get("year"):
                 attrs["start"] = int(edge["year"])
             G.add_edge(s_, t_, **attrs)

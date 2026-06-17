@@ -12,11 +12,14 @@
 #   python -m evaluation.evaluate --gold gold.json --run-dir <run_dir> \
 #       --edge-sources conservative --exclude-edge-source metadata
 #
-# Read RECALL on relations_untyped as the headline: the text uses its own labels
-# (joined vs member_of, located_in vs born_in), so endpoints-only is the honest
-# match. Precision is NOT meaningful - the prose asserts many true ties the four
-# spreadsheet fields never list. Note NSDAP membership is on every author, so it
-# dominates the gold; the per-label typed table separates born_in / resided_in.
+# Read RECALL on relations_family (tie-class match) as the headline: the text uses
+# its own labels (joined vs member_of, located_in vs born_in), so exact-label
+# (relations_typed) understates it, while relations_untyped ignores the label
+# entirely. relations_family credits a same-tie-class label (located_in ~ born_in,
+# both biographical) - the honest middle. Precision is NOT meaningful - the prose
+# asserts many true ties the four spreadsheet fields never list. Note NSDAP
+# membership is on every author, so it dominates the gold; the per-label typed
+# table separates born_in / resided_in.
 
 from __future__ import annotations
 

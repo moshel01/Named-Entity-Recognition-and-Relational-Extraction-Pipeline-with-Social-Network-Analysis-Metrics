@@ -143,12 +143,16 @@ class InferenceEngine:
         return edges
 
     def canonical_edges(
-        self, entities: list[Entity], edges: list[Relationship]
+        self, entities: list[Entity], edges: list[Relationship],
+        mentions: list | None = None, name_to_id: dict[str, str] | None = None,
     ) -> list[Relationship]:
-        """Delegate canonical inference to the active domain."""
+        """Delegate canonical inference to the active domain. ``mentions`` +
+        ``name_to_id`` let a domain run text-pattern rules (e.g. birth/residence
+        cues) that need each mention's sentence context."""
         if not self.config.enable_canonical_inference or self.domain is None:
             return []
-        options = {"mandatory_membership": self.config.mandatory_membership}
+        options = {"mandatory_membership": self.config.mandatory_membership,
+                   "mentions": mentions, "name_to_id": name_to_id}
         try:
             extra = self.domain.infer_canonical_edges(entities, edges, options)
         except Exception as exc:  # noqa: BLE001
@@ -170,7 +174,18 @@ class InferenceEngine:
         augmented.extend(self.cooccurrence_edges(entities))
         if mentions is not None and name_to_id is not None:
             augmented.extend(self.proximity_edges(mentions, name_to_id))
-        augmented.extend(self.canonical_edges(entities, edges))
+        augmented.extend(self.canonical_edges(entities, edges, mentions, name_to_id))
+        # Two-mode (affiliation) projection: actors sharing a group get a
+        # co_affiliated edge. Runs on the asserted+inferred edges, not the
+        # co-occurrence layer it would otherwise feed on itself.
+        if getattr(self.config, "enable_affiliation_projection", False):
+            from .bipartite import project_affiliations
+            ak = getattr(self.config, "affiliation_actor_kinds", None)
+            gk = getattr(self.config, "affiliation_group_kinds", None)
+            augmented.extend(project_affiliations(
+                entities, edges, self.config.affiliation_min_shared,
+                actor_labels=frozenset(ak) if ak else None,
+                group_labels=frozenset(gk) if gk else None))
         # Disparity-filter backbone over the (dense) co-occurrence layer. Always
         # stamps disparity_alpha; drops non-backbone edges only when alpha > 0.
         from .backbone import disparity_filter

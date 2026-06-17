@@ -98,7 +98,9 @@ class OllamaBackend(IntelligenceBackend):
         prompt = build_extraction_prompt(chunk_text, candidates, self.label_types,
                                          relation_types=self.relation_types or None,
                                          author_name=author_name,
-                                         relation_guide=self.relation_guide or None)
+                                         relation_guide=self.relation_guide or None,
+                                         edge_qualifiers=self.edge_qualifiers or None,
+                                         type_signatures=self.type_signatures or None)
         import time
         t0 = time.monotonic()
         try:
@@ -123,7 +125,8 @@ class OllamaBackend(IntelligenceBackend):
         data = coerce_extraction(obj)
         mentions, rels, timeline = _map_extraction(
             data, candidates, chunk_id, doc_id, self.label_types,
-            *self._date_vocab, chunk_text=chunk_text)
+            *self._date_vocab, chunk_text=chunk_text,
+            qualifiers=self.edge_qualifiers or None)
         # Heartbeat: chunks take minutes each and the doc-level progress bar
         # sits still for a whole chapter - show that work is happening.
         logger.info("chunk %s: %d relationships, %d mentions (%.0fs)",

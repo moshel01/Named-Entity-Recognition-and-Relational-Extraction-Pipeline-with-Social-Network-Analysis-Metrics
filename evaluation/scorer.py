@@ -162,8 +162,12 @@ def _name_to_pred_surfaces(pred: list[PredNode]) -> dict[str, set[str]]:
 
 def score_relations(
     gold: GoldSet, pred_entities: list[dict], pred_edges: list[dict],
-    type_sensitive: bool = True, directed: bool = True,
+    type_sensitive: bool = True, directed: bool = True, family: bool = False,
 ) -> dict[str, Any]:
+    # family=True scores at the tie-class level: a predicted `located_in` matches
+    # a gold `born_in` (both biographical) but not a gold `member_of` (affiliation).
+    # The honest middle between strict-typed (label must match exactly) and untyped
+    # (endpoints only) - the text uses its own labels for the same kind of tie.
     from postprocess import tie_classes
     pred = _build_pred_nodes(pred_entities)
     gnodes = _build_gold_nodes(gold)
@@ -191,7 +195,19 @@ def score_relations(
             pair = (a, b)
         else:
             pair = tuple(sorted((a, b)))
-        return (pair, t if type_sensitive else "")
+        if not type_sensitive:
+            slot = ""
+        elif family:
+            # tie-class slot. "other" is tie_classes' catch-all for relations it
+            # doesn't model (e.g. a benchmark's foreign Wikidata vocabulary); its
+            # class carries no signal and would let two unrelated unknown types
+            # collide, so fall back to the exact label there - family then
+            # degrades to typed for unmodeled vocab, never above it.
+            cls = tie_classes.classify(t) if t else ""
+            slot = t if cls == "other" else cls
+        else:
+            slot = t
+        return (pair, slot)
 
     pred_set: set[tuple] = set()
     for e in pred_edges:
@@ -262,6 +278,9 @@ def score_all(
         "entities_type_agnostic": score_entities(gold, pred_entities, type_sensitive=False),
         "relations_typed": score_relations(gold, pred_entities, pred_edges,
                                             type_sensitive=True, directed=directed),
+        "relations_family": score_relations(gold, pred_entities, pred_edges,
+                                            type_sensitive=True, directed=directed,
+                                            family=True),
         "relations_untyped": score_relations(gold, pred_entities, pred_edges,
                                               type_sensitive=False, directed=directed),
     }

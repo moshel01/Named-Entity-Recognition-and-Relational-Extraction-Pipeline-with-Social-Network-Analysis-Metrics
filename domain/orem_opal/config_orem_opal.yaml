@@ -1,0 +1,129 @@
+# Pipeline config for the OREM/OPAL domain: Oregon multi-agency disaster response.
+#
+#   python main.py --config domain/orem_opal/config_orem_opal.yaml --mode ollama
+#
+# Source is after-action reports, agency plans, and news, not first-person. The
+# network of interest is inter-organizational, so the affiliation projection makes
+# AGENCIES the actors sharing a response EVENT (not the default PERSON actors).
+# jurisdiction/location scope and grant amounts ride as edge qualifiers.
+
+run_name: "orem_opal"
+mode: "python_only"        # set ollama/api for relation extraction
+
+io:
+  input_path: "./data/orem_opal"
+  input_glob: "**/*"
+  output_dir: "./output"
+  encoding: "auto"
+  crawl:
+    enabled: false
+    seeds: []
+    max_pages: 150
+    respect_robots: true
+    delay: 1.0
+
+chunking:
+  max_chars: 6000
+  overlap_chars: 400
+  respect_sentences: true
+
+foundation:
+  spacy_model: "en_core_web_trf"
+  gliner_model: "fastino/gliner2-multi-v1"
+  gliner_threshold: 0.45
+  # OVERRIDDEN by the domain (17 labels in domain/orem_opal/gliner_labels.py).
+  gliner_labels: ["person", "organization", "location", "event"]
+  label_map:
+    person: "PERSON"
+    organization: "ORG"
+    location: "LOCATION"
+    event: "EVENT"
+  use_spacy_ner: true
+  device: "auto"
+
+coreference:
+  enabled: true
+  narrator_resolution: false
+  pronoun_resolution: false
+  languages: ["en"]
+
+intelligence:
+  ollama:
+    host: "http://localhost:11434"
+    model: "qwen3.5:9b"
+    temperature: 0.0
+    request_timeout: 600
+    num_ctx: 8192
+  python_only:
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    cooccurrence_window: "sentence"
+    min_relationship_confidence: 0.30
+  # Geospatial + financial grounding. jurisdiction/location pin the scope of a
+  # coordination edge; monetary_value captures grant/funding amounts.
+  edge_qualifiers: ["jurisdiction", "location", "monetary_value", "date"]
+  type_hints: true
+
+dedup:
+  fuzzy_thresholds:
+    PERSON: 0.85
+    ORG: 0.78
+    INSTITUTION: 0.80      # agency names share boilerplate (Department of ...)
+    LOCATION: 0.85
+    EVENT: 0.88
+  llm_assist: true
+
+enrichment:
+  enabled: true
+  batch_size: 40
+
+quality:
+  enabled: true
+  min_entity_mentions: 1
+  min_edge_weight: 1
+  llm_review: "auto"
+
+inference:
+  enable_cooccurrence_edges: true
+  cooccurrence_min_shared_docs: 2
+  cooccurrence_backbone_alpha: 0.0
+  enable_canonical_inference: true
+  mandatory_membership: "off"
+  # Project the inter-agency network: agencies/NGOs that responded to the same
+  # disaster (or share a grant program) get a co_affiliated edge. Actors are the
+  # orgs/agencies, the shared group is the EVENT - NOT the default PERSON actors.
+  enable_affiliation_projection: true
+  affiliation_min_shared: 1
+  affiliation_actor_kinds: ["ORG", "INSTITUTION"]
+  affiliation_group_kinds: ["EVENT"]
+
+ontology:
+  enabled: true
+  fuzzy_threshold: 0.82
+  drop_unmapped: false
+  relations: null
+
+linking:
+  enabled: false
+  min_mentions: 3
+  types: ["ORG", "INSTITUTION", "LOCATION"]
+  lang: "en"
+
+domain:
+  name: "orem_opal"
+
+export:
+  formats: ["csv", "json", "gexf", "jsonl"]
+  gephi: true
+  graph_metrics: true
+  narrative_network: false
+  codebook_note: >-
+    Oregon multi-agency disaster response (OREM/OPAL). Nodes are mostly
+    organizations (agencies, NGOs, tribal governments); the network is
+    inter-organizational coordination, not interpersonal. co_affiliated edges are
+    agencies sharing a response event, Newman-weighted - a co-presence, not a
+    direct asserted tie. jurisdiction/monetary_value (qual_*) are as stated in the
+    source documents, not reconciled.
+
+checkpoint:
+  enabled: true
+  flush_every: 1

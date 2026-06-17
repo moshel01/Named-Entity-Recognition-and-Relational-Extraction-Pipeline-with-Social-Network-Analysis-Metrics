@@ -56,14 +56,28 @@ def _aggregate_edges(
                 "n_mentions": 0, "directed": r.directed, "doc_ids": set(),
                 "origins": set(), "edge_sources": set(), "confidence": 0.0,
                 "evidence": r.evidence, "year": None, "suspect_membership": False,
-                "evidence_unverified": False, "cooccur_strength": None,
-                "disparity_alpha": None,
+                "evidence_unverified": False, "type_violation": False,
+                "evidence_ungrounded": False, "cooccur_strength": None,
+                "disparity_alpha": None, "affiliation_strength": None,
+                "shared_groups": None,
             }
             agg[key] = bucket
         if r.attributes.get("suspect_membership"):
             bucket["suspect_membership"] = True
         if r.attributes.get("evidence_unverified"):
             bucket["evidence_unverified"] = True
+        # Faithfulness flags set upstream (ontology type gate, anchor check). OR
+        # across mentions: one bad supporting mention taints the aggregated edge.
+        if r.attributes.get("type_violation"):
+            bucket["type_violation"] = True
+        if r.attributes.get("evidence_ungrounded"):
+            bucket["evidence_ungrounded"] = True
+        # Per-edge qualifiers (qual_*): domain-declared optional fields the LLM
+        # filled (monetary_value, jurisdiction, ...). Generic passthrough - first
+        # non-empty value per qualifier survives the merge.
+        for k, v in r.attributes.items():
+            if k.startswith("qual_") and v not in (None, "") and not bucket.get(k):
+                bucket[k] = v
         # Co-occurrence backbone signals (None for typed edges). Keep the strongest
         # tie strength and the most-significant (smallest) disparity alpha.
         cs = r.attributes.get("cooccur_strength")
@@ -73,6 +87,13 @@ def _aggregate_edges(
         if da is not None:
             prev = bucket["disparity_alpha"]
             bucket["disparity_alpha"] = da if prev is None else min(prev, da)
+        # Two-mode projection weight (co_affiliated edges). Keep the strongest.
+        af = r.attributes.get("affiliation_strength")
+        if af is not None:
+            bucket["affiliation_strength"] = max(bucket["affiliation_strength"] or 0.0, af)
+        sg = r.attributes.get("shared_groups")
+        if sg is not None:
+            bucket["shared_groups"] = max(bucket["shared_groups"] or 0, sg)
         bucket["n_mentions"] += 1
         for d in (r.doc_id or "").split(";"):
             if d:
@@ -200,9 +221,13 @@ class GephiBuilder:
                 "n_sources": b["n_sources"],           # distinct letters
                 "cooccur_strength": b.get("cooccur_strength"),  # Newman projection weight
                 "disparity_alpha": b.get("disparity_alpha"),    # backbone significance
+                "affiliation_strength": b.get("affiliation_strength"),  # two-mode projection weight
+                "shared_groups": b.get("shared_groups"),        # n shared orgs/events
                 "reciprocal": b["reciprocal"],
                 "suspect_membership": b.get("suspect_membership", False),
                 "evidence_unverified": b.get("evidence_unverified", False),
+                "type_violation": b.get("type_violation", False),
+                "evidence_ungrounded": b.get("evidence_ungrounded", False),
                 "period": b["period"],
                 "year": b["year"],
                 "origin": ";".join(sorted(b["origins"])),
@@ -212,6 +237,8 @@ class GephiBuilder:
                 "target_name": _repair_text(id_to_name.get(t, t)),
                 "letter_id": letter_of(doc0),
                 "evidence": (b["evidence"] or "")[:500],
+                # Per-edge qualifiers (qual_*) ride through generically as columns.
+                **{k: v for k, v in b.items() if k.startswith("qual_")},
             })
         return edges
 

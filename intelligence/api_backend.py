@@ -135,7 +135,9 @@ class ApiBackend(IntelligenceBackend):
         prompt = build_extraction_prompt(chunk_text, candidates, self.label_types,
                                          relation_types=self.relation_types or None,
                                          author_name=author_name,
-                                         relation_guide=self.relation_guide or None)
+                                         relation_guide=self.relation_guide or None,
+                                         edge_qualifiers=self.edge_qualifiers or None,
+                                         type_signatures=self.type_signatures or None)
         raw = self._complete(self.extraction_system, prompt)
         obj = repair_json(raw)
         if obj is None:
@@ -144,7 +146,8 @@ class ApiBackend(IntelligenceBackend):
             return list(candidates), [], []
         data = coerce_extraction(obj)
         return _map_extraction(data, candidates, chunk_id, doc_id, self.label_types,
-                               *self._date_vocab, chunk_text=chunk_text)
+                               *self._date_vocab, chunk_text=chunk_text,
+                               qualifiers=self.edge_qualifiers or None)
 
     # Quality review
     def review(self, entities_summary: str, edges_summary: str) -> dict[str, Any] | None:
@@ -249,6 +252,7 @@ def _map_extraction(
     season_words: dict[str, int] | None = None,
     pivot_max: int | None = None,
     chunk_text: str = "",
+    qualifiers: list[str] | None = None,
 ) -> tuple[list[EntityMention], list[Relationship], list[TimelineEvent]]:
     """Map a parsed LLM extraction object onto pipeline dataclasses.
 
@@ -300,6 +304,13 @@ def _map_extraction(
         attrs = {"edge_source": "llm_extracted"}
         if evidence and norm_chunk and not _evidence_verbatim(evidence, norm_chunk):
             attrs["evidence_unverified"] = "true"
+        # Optional per-edge qualifiers the model filled (monetary_value, jurisdiction,
+        # ...). Captured under the `qual_` namespace so the aggregator + export carry
+        # any declared field generically. Only declared keys, only scalar values.
+        for q in (qualifiers or []):
+            v = r.get(q)
+            if v not in (None, "", [], {}):
+                attrs[f"qual_{q}"] = v if isinstance(v, (str, int, float, bool)) else str(v)
         rels.append(
             Relationship(
                 source=src,

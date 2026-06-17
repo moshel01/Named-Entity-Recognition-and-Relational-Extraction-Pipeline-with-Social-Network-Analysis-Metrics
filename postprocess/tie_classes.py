@@ -26,9 +26,14 @@ _REL_CLASS: dict[str, str] = {
     "led": "affiliation", "founded": "affiliation", "employed_by": "affiliation",
     "studied_at": "affiliation", "expelled_from": "affiliation",
     "propagandized_for": "affiliation", "worked_for": "affiliation",
-    # participation (person->event)
+    # two-mode projection: A and B share a formal group (org/event). An affiliation
+    # tie in the SNA sense (Breiger), though derived, not a direct interaction.
+    "co_affiliated": "affiliation",
+    # participation (person/org->event) - incl. multi-agency disaster response,
+    # where an agency that responded to a disaster is "participating" in it.
     "participated_in": "participation", "fought_in": "participation",
     "wounded_at": "participation", "attended_event": "participation",
+    "responded_to": "participation",
     # biographical (person->place / rank)
     "born_in": "biographical", "resided_in": "biographical", "located_in": "biographical",
     "lived_in": "biographical", "promoted_to": "biographical", "died_in": "biographical",
@@ -36,6 +41,14 @@ _REL_CLASS: dict[str, str] = {
     "supported": "stance", "opposed": "stance", "influenced_by": "stance",
     "fought_against": "stance", "admired": "stance", "read": "stance",
     "believed_in": "stance", "allied_with": "stance", "sympathized_with": "stance",
+    # lobbying/advocacy directed at a target is an influence action, not a
+    # membership in it - keep it out of the affiliation/projection layer.
+    "lobbied": "stance", "lobbied_for": "stance",
+    # causal (one thing brings about another) - a driver->impact / cause->effect
+    # link, common in disaster storylines, news narratives, plot/event chains.
+    # Directed content, not interpersonal; substantive (far from co-occurrence).
+    "caused": "causal", "caused_by": "causal", "contributed_to": "causal",
+    "prevented": "causal", "led_to": "causal", "resulted_in": "causal",
     # not ties
     "co_occurs_with": "cooccurrence", "alias_of": "other",
 }
@@ -43,7 +56,7 @@ _REL_CLASS: dict[str, str] = {
 # Reciprocal ties -> undirected; everything else is directed.
 SYMMETRIC: set[str] = {
     "met_with", "family_of", "married_to", "friend_of", "sibling_of", "related_to",
-    "knew", "served_with", "allied_with", "co_occurs_with",
+    "knew", "served_with", "allied_with", "co_occurs_with", "co_affiliated",
 }
 
 # Fallback by target entity type when the relation type is unknown.
@@ -154,7 +167,11 @@ _CONNECTION: dict[str, str] = {
     "served_in": "physical", "fought_against": "physical", "fought_in": "physical",
     "wounded_at": "physical", "commanded": "physical", "recruited": "physical",
     "imprisoned_by": "physical", "appointed_by": "physical", "promoted_to": "physical",
-    "funded": "physical",
+    # money/material/operational flows are a physical (direct, material) connection.
+    "funded": "physical", "donated_to": "physical", "granted": "physical",
+    "coordinated_with": "physical", "provided_resources_to": "physical",
+    "contracted": "physical", "responded_to": "physical",
+    "lobbied": "ideological", "lobbied_for": "ideological", "advised": "ideological",
     "supported": "ideological", "opposed": "ideological", "influenced_by": "ideological",
     "admired": "ideological", "read": "ideological", "believed_in": "ideological",
     "allied_with": "ideological", "sympathized_with": "ideological",
@@ -162,6 +179,7 @@ _CONNECTION: dict[str, str] = {
     "member_of": "organizational", "joined": "organizational", "led": "organizational",
     "founded": "organizational", "studied_at": "organizational",
     "expelled_from": "organizational", "subordinate_to": "organizational",
+    "co_affiliated": "organizational",
     "born_in": "biographical", "resided_in": "biographical", "located_in": "biographical",
     "lived_in": "biographical", "died_in": "biographical",
     "co_occurs_with": "cooccurrence", "alias_of": "none",
@@ -199,5 +217,7 @@ def connection_type(rel_type: str, tgt_label: str = "") -> str:
 SOCIAL = {"interaction"}
 # Classes that are two-mode but still structural (membership/biography).
 STRUCTURAL = {"affiliation", "participation", "biographical"}
+# Cause->effect content links (substantive, but not interpersonal).
+CAUSAL = {"causal"}
 # Classes excluded from interpersonal centrality.
 NON_SOCIAL = {"stance", "cooccurrence", "other"}

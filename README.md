@@ -118,7 +118,7 @@ Outputs land in `output/<run_name>/`:
 |------|-------------|
 | `documents.csv` | Per-doc manifest: `doc_id, letter_id, author, filename` (join key to external metadata). |
 | `gephi_nodes.csv` | Nodes with `type`, `mention_count`, `doc_count`, `first_year`/`last_year`, a degree split by tie class (`deg_interaction`, `deg_affiliation`, ...), `tag_*`, `attr_*` (incl. `attr_wikidata_qid` when linking is on). Standard centralities are **not** precomputed — Gephi computes those on whichever view you load. |
-| `gephi_edges.csv` | Edges with `tie_class`, `connection_type` (physical/ideological/organizational/biographical), `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. Co-occurrence edges also carry `cooccur_strength` (Newman projection weight) and `disparity_alpha` (backbone significance). |
+| `gephi_edges.csv` | Edges with `tie_class`, `connection_type` (physical/ideological/organizational/biographical), `polarity`, `Weight` (distinct documents), `n_mentions`, `n_sources`, `reciprocal`, `period`, `year`, `origin`, `edge_source`, `letter_id`, `evidence`. Faithfulness/membership flags `suspect_membership`, `evidence_unverified`, `evidence_ungrounded`, `type_violation` (filter in Gephi; also GEXF edge attributes). Co-occurrence edges also carry `cooccur_strength` (Newman projection weight) and `disparity_alpha` (backbone significance); `co_affiliated` edges (two-mode projection) carry `affiliation_strength` and `shared_groups`. Declared per-edge qualifiers (e.g. `monetary_value`, `jurisdiction`) appear as `qual_*` columns. |
 | `network.gexf` | Full single-file graph for Gephi / Cytoscape. |
 | `network_dynamic.gexf` | Same graph with `start` years on nodes/edges for Gephi's timeline (when datable). |
 | `graph_interaction.gexf` | **Interpersonal social network** (person↔person ties only) — the headline SNA. |
@@ -188,6 +188,7 @@ Input docs
         ├─ enricher           [api/ollama, optional] subtype + attributes
         ├─ quality_review     rules (+ optional LLM)
         ├─ canonical_inference co-occurrence + domain edges
+        ├─ bipartite          [opt-in] two-mode affiliation -> co_affiliated actors
         ├─ tagger             scope / relevance_tier / connection_quality
         ├─ gephi_builder      NetworkX metrics -> node/edge tables
         └─ exporter           CSV / Parquet / JSON / GEXF / JSONL
@@ -230,6 +231,18 @@ given name), events with mismatched years, and substring locations
 
 ---
 
+## Expanding an existing network
+
+Already have a curated graph and want to grow it from new documents without it
+drifting into new relation types or off-target entity kinds? Turn on `expansion`:
+it reads the schema of a prior run (`source:` a run dir, its `gephi_edges.csv`, or
+a `.gexf`) and locks this run to it — only the relation types already there
+(synonyms still map, so `"worked for"` → `employed_by`), only the entity kinds
+already there. Off-vocabulary edges are dropped (strict) or tagged. Works in
+`--stage analyze`. See INSTRUCTIONS §10c.
+
+---
+
 ## Adding a domain
 
 Copy `domain/generic/` to `domain/<yourname>/`, fill in `aliases.py`,
@@ -262,6 +275,26 @@ Run it with the pre-built config:
 
 ```bash
 python main.py --config domain/nazi_era/config_nazi_era.yaml
+```
+
+### Bundled domains: `influencewatch`, `orem_opal`
+
+Two affiliation-dense English domains, built on the generic-package contract:
+
+- **`influencewatch`** — modern US political influence (dark money). PACs/shells/
+  foundations as ORG nodes, money-flow (`funded`/`donated_to`/`granted`) +
+  governance (`board_member_of`/`owns`/`subsidiary_of`) relations, funding amounts
+  on the edge as `qual_monetary_value`. Affiliation projection ON: people on the
+  same board/PAC get a `co_affiliated` edge.
+- **`orem_opal`** — Oregon multi-agency disaster response. An *inter-organizational*
+  network: agencies/NGOs/tribes are the nodes, and the projection makes them the
+  actors sharing a disaster EVENT (`affiliation_actor_kinds: [ORG, INSTITUTION]`),
+  so two agencies that responded to the same fire link directly. `qual_jurisdiction`
+  / `qual_location` pin scope.
+
+```bash
+python main.py --config domain/influencewatch/config_influencewatch.yaml --mode ollama
+python main.py --config domain/orem_opal/config_orem_opal.yaml --mode ollama
 ```
 
 ### Academic sensitivity analysis (`edge_source`)

@@ -4,6 +4,231 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Domain run fixes (from the first InfluenceWatch/OREM ollama runs)
+
+Verifying the first real runs (Arabella/Sixteen-Thirty dark-money doc; an OREM
+resilience doc) surfaced three issues, now fixed:
+
+- **Qualifiers never filled.** The model left `$1,415,274` in the evidence string
+  and emitted no `monetary_value` key - because the JSON schema example in the
+  prompt had no qualifier slot, and the model copies that example literally. Fix:
+  when `edge_qualifiers` is set, the qualifier keys are injected INTO the
+  relationship schema example (not just the prose instruction). The plumbing was
+  always right; the model just never saw the slot.
+- **Cross-type duplicate nodes.** "the Berger Action Fund" (ORG) and "Berger Action
+  Fund" (PERSON) stayed two nodes; "Oregon Dept of Emergency Management" and
+  "...(OEM)" likewise. `_resolve_cross_type` grouped on `normalize_name`, which
+  keeps a leading "the" and appends the `(OEM)` gloss, so the variants never met.
+  Fix: a stronger grouping key (strip leading article + trailing parenthetical) and
+  an org-name-shape tie-break - a name carrying "Fund"/"Department"/"PAC" resolves
+  to ORG/INSTITUTION over a mistyped PERSON, instead of the blanket person-first
+  preference. A real person mistyped ORG still resolves to PERSON.
+- **Off-ontology relations the model got right.** The runs produced `fiscal_sponsor_of`,
+  `project_of`, `oversees`, `managed_by` - real Arabella-style structure the
+  ontology missed. Added `fiscal_sponsor_of` / `project_of` as canonicals (with type
+  signatures org->org) and folded `oversees`->controls, `managed_by`->owned_by.
+
+Projection produced 0 co_affiliated on both single-doc runs - correct, not a bug:
+neither fake doc states two actors sharing a group. It fires on richer corpora.
+
+---
+
+## InfluenceWatch + OREM/OPAL domain packages
+
+Two new domains, built on the generic-package contract (no new loader code):
+
+- **`domain/influencewatch/`** — modern US political-influence networks. 21 GLiNER
+  labels (PAC/super-PAC/shell/foundation/think-tank/... all fold to ORG so they act
+  as the shared group in the projection), 23 relations centered on the money flow
+  (funded/donated_to/granted, carrying `qual_monetary_value`) and governance
+  (board_member_of/director_of/owns/subsidiary_of). Affiliation projection ON
+  (people sharing a board/PAC -> co_affiliated). `donated_to` is kept distinct from
+  the generic causal `contributed_to` (here a contribution is money, not causation).
+- **`domain/orem_opal/`** — Oregon multi-agency disaster response. 17 labels
+  (agencies->INSTITUTION, NGOs/tribes->ORG, grants/disasters->EVENT), 16 relations
+  for inter-agency coordination/response/funding. `qual_jurisdiction` + `qual_location`
+  pin geographic scope; `qual_monetary_value` the grant amounts.
+
+Both ship a documented `config_*.yaml`; run with `--config domain/<x>/config_*.yaml`.
+
+**Projection generalized for org-as-actor.** The two-mode projection was PERSON-only;
+disaster response needs AGENCIES as the actors sharing a response EVENT. Added
+`inference.affiliation_actor_kinds` / `affiliation_group_kinds` (default
+`["PERSON"]` / `["ORG","INSTITUTION","EVENT"]`, unchanged). OREM sets actors to
+`["ORG","INSTITUTION"]`, group to `["EVENT"]`, so two agencies that responded to the
+same fire get a co_affiliated edge. `tie_classes`: `responded_to` -> participation,
+`lobbied`/`lobbied_for` -> stance (advocacy at a target, not membership in it),
+material/money/coordination flows tagged physical connection. New signatures
+(board_member_of/director_of person->org, subsidiary_of org->org).
+
+---
+
+## Structure-aware type hints in the extraction prompt
+
+`intelligence.type_hints` (default off). The type-signature gate already tags
+`type_violation` after the fact; this hands the model the constraint up front
+instead. When on, each constrained relation shows its argument types in the prompt
+(`born_in (person->place)`, `employed_by (person->org)`), rendered from the same
+`RELATION_TYPE_SIGNATURES` the gate uses - so a local model has the inductive bias
+and forms fewer violations to begin with. Loose stance/interaction types (no
+signature) stay unconstrained. A/B against `type_violations_by_relation` in
+graph_report.json. From the doc-level-RE + structure-aware-DEE backlog (SALE,
+DocZSRE-with-entity-side-info) - the cheap, no-new-dep half of those papers.
+Backlog triage for the rest is on record in ARCHITECTURE.md grounding.
+
+---
+
+## Per-edge qualifiers + causal relation class
+
+Two generalizable additions from a six-paper review (political-network sentiment,
+disinfo/news narrative ensembles, serialized-TV arcs, disaster storylines,
+OMD-GraphRAG, MICRO), kept generic for any-text/books/scripts as well as the three
+immediate domains.
+
+- **Per-edge qualifiers** (`intelligence.edge_qualifiers`): a relation can carry
+  domain-declared optional fields the LLM fills only when the text states them -
+  `monetary_value` (InfluenceWatch PAC→shell), `jurisdiction` (OREM disaster scope),
+  `location`/`time` (any spatiotemporal record, cf. the urban-flood paper),
+  `weapon`/`setting` (a script). Captured under a `qual_` namespace so the prompt,
+  parser, aggregator merge, and Gephi/GEXF export all carry an arbitrary declared
+  field generically - no per-qualifier code. Empty by default (no behavior change).
+  The light version of the deferred hyper-relational (LLHKG) idea.
+- **Causal tie-class** (`caused` / `caused_by` / `contributed_to` / `prevented`):
+  driver→impact, cause→effect content in the generic ontology + `tie_classes`.
+  Directed and substantive, but excluded from the interpersonal substantive set
+  (event-content, not a social tie) - surfaced/filterable, not folded into
+  brokerage. From the disaster-storyline + disinfo-narrative papers; general across
+  disasters, news, politics, and plot/event chains.
+
+Doc move: the multi-domain roadmap (hyperedges, lifecycle phases, schema routing)
+moved from ASPIRATIONAL.md (resource-gated only) to ARCHITECTURE.md (runnable now,
+not yet built). The six papers' QA/RAG/store halves (TV-arc vector memory,
+OMD-GraphRAG retrieval, MICRO cross-store joins) stay aspirational.
+
+---
+
+## Two-mode (affiliation) projection
+
+For affiliation-dense domains (modern political "dark money" - people share PAC
+boards / shell companies; multi-agency disaster response - agencies share a
+response event) direct person-person ties are rare; actors connect THROUGH a
+shared group. New `postprocess/bipartite.project_affiliations` projects the
+actor x group two-mode graph onto an actor x actor graph (Breiger 1974): two
+actors tied to the same org/institution/event get a `co_affiliated` edge,
+Newman 1/(k-1) weighted (a 2-person board is a strong tie, a 500-member party is
+not), summed over shared groups. New edge_source `affiliation_projected`, full
+tier (a co-presence, not a direct asserted tie - same epistemic class as
+co-occurrence, over affiliations instead of documents). Opt-in
+(`inference.enable_affiliation_projection`); `affiliation_min_shared` gates by
+shared-group count - raise to 2 on a corpus with a universal group so the
+near-clique drops. tie_classes gains `co_affiliated` (affiliation /
+organizational, symmetric). Generalizes the existing co-occurrence Newman
+projection from shared-document to shared-affiliation.
+
+Motivated by three immediate use cases (NSDAP / InfluenceWatch / Oregon disaster
+response) and the typhoon-KG + urban-flood disaster-extraction papers. Roadmap
+for the rest (event hyperedges, lifecycle/spatiotemporal layers, schema routing)
+tracked in ARCHITECTURE.md ("Near-term additions").
+
+---
+
+## Birth/residence cue inference (lift biographical recall)
+
+The metadata gold split the recall gap cleanly: affiliation/membership 79%,
+biographical (born_in/resided_in) 33%. Diagnosis: NER recovers the place fine
+(100% of the missed birthplaces are already entities), and 75% of the misses have
+the place in the author's own essay - the gap is purely relation FORMATION. The
+LLM skips the compact preamble ("geboren am 5.5.1898 in Angerburg", "wohnhaft in
+Berlin") because coref is chunk-local and the place sits apart from the first-person
+body.
+
+New `infer_biographical_edges` (`domain/nazi_era/canonical_inference.py`): scans
+each LOCATION mention's own sentence (mentions carry `sentence`) for a birth/
+residence cue and links the document's narrator to the place - `born_in` /
+`resided_in`, `rule_extracted` (conservative tier, so it counts as text-asserted,
+not inferred). Skips kinship sentences ("mein Vater wurde in Y geboren"). Threaded
+through `InferenceEngine.canonical_edges` via `options["mentions"]`/`name_to_id`;
+the generic domain (2-arg infer_edges) is unaffected. Measured on the Abel gold:
+typed recall 0.29 -> 0.33 (+11 exact born_in/resided_in), and the offline estimate
+undercounts (the real dedup `name_to_id` resolves more place surfaces).
+
+---
+
+## Relation-family scoring (the honest middle metric)
+
+The metadata-gold eval showed typed recall 0.29 vs untyped 0.56 - a 27-point gap
+that's pure label granularity: the text says `located_in`/`joined` where the gold
+says `born_in`/`member_of`. Strict-typed punishes that; untyped ignores labels
+entirely. Added `relations_family` to `evaluation/scorer.py`: match endpoints AND
+tie-class (`tie_classes.classify`), so `located_in` credits a `born_in` gold (both
+biographical) but not a `member_of` gold (affiliation). On the Abel gold it lands
+at 0.55 recall - 157 of the 159 endpoint-matched ties also get the right tie-class
+(98.7%). The pipeline gets the KIND of relationship right far more often than the
+exact-label metric implied. Shown in the eval table between typed and untyped.
+
+Robustness: a benchmark gold with a vocabulary tie_classes doesn't model (redocred's
+Wikidata relations) collapses every type to the "other" catch-all, which would let
+two unrelated unknown relations on a pair spuriously match (family > typed - which
+is meaningless). Family now falls back to the exact label whenever the class is
+"other", so it degrades to typed for unmodeled vocab and is never above it. Verified:
+redocred family == typed (62), Abel family unchanged (157).
+
+---
+
+## Network expansion mode + small precision fixes
+
+- **Expansion mode** (`expansion:` config, `postprocess/expansion.py`): grow an
+  EXISTING network from new documents instead of starting fresh. Point `source`
+  at a prior run dir (or its `gephi_edges.csv` / `network.gexf`); the run loads
+  that network's schema and locks to it - `lock_relations` keeps only the relation
+  types already there (strict edge formatting; `drop_unmapped_relations` drops the
+  rest), `lock_entity_types` keeps only the entity kinds already there
+  (`entity_types: [...]` to override). Synonyms still map ("worked for" ->
+  `employed_by` if `employed_by` is in the set), so it constrains without losing
+  surface-form recall. Runs in `--stage analyze` too. Off by default.
+- **json_repair**: new ladder level for stray sentence punctuation the model
+  leaks after a value's close quote (`"...All-powerful;".` then a newline + next
+  key) - never legal between members, so it's the missing comma before a key or
+  dropped before a close bracket. Recovered a real lesmis dump (29 relationships
+  that were being thrown away). Captured as a regression fixture.
+- **promoted_to** signature `(PERSON -> RANK)` + RANK added to the modeled core
+  types: a promotion pointing at an org/place now tags `type_violation`.
+- **quality_pillars**: `consistency` now carries `type_violations_by_relation` -
+  one relation dominating means the signature's too tight, spread means a real
+  extraction problem. Saves grepping the CSV to tune signatures.
+
+---
+
+## Wire the faithfulness tags through to exports (they were dead on arrival)
+
+Reviewing the first Abel run with the new guards: `graph_report.json` showed
+`type_violations: 0` on 4.8k edges. Not clean data - a silent no-op. The gate
+set `r.attributes["type_violation"]`, but the edge-table builder copies only an
+allowlist of attributes (`suspect_membership`, `evidence_unverified`, ...) and
+neither `type_violation` nor `evidence_ungrounded` was on it. So both new tags
+were computed and thrown away: never a CSV column, never counted by
+`quality_pillars`, never filterable. The whole point of tag-don't-filter, defeated.
+
+- **gephi_builder**: edge aggregation now carries `type_violation` +
+  `evidence_ungrounded` (OR across mentions, like the other flags). They surface
+  as `gephi_edges.csv` columns and `quality_pillars.consistency.type_violations`
+  is now real (19/4825 on the q3.5 pilot, clean_pct 99.6).
+- **exporter (GEXF)**: the GEXF edge writer had the same allowlist and was worse -
+  it dropped `suspect_membership`/`evidence_unverified` too, so NONE of the
+  filterable flags reached Gephi via GEXF (only the CSV). Now writes all four
+  booleans (typed stable so the GEXF schema doesn't churn), OR-ed across the
+  parallel-edge merge. `disparity_alpha`/`cooccur_strength` stay CSV-only for now.
+- **located_in signature**: was `(PERSON|ORG -> PLACE)`, which flagged 61 valid
+  edges - the nazi_era domain deliberately maps "lived in/wohnte in/from" to
+  `located_in` and tie_classes treats person->place as biographical. Corrected to
+  permissive source, place-constrained target `(PERSON|ORG|PLACE -> PLACE)`: a
+  place-in-place containment is fine, the real error is `located_in` pointing at a
+  person/org. Added `resided_in` (domain vocab for `lived_in`) to the signatures.
+- Tests: `test_faithfulness_tags_exported` (builder + GEXF round-trip - the
+  regression that was missing), plus `located_in` source/target cases.
+
+---
+
 ## Type-signature consistency gate, evidence-grounding anchor check, KGC quality-pillar report
 
 Three precision/QA guards from a paper pass; the rest triaged.

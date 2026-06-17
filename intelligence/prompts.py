@@ -59,6 +59,8 @@ def build_extraction_prompt(
     relation_types: list[str] | None = None,
     author_name: str = "",
     relation_guide: dict[str, str] | None = None,
+    edge_qualifiers: list[str] | None = None,
+    type_signatures: dict[str, str] | None = None,
 ) -> str:
     """Construct the user prompt for relationship/entity extraction."""
     # Compact, de-duplicated candidate list to keep the prompt small.
@@ -72,7 +74,16 @@ def build_extraction_prompt(
         cand_lines.append(f'  - "{m.text.strip()}" [{m.label}]')
     cand_block = "\n".join(cand_lines) if cand_lines else "  (none detected)"
 
-    schema_str = json.dumps(_OUTPUT_SCHEMA, indent=2)
+    # Qualifier fields go IN the relationship schema example, not just the prose
+    # instruction - the model copies the example literally and drops fields it
+    # doesn't see there (monetary_value sitting in the evidence, never extracted).
+    schema = _OUTPUT_SCHEMA
+    if edge_qualifiers:
+        rel_ex = dict(_OUTPUT_SCHEMA["relationships"][0])
+        for q in edge_qualifiers:
+            rel_ex[q] = f"<{q}, only if stated>"
+        schema = {**_OUTPUT_SCHEMA, "relationships": [rel_ex]}
+    schema_str = json.dumps(schema, indent=2)
 
     narrator = ""
     if author_name:
@@ -85,18 +96,24 @@ def build_extraction_prompt(
     rel_constraint = ""
     if relation_types:
         guide = relation_guide or {}
-        if guide:
+        sigs = type_signatures or {}
+        if guide or sigs:
             # Definitions pin a coding scheme the model would otherwise overrule
-            # with its intuition (the classic "associate" labeled "friend").
+            # with its intuition (the classic "associate" labeled "friend"); the
+            # (type->type) hint pins the argument types so it forms fewer
+            # type-violating edges (born_in pointing at a person, etc.).
             lines = []
             for rt in relation_types:
                 d = guide.get(rt)
-                lines.append(f"  - {rt}: {d}" if d else f"  - {rt}")
+                sig = sigs.get(rt)
+                head = f"{rt} ({sig})" if sig else rt
+                lines.append(f"  - {head}: {d}" if d else f"  - {head}")
             rel_constraint = (
                 "\nALLOWED RELATION TYPES - set each relationship `type` to the "
                 "single closest value below. The definitions are deliberate; "
-                "follow them over your own intuition. Use \"other\" only if none "
-                "fit:\n" + "\n".join(lines) + "\n"
+                "follow them over your own intuition. A (type->type) hint is the "
+                "allowed endpoint kinds. Use \"other\" only if none fit:\n"
+                + "\n".join(lines) + "\n"
             )
         else:
             rel_constraint = (
@@ -105,11 +122,21 @@ def build_extraction_prompt(
                 + ", ".join(relation_types) + "\n"
             )
 
+    qual_constraint = ""
+    if edge_qualifiers:
+        qual_constraint = (
+            "\nEDGE QUALIFIERS - add these as extra keys ON the relationship object "
+            "(shown in the schema) whenever its evidence sentence states them; omit a "
+            "field the text doesn't give, never guess: " + ", ".join(edge_qualifiers)
+            + ". If the evidence names a dollar amount, date, or place, it belongs in "
+            "the matching qualifier, not just left in the evidence string.\n"
+        )
+
     return f"""ENTITY CANDIDATES (from a base NER model - confirm, refine, extend):
 {cand_block}
 
 ENTITY TYPES IN USE: {", ".join(label_types)}
-{narrator}{rel_constraint}
+{narrator}{rel_constraint}{qual_constraint}
 PASSAGE:
 \"\"\"
 {text}

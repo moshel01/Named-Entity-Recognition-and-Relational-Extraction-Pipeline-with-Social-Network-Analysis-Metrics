@@ -162,6 +162,15 @@ def quality_pillars(report: dict[str, Any], tables) -> dict[str, Any]:
         conf = report.get("conflicts", {})
         n_conf = conf.get("conflicting_dyads", 0) if isinstance(conf, dict) else 0
         n_typeviol = sum(1 for e in edges if e.get("type_violation"))
+        # Per-relation breakdown: which relation types violate most. Fast way to
+        # tell a too-tight signature (one relation dominates) from a real
+        # extraction problem (spread across many).
+        tv_by_rel: dict[str, int] = {}
+        for e in edges:
+            if e.get("type_violation"):
+                rt = e.get("rel_type", "?")
+                tv_by_rel[rt] = tv_by_rel.get(rt, 0) + 1
+        tv_by_rel = dict(sorted(tv_by_rel.items(), key=lambda kv: -kv[1]))
         # completeness proxy: connectivity (isolates flood => undercovered).
         qa = report.get("qa_substantive", {})
         # timeliness proxy: temporal coverage of edges.
@@ -183,6 +192,7 @@ def quality_pillars(report: dict[str, Any], tables) -> dict[str, Any]:
             "consistency": {
                 "polarity_conflicts": n_conf,
                 "type_violations": n_typeviol,
+                "type_violations_by_relation": tv_by_rel,
                 "clean_pct": pct(n - n_typeviol),
             },
             "provenance": {

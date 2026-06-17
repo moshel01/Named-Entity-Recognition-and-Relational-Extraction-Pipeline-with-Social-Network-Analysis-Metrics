@@ -52,6 +52,15 @@ _BARE_VALUE_RE = re.compile(
 # Model commentary between a string close and the delimiter:
 # `"...house arrest" (implied residence),`. Drop the parenthetical.
 _PAREN_ANNOTATION_RE = re.compile(r'"\s*\([^()"\n]*\)(\s*[,}\]])')
+# A stray sentence-punctuation char the model leaks right after a value's close
+# quote, before the next member: `"...All-powerful;".` then a newline + the next
+# key. `. ; :` are never legal between a value and the next member. Two shapes:
+# before the next KEY it is the missing comma; before a CLOSE bracket just drop
+# it. The lookahead (a key-quote, i.e. `"..."` then `:`, or `}`/`]`) keeps
+# punctuation INSIDE strings - always followed by more content - untouched.
+_STRAY_PUNCT_BEFORE_KEY_RE = re.compile(
+    r'("\s*)[.;:]+(\s*\n\s*"(?:[^"\\]|\\.)*"\s*:)')
+_STRAY_PUNCT_BEFORE_CLOSE_RE = re.compile(r'("\s*)[.;:]+(\s*[}\]])')
 # Several comma-separated strings as one value, no array brackets:
 # `"evidence": "s1", "s2", "s3",`. Merge them. The anchor on `:` keeps real
 # array elements out; the lookahead keeps the next key (always followed by a
@@ -308,6 +317,16 @@ def _repair_blob(blob: str) -> Optional[Any]:
     fixed47 = _PAREN_ANNOTATION_RE.sub(r'"\1', fixed4)
     try:
         return json.loads(fixed47)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 4.75: stray sentence punctuation the model left between a value's
+    # close quote and the next member (`"...powerful;".` + newline + key). Make
+    # it the missing comma before a key, drop it before a close bracket.
+    fixed475 = _STRAY_PUNCT_BEFORE_CLOSE_RE.sub(r'\1\2',
+               _STRAY_PUNCT_BEFORE_KEY_RE.sub(r'\1,\2', fixed4))
+    try:
+        return json.loads(fixed475)
     except json.JSONDecodeError:
         pass
 

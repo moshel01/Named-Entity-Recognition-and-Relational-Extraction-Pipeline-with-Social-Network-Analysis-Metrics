@@ -23,6 +23,7 @@
 #   canonical_inferred     domain/nazi_era canonical inference (signal detected)
 #   pipeline_inferred      domain/nazi_era mandatory-membership assumption
 #   rule_cooccurrence      postprocess/canonical_inference + python_only backend
+#   affiliation_projected  postprocess/bipartite (two-mode -> one-mode projection)
 #   sna_inferred           legacy co-occurrence tag (pre-2026-06 runs) -> proximity
 
 from __future__ import annotations
@@ -36,7 +37,10 @@ ASSUMPTION = frozenset({"pipeline_inferred"})
 # made before the branding was unified still re-tier correctly, but kept out of
 # the human-readable docs (current runs never emit it).
 _LEGACY = frozenset({"sna_inferred"})
-PROXIMITY = frozenset({"rule_cooccurrence"}) | _LEGACY
+# affiliation_projected: a two-mode -> one-mode projection (A and B both in org X).
+# Co-presence in a shared group, not a direct asserted tie - so the weakest tier,
+# same epistemic class as co-occurrence (just over affiliations, not documents).
+PROXIMITY = frozenset({"rule_cooccurrence", "affiliation_projected"}) | _LEGACY
 
 # Filterable tiers (cumulative). 'full'/'all' are deliberately absent: they
 # admit *everything*, including unknown or future sources, and are handled as a

@@ -267,3 +267,91 @@ class MembershipInferenceEngine:
             return True
         # "authors_only": entity must be flagged as a document author/narrator.
         return bool(person.attributes.get("is_author") or person.tags.get("is_author"))
+
+
+# --- Biographical (birth / residence) text-pattern inference ----------------
+#
+# The Abel essays state birthplace and residence in a compact preamble
+# ("geboren am 5.5.1898 in Angerburg", "wohnhaft in Berlin") the LLM tends to skip:
+# coref is chunk-local and the place sits apart from the first-person body, so the
+# typed author->place edge never forms even though both nodes already exist (NER
+# recovers the place fine - the gap is relation formation). We recover it from each
+# LOCATION mention's own sentence and link the document's narrator to the place.
+# rule_extracted -> conservative tier, so it counts as text-asserted, not inferred.
+
+_BIRTH_CUE = re.compile(r"\b(?:geboren|geb\.|gebürtig|gebuertig|born)\b", re.IGNORECASE)
+_RESIDENCE_CUE = re.compile(
+    r"\b(?:wohnhaft|wohnte?|ansässig|ansaessig|niedergelassen|lebte?|"
+    r"resided?|residing|lived|domiciled)\b", re.IGNORECASE)
+# A relative's birthplace is not the narrator's. The essays are first-person, so an
+# unqualified "geboren ... in X" is the author; the kinship case is the real
+# confound ("mein Vater wurde in Y geboren") - skip those sentences.
+_THIRD_PARTY = re.compile(
+    r"\b(?:vater|mutter|eltern|großvater|grossvater|großmutter|grossmutter|"
+    r"bruder|schwester|onkel|tante|sohn|tochter|gattin|ehefrau|gemahlin|"
+    r"schwieger\w*|father|mother|parents|grandfather|grandmother|brother|"
+    r"sister|uncle|aunt|son|daughter|wife)\b", re.IGNORECASE)
+
+
+def infer_biographical_edges(
+    entities: list[Entity], edges: list[Relationship],
+    mentions: list, name_to_id: dict[str, str],
+) -> list[Relationship]:
+    """Narrator -> place born_in/resided_in edges from birth/residence cues in a
+    LOCATION mention's containing sentence. ``mentions`` carry the sentence and
+    doc_id; ``name_to_id`` resolves a place surface to its surviving entity id."""
+    if not mentions or not name_to_id:
+        return []
+    from postprocess.aggregator import normalize_name
+
+    author_of_doc: dict[str, str] = {}
+    place_ids: set[str] = set()
+    for e in entities:
+        if e.label == "LOCATION":
+            place_ids.add(e.entity_id)
+        if e.attributes.get("is_author") or e.tags.get("is_author"):
+            home = e.attributes.get("author_doc")
+            if home:
+                author_of_doc[home] = e.entity_id
+            for d in e.doc_ids:
+                author_of_doc.setdefault(d, e.entity_id)
+    if not author_of_doc or not place_ids:
+        return []
+
+    # Don't duplicate an author->place biographical edge that already exists.
+    existing: set[tuple[str, str, str]] = {
+        (r.source, r.target, r.rel_type) for r in edges
+        if r.rel_type in ("born_in", "resided_in", "located_in", "lived_in")
+    }
+
+    new_edges: list[Relationship] = []
+    seen: set[tuple[str, str, str]] = set()
+    for m in mentions:
+        if getattr(m, "label", "") != "LOCATION":
+            continue
+        sent = (getattr(m, "sentence", "") or "").strip()
+        if not sent:
+            continue
+        birth = _BIRTH_CUE.search(sent)
+        res = _RESIDENCE_CUE.search(sent)
+        if not (birth or res) or _THIRD_PARTY.search(sent):
+            continue
+        author_id = author_of_doc.get(getattr(m, "doc_id", ""))
+        if author_id is None:
+            continue
+        place_id = name_to_id.get(normalize_name(m.text))
+        if place_id is None or place_id not in place_ids or place_id == author_id:
+            continue
+        rel = "born_in" if birth else "resided_in"
+        key = (author_id, place_id, rel)
+        if key in seen or key in existing or (author_id, place_id, "located_in") in existing:
+            continue
+        seen.add(key)
+        new_edges.append(Relationship(
+            source=author_id, target=place_id, rel_type=rel,
+            doc_id=getattr(m, "doc_id", ""), evidence=sent[:200], confidence=0.78,
+            directed=True, origin="rule",
+            attributes={"edge_source": "rule_extracted",
+                        "biographical_cue": (birth or res).group(0).lower()},
+        ))
+    return new_edges

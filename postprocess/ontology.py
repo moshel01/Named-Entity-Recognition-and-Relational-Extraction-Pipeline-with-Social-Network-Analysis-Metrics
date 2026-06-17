@@ -86,6 +86,17 @@ GENERIC_RELATION_ONTOLOGY: dict[str, list[str]] = {
                 "campaigned against", "sued", "investigated", "challenged"],
     "influenced_by": ["influenced by", "inspired by", "shaped by", "modeled on"],
     "allied_with": ["allied with", "aligned with", "ally of", "in alliance with"],
+    # causal (one thing brings about another) - driver->impact, cause->effect.
+    # Direction-sensitive: caused vs caused_by are separate so alignment never
+    # reverses the arrow. For disaster storylines, news narratives, plot chains.
+    "caused": ["caused", "led to", "resulted in", "triggered", "brought about",
+               "gave rise to", "set off", "sparked"],
+    "caused_by": ["caused by", "resulted from", "due to", "because of",
+                  "stemmed from", "triggered by", "brought on by"],
+    "contributed_to": ["contributed to", "fueled", "exacerbated", "drove",
+                       "aggravated", "worsened"],
+    "prevented": ["prevented", "averted", "stopped", "blocked", "forestalled",
+                  "headed off"],
 }
 
 # One-line scenario notes for the direction-sensitive / confusable relations,
@@ -105,6 +116,10 @@ GENERIC_RELATION_GUIDE: dict[str, str] = {
     "opposed": "subject publicly works against the object.",
     "influenced_by": "subject's ideas were shaped by the object.",
     "succeeded": "subject took over the object's role or position.",
+    "caused": "subject brought about the object (an event/outcome).",
+    "caused_by": "object brought about the subject (reverse of caused).",
+    "contributed_to": "subject was a partial cause/aggravator of the object.",
+    "prevented": "subject stopped the object from happening.",
 }
 
 
@@ -123,7 +138,8 @@ GENERIC_RELATION_GUIDE: dict[str, str] = {
 _PERSON = frozenset({"PERSON"})
 _ORG = frozenset({"ORG", "INSTITUTION"})
 _PLACE = frozenset({"LOCATION", "GPE"})
-CORE_TYPES = _PERSON | _ORG | _PLACE | frozenset({"EVENT"})
+_RANK = frozenset({"RANK"})
+CORE_TYPES = _PERSON | _ORG | _PLACE | _RANK | frozenset({"EVENT"})
 RELATION_TYPE_SIGNATURES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "employed_by": (_PERSON, _ORG),
     "led":         (_PERSON, _ORG),
@@ -134,12 +150,48 @@ RELATION_TYPE_SIGNATURES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "owned_by":    (_ORG, _PERSON | _ORG),
     "born_in":     (_PERSON, _PLACE),
     "lived_in":    (_PERSON, _PLACE),
+    "resided_in":  (_PERSON, _PLACE),   # domain (nazi_era) vocab alongside lived_in
     "died_in":     (_PERSON, _PLACE),
-    "located_in":  (_PERSON | _ORG, _PLACE),
+    # located_in is permissive on the source (a person, org, or place can all be
+    # "in" a place - the nazi_era domain maps "lived in/wohnte in/from" here and
+    # tie_classes treats person->place as biographical). The real constraint is
+    # the TARGET: located_in pointing at a person/org is the misextraction.
+    "located_in":  (_PERSON | _ORG | _PLACE, _PLACE),
     "married_to":  (_PERSON, _PERSON),
     "sibling_of":  (_PERSON, _PERSON),
     "family_of":   (_PERSON, _PERSON),
+    "promoted_to": (_PERSON, _RANK),   # a person rises to a rank, not an org/place
+    # board/governance + corporate structure (InfluenceWatch). A board seat or
+    # officer post is held BY a person; a subsidiary/parent tie is org-to-org.
+    "board_member_of": (_PERSON, _ORG),
+    "director_of":     (_PERSON, _ORG),
+    "subsidiary_of":   (_ORG, _ORG),
+    "fiscal_sponsor_of": (_ORG, _ORG),
+    "project_of":      (_ORG, _ORG),
 }
+
+
+# Friendly label per core type, for rendering a signature into a prompt hint.
+_TYPE_WORD = {"PERSON": "person", "ORG": "org", "INSTITUTION": "org",
+              "LOCATION": "place", "GPE": "place", "RANK": "rank", "EVENT": "event"}
+_WORD_ORDER = ["person", "org", "place", "rank", "event"]
+
+
+def _render_slot(allowed: frozenset[str]) -> str:
+    words = {_TYPE_WORD[a] for a in allowed if a in _TYPE_WORD}
+    return "/".join(w for w in _WORD_ORDER if w in words)
+
+
+def relation_signature_hints(relation_types: list[str]) -> dict[str, str]:
+    """{rel_type -> "person->place"} for the listed types that have a signature.
+    Feeds the extraction prompt so the model gets the argument types up front
+    (structure-aware extraction) instead of only being tagged after the fact."""
+    out: dict[str, str] = {}
+    for rt in relation_types:
+        sig = RELATION_TYPE_SIGNATURES.get(rt)
+        if sig:
+            out[rt] = f"{_render_slot(sig[0])}->{_render_slot(sig[1])}"
+    return out
 
 
 def _slot_violation(actual: Optional[str], allowed: frozenset[str]) -> bool:

@@ -70,6 +70,24 @@ def _acronym_form(name: str) -> str:
     return s.upper() if s.isalpha() and s.isupper() and 2 <= len(s) <= 6 else ""
 
 
+_TRAILING_PAREN = re.compile(r"\s*\([^)]*\)\s*$")
+
+# Name tokens that mark an organization/institution, used to break a cross-type
+# tie ("Berger Action Fund" tagged PERSON in one mention, ORG in another - the
+# "Fund" makes ORG the right call, not the default person-preference).
+_ORG_NAME_MARKERS = frozenset({
+    "fund", "foundation", "pac", "committee", "association", "institute",
+    "council", "department", "agency", "office", "bureau", "commission",
+    "coalition", "alliance", "network", "party", "union", "corporation",
+    "company", "inc", "llc", "ltd", "group", "trust", "society", "center",
+    "ministry", "authority", "board", "endowment", "institution", "project",
+})
+
+
+def _looks_org(name: str) -> bool:
+    return bool(set(normalize_name(name).split()) & _ORG_NAME_MARKERS)
+
+
 def _distinctive_conflict(a: str, b: str, token_thr: float = 0.8) -> bool:
     """True if each name carries a distinctive (content) token the other lacks.
 
@@ -222,10 +240,17 @@ class Deduplicator:
     # Tie-break order favors concrete types over ORG.
     _TYPE_PREF = {"PERSON": 4, "LOCATION": 3, "EVENT": 2, "INSTITUTION": 1, "ORG": 0}
 
+    def _xtype_key(self, name: str) -> str:
+        # Group cross-type variants robustly: "the Berger Action Fund" (ORG) and
+        # "Berger Action Fund" (PERSON), "Oregon Dept of Emergency Management" and
+        # "...(OEM)" must land in the same bucket. normalize_name keeps "the" and
+        # appends the parenthetical, so strip both here for the grouping key only.
+        return normalize_name(_strip_leading_the(_TRAILING_PAREN.sub("", name)))
+
     def _resolve_cross_type(self, entities: list[Entity]) -> list[Entity]:
         by_name: dict[str, list[Entity]] = defaultdict(list)
         for e in entities:
-            by_name[normalize_name(e.canonical_name)].append(e)
+            by_name[self._xtype_key(e.canonical_name)].append(e)
         out: list[Entity] = []
         for group in by_name.values():
             if len(group) == 1:
@@ -235,8 +260,14 @@ class Deduplicator:
             if any(e.attributes.get("is_author") for e in group):
                 out.extend(group)
                 continue
-            winner = max(group, key=lambda e: (e.mention_count,
-                                               self._TYPE_PREF.get(e.label, -1)))
+            # Winner by mention count, then by name shape: a name carrying an org
+            # marker ("Fund", "Department") prefers ORG/INSTITUTION over a mistyped
+            # PERSON; otherwise the default person-first preference holds.
+            def key(e: Entity) -> tuple:
+                org_shape = 1 if (_looks_org(e.canonical_name)
+                                  and e.label in ("ORG", "INSTITUTION")) else 0
+                return (e.mention_count, org_shape, self._TYPE_PREF.get(e.label, -1))
+            winner = max(group, key=key)
             for e in group:
                 if e is not winner:
                     self._merge_into(winner, e)

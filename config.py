@@ -174,6 +174,28 @@ class IntelligenceConfig(BaseModel):
     # have a signature; loose stance/interaction types are unconstrained. Off by
     # default - flip on and A/B against type_violations_by_relation in the report.
     type_hints: bool = False
+    # gemini_batch: max characters of document text per emitted prompt file. A
+    # corpus past this splits into numbered files. Lower it if the model truncates
+    # its JSON reply (output length, not input context, is usually the limit).
+    batch_char_budget: int = 4_000_000
+    # gemini_batch: max DOCUMENTS per prompt file (0 = no cap, char budget only).
+    # The reply's length scales with doc count, so this is the knob that actually
+    # prevents truncation - 20-40 is a safe range for dense first-person sources.
+    batch_max_docs: int = 0
+    # gemini_batch --submit: auto-POST each prompt to the Gemini REST API and write
+    # the reply files (no manual paste). Free AI Studio key in this env var. Forces
+    # JSON output + a high output-token cap (the truncation fix the chat UI hides).
+    batch_api_key_env: str = "GEMINI_API_KEY"
+    batch_model: str = "gemini-2.5-flash"   # or gemini-2.5-pro (higher quality, lower free RPD)
+    batch_base_url: str = ""                 # blank -> Google's generativelanguage endpoint
+    batch_max_output_tokens: int = 65536
+    # gemini_batch --submit: thinking-token budget. 2.5-flash thinks by DEFAULT and
+    # those tokens count against maxOutputTokens, so they eat the JSON budget and
+    # truncate the reply. 0 = thinking off (the right call for structured extraction;
+    # reclaims the whole output budget). <0 = leave the API default on. 2.5-pro can't
+    # go below 128, so 0 is bumped to 128 there.
+    batch_thinking_budget: int = 0
+    batch_request_timeout: int = 600
 
 
 class DedupConfig(BaseModel):
@@ -359,7 +381,7 @@ class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     run_name: str = "default_run"
-    mode: Literal["api", "python_only", "ollama", "langextract"] = "python_only"
+    mode: Literal["api", "python_only", "ollama", "langextract", "gemini_batch"] = "python_only"
     io: IOConfig
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     foundation: FoundationConfig = Field(default_factory=FoundationConfig)

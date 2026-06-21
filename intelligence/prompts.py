@@ -52,6 +52,64 @@ _OUTPUT_SCHEMA = {
 }
 
 
+def relationship_schema_str(edge_qualifiers: list[str] | None = None) -> str:
+    """Output schema as a JSON string. Qualifier fields go IN the relationship
+    example, not just the prose - the model copies the example literally and drops
+    fields it doesn't see there (monetary_value left in the evidence, never lifted)."""
+    schema = _OUTPUT_SCHEMA
+    if edge_qualifiers:
+        rel_ex = dict(_OUTPUT_SCHEMA["relationships"][0])
+        for q in edge_qualifiers:
+            rel_ex[q] = f"<{q}, only if stated>"
+        schema = {**_OUTPUT_SCHEMA, "relationships": [rel_ex]}
+    return json.dumps(schema, indent=2)
+
+
+def relation_constraint_block(relation_types: list[str] | None,
+                              relation_guide: dict[str, str] | None = None,
+                              type_signatures: dict[str, str] | None = None) -> str:
+    """The ALLOWED RELATION TYPES block (with guide defs + type-signature hints)."""
+    if not relation_types:
+        return ""
+    guide = relation_guide or {}
+    sigs = type_signatures or {}
+    if guide or sigs:
+        # Definitions pin a coding scheme the model would otherwise overrule with
+        # its intuition (the classic "associate" labeled "friend"); the (type->type)
+        # hint pins argument types so it forms fewer type-violating edges.
+        lines = []
+        for rt in relation_types:
+            d = guide.get(rt)
+            sig = sigs.get(rt)
+            head = f"{rt} ({sig})" if sig else rt
+            lines.append(f"  - {head}: {d}" if d else f"  - {head}")
+        return (
+            "\nALLOWED RELATION TYPES - set each relationship `type` to the "
+            "single closest value below. The definitions are deliberate; "
+            "follow them over your own intuition. A (type->type) hint is the "
+            "allowed endpoint kinds. Use \"other\" only if none fit:\n"
+            + "\n".join(lines) + "\n"
+        )
+    return (
+        "\nALLOWED RELATION TYPES - set each relationship `type` to the "
+        "single closest value from this list (use \"other\" only if none fit):\n  "
+        + ", ".join(relation_types) + "\n"
+    )
+
+
+def qualifier_constraint_block(edge_qualifiers: list[str] | None) -> str:
+    """The EDGE QUALIFIERS instruction (pairs with the schema-injected slots)."""
+    if not edge_qualifiers:
+        return ""
+    return (
+        "\nEDGE QUALIFIERS - add these as extra keys ON the relationship object "
+        "(shown in the schema) whenever its evidence sentence states them; omit a "
+        "field the text doesn't give, never guess: " + ", ".join(edge_qualifiers)
+        + ". If the evidence names a dollar amount, date, or place, it belongs in "
+        "the matching qualifier, not just left in the evidence string.\n"
+    )
+
+
 def build_extraction_prompt(
     text: str,
     candidates: list[EntityMention],
@@ -74,16 +132,7 @@ def build_extraction_prompt(
         cand_lines.append(f'  - "{m.text.strip()}" [{m.label}]')
     cand_block = "\n".join(cand_lines) if cand_lines else "  (none detected)"
 
-    # Qualifier fields go IN the relationship schema example, not just the prose
-    # instruction - the model copies the example literally and drops fields it
-    # doesn't see there (monetary_value sitting in the evidence, never extracted).
-    schema = _OUTPUT_SCHEMA
-    if edge_qualifiers:
-        rel_ex = dict(_OUTPUT_SCHEMA["relationships"][0])
-        for q in edge_qualifiers:
-            rel_ex[q] = f"<{q}, only if stated>"
-        schema = {**_OUTPUT_SCHEMA, "relationships": [rel_ex]}
-    schema_str = json.dumps(schema, indent=2)
+    schema_str = relationship_schema_str(edge_qualifiers)
 
     narrator = ""
     if author_name:
@@ -93,44 +142,8 @@ def build_extraction_prompt(
             "(ich, mir, mein, wir); never output a pronoun as an entity.\n"
         )
 
-    rel_constraint = ""
-    if relation_types:
-        guide = relation_guide or {}
-        sigs = type_signatures or {}
-        if guide or sigs:
-            # Definitions pin a coding scheme the model would otherwise overrule
-            # with its intuition (the classic "associate" labeled "friend"); the
-            # (type->type) hint pins the argument types so it forms fewer
-            # type-violating edges (born_in pointing at a person, etc.).
-            lines = []
-            for rt in relation_types:
-                d = guide.get(rt)
-                sig = sigs.get(rt)
-                head = f"{rt} ({sig})" if sig else rt
-                lines.append(f"  - {head}: {d}" if d else f"  - {head}")
-            rel_constraint = (
-                "\nALLOWED RELATION TYPES - set each relationship `type` to the "
-                "single closest value below. The definitions are deliberate; "
-                "follow them over your own intuition. A (type->type) hint is the "
-                "allowed endpoint kinds. Use \"other\" only if none fit:\n"
-                + "\n".join(lines) + "\n"
-            )
-        else:
-            rel_constraint = (
-                "\nALLOWED RELATION TYPES - set each relationship `type` to the "
-                "single closest value from this list (use \"other\" only if none fit):\n  "
-                + ", ".join(relation_types) + "\n"
-            )
-
-    qual_constraint = ""
-    if edge_qualifiers:
-        qual_constraint = (
-            "\nEDGE QUALIFIERS - add these as extra keys ON the relationship object "
-            "(shown in the schema) whenever its evidence sentence states them; omit a "
-            "field the text doesn't give, never guess: " + ", ".join(edge_qualifiers)
-            + ". If the evidence names a dollar amount, date, or place, it belongs in "
-            "the matching qualifier, not just left in the evidence string.\n"
-        )
+    rel_constraint = relation_constraint_block(relation_types, relation_guide, type_signatures)
+    qual_constraint = qualifier_constraint_block(edge_qualifiers)
 
     return f"""ENTITY CANDIDATES (from a base NER model - confirm, refine, extend):
 {cand_block}

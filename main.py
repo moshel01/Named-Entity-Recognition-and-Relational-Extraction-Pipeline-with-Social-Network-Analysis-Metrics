@@ -139,6 +139,157 @@ class Pipeline:
         )
         return extractions
 
+    # Mode 4: manual batch (gemini_batch). Export one self-contained prompt holding
+    # whole documents, paste it into a long-context model, import the JSON reply.
+    def run_batch_export(self, limit: int, extra_urls, urls_file, text, crawl_seeds,
+                         submit: bool = False) -> bool:
+        """Write the batch prompt file(s). With submit=True, POST each to the Gemini
+        API and write the reply files too (no manual paste). Returns True if any
+        reply was written (so run() can continue straight to analyze)."""
+        from intelligence.manual_batch import build_batch_prompt, extraction_spec
+        documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds)
+        if not documents:
+            console.print("[yellow]No documents found.[/yellow]")
+            return False
+        spec = extraction_spec(self.config, self.domain)
+        # First-person corpora (Abel): stamp each doc's author into its tag so the
+        # model attributes 'I/we' to that narrator. Filename-based, no models.
+        authors = self._batch_authors(documents)
+        prompts = build_batch_prompt(
+            [(d.doc_id, d.text) for d in documents], spec["label_types"],
+            spec["relation_types"], spec["relation_guide"],
+            spec["edge_qualifiers"], spec["type_signatures"],
+            char_budget=self.config.intelligence.batch_char_budget,
+            max_docs=self.config.intelligence.batch_max_docs,
+            authors=authors,
+        )
+        multi = len(prompts) > 1
+
+        def stem(i: int, kind: str, ext: str) -> str:
+            return f"gemini_batch_{kind}.{i:03d}.{ext}" if multi \
+                else f"gemini_batch_{kind}.{ext}"
+
+        paths: list[Path] = []
+        for i, pr in enumerate(prompts, 1):
+            p = self.run_dir / stem(i, "prompt", "txt")
+            p.write_text(pr, encoding="utf-8")
+            paths.append(p)
+        approx = sum(len(p) for p in prompts) // 4
+        per = (len(documents) + len(paths) - 1) // max(1, len(paths))
+        console.print(
+            f"[green]Wrote {len(paths)} batch prompt file(s)[/green] "
+            f"({len(documents)} docs, ~{per} docs/file, ~{approx:,} input tokens) to {self.run_dir}"
+        )
+
+        if submit:
+            return self._submit_batches(prompts, stem)
+
+        if per > 40:
+            console.print(f"[yellow]~{per} docs/file may truncate the reply. Re-run with "
+                          "--batch-docs 25 (or lower), or add --submit to call the API.[/yellow]")
+        resp = "gemini_batch_response.json" if not multi \
+            else "gemini_batch_response.NNN.json (one per prompt)"
+        console.print(
+            "[cyan]Next:[/cyan] in the model set max output tokens to the maximum, "
+            "paste/upload each prompt, save the JSON reply to "
+            f"[bold]{self.run_dir / resp}[/bold], then run the same command "
+            "with [bold]--stage analyze[/bold]. (Or re-run with [bold]--submit[/bold] to "
+            "skip the paste and call the API directly.)"
+        )
+        return False
+
+    def _submit_batches(self, prompts, stem) -> bool:
+        """POST each batch prompt to the Gemini API, writing the reply files."""
+        import os
+
+        from intelligence.manual_batch import submit_to_gemini
+        ic = self.config.intelligence
+        key = os.environ.get(ic.batch_api_key_env, "")
+        if not key:
+            console.print(f"[red]--submit needs an API key in ${ic.batch_api_key_env}. "
+                          "Get a free one at aistudio.google.com/apikey and set it:\n"
+                          f"  $env:{ic.batch_api_key_env} = \"...\"[/red]")
+            sys.exit(2)
+        from tqdm import tqdm
+        ok = 0
+        for i, pr in enumerate(tqdm(prompts, desc="Gemini", unit="batch"), 1):
+            try:
+                reply = submit_to_gemini(
+                    pr, key, model=ic.batch_model, base_url=ic.batch_base_url,
+                    max_output_tokens=ic.batch_max_output_tokens,
+                    thinking_budget=ic.batch_thinking_budget,
+                    timeout=ic.batch_request_timeout)
+            except Exception as exc:  # noqa: BLE001 - one batch failing must not kill the rest
+                console.print(f"[red]Batch {i} failed: {exc}[/red]")
+                continue
+            (self.run_dir / stem(i, "response", "json")).write_text(reply, encoding="utf-8")
+            ok += 1
+        console.print(f"[green]Gemini returned {ok}/{len(prompts)} batches "
+                      f"(model={ic.batch_model}).[/green]")
+        if ok < len(prompts):
+            console.print("[yellow]Some batches failed - analyze will flag the missing "
+                          "docs; re-run --stage extract --submit to retry them.[/yellow]")
+        return ok > 0
+
+    def run_batch_import(self, ckpt: CheckpointManager, import_json: str,
+                         limit: int, extra_urls, urls_file, text, crawl_seeds) -> None:
+        from intelligence.manual_batch import extraction_spec, parse_batch_response
+        if import_json:
+            files = sorted(Path().glob(import_json)) or [Path(import_json)]
+        else:
+            files = sorted(self.run_dir.glob("gemini_batch_response*.json"))
+        files = [f for f in files if f.exists()]
+        if not files:
+            console.print(f"[red]No batch reply JSON found in {self.run_dir} "
+                          "(expected gemini_batch_response*.json). Run --stage extract "
+                          "first, paste the prompt, and save the reply.[/red]")
+            sys.exit(2)
+        documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds,
+                                 for_extract=True)
+        spec = extraction_spec(self.config, self.domain)
+        authors = self._batch_authors(documents)
+        doc_meta = {
+            d.doc_id: {"text": d.text, "source_path": d.source_path,
+                       "author": authors.get(d.doc_id, "")}
+            for d in documents
+        }
+        extractions = []
+        for f in files:
+            raw = f.read_text(encoding="utf-8", errors="replace")
+            extractions.extend(parse_batch_response(
+                raw, doc_meta, spec["label_types"], spec["edge_qualifiers"],
+                spec["date_vocab"]))
+        # A single-doc reply the model returned unkeyed lands under doc_id "".
+        if len(documents) == 1 and len(extractions) == 1 and not extractions[0].doc_id:
+            extractions[0].doc_id = documents[0].doc_id
+            extractions[0].source_path = documents[0].source_path
+        with ckpt:
+            for ex in extractions:
+                ckpt.save(ex, flush=True)
+        # Coverage check across ALL reply files (a split corpus is normal).
+        covered = {ex.doc_id for ex in extractions}
+        missing = [d.doc_id for d in documents if d.doc_id not in covered]
+        console.print(f"[green]Imported {len(extractions)} documents from "
+                      f"{len(files)} reply file(s) into the checkpoint.[/green]")
+        if missing:
+            console.print(f"[yellow]{len(missing)} of {len(documents)} documents not "
+                          f"covered by any reply (truncated output?). Re-export with a "
+                          f"smaller --batch-budget and redo those. First few: "
+                          f"{missing[:5]}[/yellow]")
+
+    def _batch_authors(self, documents) -> dict[str, str]:
+        """doc_id -> narrator name for first-person corpora, when narrator
+        resolution is on (the live pipeline's author_name equivalent, but
+        filename-based so the batch export needs no models)."""
+        if not self.config.coreference.narrator_resolution:
+            return {}
+        out: dict[str, str] = {}
+        for d in documents:
+            name = self.domain.narrator_name(Path(d.source_path).name, d.doc_id)
+            if name:
+                out[d.doc_id] = name
+        return out
+
     # Document gathering (shared by extract + analyze)
     def _gather(self, limit: int = 0, extra_urls: tuple[str, ...] = (),
                 urls_file: str = "", text: str = "", crawl_seeds: tuple[str, ...] = (),
@@ -556,13 +707,34 @@ class Pipeline:
     # Full run
     def run(self, stage: str, resume: bool, limit: int = 0,
             extra_urls: tuple[str, ...] = (), urls_file: str = "", text: str = "",
-            crawl_seeds: tuple[str, ...] = ()) -> None:
+            crawl_seeds: tuple[str, ...] = (), import_json: str = "",
+            submit: bool = False) -> None:
         self._write_run_meta(stage, resume, limit)
         ckpt = CheckpointManager(
             self.run_dir / "checkpoints",
             self.config.run_name,
             enabled=self.config.checkpoint.enabled,
         )
+
+        # Manual batch mode: extract = write the prompt and stop (a human runs the
+        # model); analyze = import the JSON reply into the checkpoint, then proceed.
+        if self.config.mode == "gemini_batch":
+            if stage in ("all", "ingest", "extract"):
+                submitted = self.run_batch_export(limit, extra_urls, urls_file, text,
+                                                  crawl_seeds, submit=submit)
+                # Manual path (or ingest, or submit produced nothing): stop after
+                # writing prompts. With --submit the replies are already on disk, so
+                # fall through to import + analyze for a single end-to-end command.
+                if stage == "ingest" or not (submit and submitted):
+                    return
+            self.run_batch_import(ckpt, import_json, limit, extra_urls, urls_file,
+                                  text, crawl_seeds)
+            documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds,
+                                     for_extract=False)
+            current_ids = {d.doc_id for d in documents}
+            extractions = [ex for ex in ckpt.load_all() if ex.doc_id in current_ids]
+            self.run_analyze(extractions)
+            return
 
         if stage in ("all", "ingest", "extract"):
             extractions = self.run_extract(resume=resume, limit=limit,
@@ -597,8 +769,30 @@ class Pipeline:
               default="all", show_default=True, help="Which stage(s) to run.")
 @click.option("--resume", is_flag=True, default=False,
               help="Resume from existing checkpoint, skipping completed documents.")
-@click.option("--mode", type=click.Choice(["api", "python_only", "ollama", "langextract"]), default=None,
+@click.option("--mode", type=click.Choice(["api", "python_only", "ollama", "langextract", "gemini_batch"]), default=None,
               help="Override the execution mode from the config.")
+@click.option("--import-json", "import_json", default="",
+              help="gemini_batch: path/glob to the model's JSON reply to import at "
+                   "--stage analyze (default: <run>/gemini_batch_response*.json).")
+@click.option("--batch-budget", "batch_budget", type=int, default=None,
+              help="gemini_batch: chars of document text per prompt file (override "
+                   "intelligence.batch_char_budget). Lower it for more, smaller "
+                   "batches if the model truncates its JSON reply.")
+@click.option("--batch-docs", "batch_docs", type=int, default=None,
+              help="gemini_batch: max DOCUMENTS per prompt file (override "
+                   "intelligence.batch_max_docs). The reliable anti-truncation knob; "
+                   "20-40 suits dense first-person sources.")
+@click.option("--submit", "submit", is_flag=True, default=False,
+              help="gemini_batch: POST each prompt to the Gemini API (free key in "
+                   "$GEMINI_API_KEY) and continue straight to analyze - no manual paste.")
+@click.option("--batch-model", "batch_model", default="",
+              help="gemini_batch --submit: Gemini model (override "
+                   "intelligence.batch_model), e.g. gemini-2.5-pro for higher quality.")
+@click.option("--batch-thinking", "batch_thinking", type=int, default=None,
+              help="gemini_batch --submit: thinking-token budget (override "
+                   "intelligence.batch_thinking_budget). 0 = off (default; frees the "
+                   "output budget for JSON so the reply doesn't truncate). <0 keeps "
+                   "the model's default reasoning on.")
 @click.option("--limit", type=int, default=0,
               help="Process only the first N documents (handy for quick test runs).")
 @click.option("--url", "urls", multiple=True,
@@ -624,6 +818,8 @@ class Pipeline:
               "e.g. to A/B models without overwriting each other.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose (DEBUG) logging.")
 def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
+        import_json: str, batch_budget: Optional[int], batch_docs: Optional[int],
+        submit: bool, batch_model: str, batch_thinking: Optional[int],
         limit: int, urls: tuple[str, ...], urls_file: str,
         crawl_seeds: tuple[str, ...], crawl_max_pages: Optional[int],
         crawl_max_depth: Optional[int], direct_text: str,
@@ -652,6 +848,14 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         console.print(f"[cyan]Override: quality.min_entity_confidence = {min_entity_confidence}[/cyan]")
     if ollama_model:
         config.intelligence.ollama.model = ollama_model
+    if batch_budget is not None:
+        config.intelligence.batch_char_budget = batch_budget
+    if batch_docs is not None:
+        config.intelligence.batch_max_docs = batch_docs
+    if batch_model:
+        config.intelligence.batch_model = batch_model
+    if batch_thinking is not None:
+        config.intelligence.batch_thinking_budget = batch_thinking
     if metadata_file:
         config.io.metadata_file = metadata_file
     if run_name:
@@ -669,7 +873,7 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
     try:
         pipeline.run(stage=stage, resume=resume, limit=limit,
                      extra_urls=urls, urls_file=urls_file, text=direct_text,
-                     crawl_seeds=crawl_seeds)
+                     crawl_seeds=crawl_seeds, import_json=import_json, submit=submit)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted. Progress is saved in the checkpoint; "
                       "re-run with --resume to continue.[/yellow]")

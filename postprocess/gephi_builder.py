@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _YEAR_RE = re.compile(r"\b(1[89]\d{2})\b")
 _TIE_CLASSES = ("interaction", "affiliation", "participation",
-                "biographical", "stance", "cooccurrence", "other")
+                "biographical", "stance", "causal", "cooccurrence", "other")
 
 
 @dataclass
@@ -155,8 +155,9 @@ class GephiBuilder:
             b["reciprocal"] = b["directed"] and (t, s) in directed_keys
 
         # Per-node degree split by tie class + datable year span (for temporal
-        # views / dynamic graphs in Gephi).
-        class_deg: dict[str, dict[str, int]] = defaultdict(lambda: dict.fromkeys(_TIE_CLASSES, 0))
+        # views / dynamic graphs in Gephi). defaultdict(int) inner so a tie class
+        # not yet in _TIE_CLASSES can't crash the run - it just lacks a deg_ column.
+        class_deg: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         node_years: dict[str, list[int]] = defaultdict(list)
         for (s, t, _rt), b in agg.items():
             class_deg[s][b["tie_class"]] += 1

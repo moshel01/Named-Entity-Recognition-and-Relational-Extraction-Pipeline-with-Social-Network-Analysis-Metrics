@@ -77,6 +77,10 @@ intelligence:
     cooccurrence_window: "sentence"
     min_relationship_confidence: 0.30
     embedding_similarity_threshold: 0.55
+  # Render each constrained relation's argument types in the prompt (employed_by:
+  # person->org) so the model stops pointing employed_by/located_in at a town. The
+  # pre-emptive half of the post-hoc type_violation gate; pilot ran 86 violations.
+  type_hints: true
 
 dedup:
   fuzzy_thresholds:

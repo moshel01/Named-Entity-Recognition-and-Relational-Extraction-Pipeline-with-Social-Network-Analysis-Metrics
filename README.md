@@ -13,6 +13,12 @@ The foundation - **GLiNER (zero-shot NER) + spaCy (linguistic analysis)** -
 | `python_only` | GLiNER2 + spaCy | rules + dependency parse + embeddings | SVO + co-occurrence | none |
 | `ollama`      | GLiNER2 + spaCy | local LLM (qwen3.5, gemma4, ...) | LLM, same prompts as `api` | local |
 | `langextract` | GLiNER2 + spaCy | LangExtract over Ollama/Gemini/OpenAI | LLM + char-level source grounding | local/cloud |
+| `gemini_batch`| model does NER too | paste-in long-context model (Gemini 2M, Claude) | LLM, whole-document (no chunking) | none |
+
+> **`gemini_batch` (manual batch):** `--stage extract` writes one self-contained
+> prompt over the whole corpus; you paste it into a 2M-context model, save the JSON
+> reply to the run dir, and `--stage analyze` imports it and builds the graph. No
+> chunk-boundary recall loss, no API key. See [INSTRUCTIONS.md §4](INSTRUCTIONS.md#4-the-three-modes).
 
 > **Optional add-ons:** `io.use_docling` for structure-aware PDF/DOCX/OCR
 > ingestion; `export.graph_metrics` for SNA metrics Gephi can't compute

@@ -4,6 +4,85 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## gemini_batch pilot fixes (Abel, 50 docs)
+
+First real --submit run on the Abel corpus surfaced three things:
+
+- **Thinking ate the output budget.** 2.5-flash reasons by default and those tokens
+  count against maxOutputTokens, truncating the JSON reply mid-corpus regardless of
+  input size. --submit now sends `thinkingConfig.thinkingBudget: 0` (off; extraction
+  doesn't need it), handing the whole 65k to JSON. `--batch-thinking` /
+  `intelligence.batch_thinking_budget` overrides; 2.5-pro (can't fully disable)
+  floors a 0 at 128. At --batch-docs 10 only 1/50 docs truncated after this.
+- **Metadata merged onto 0 authors in batch mode.** The German metadata join keys
+  off the `is_author` flag (-> letter_id stamp -> spreadsheet match), but the batch
+  parser never set it - coref does in the chunked path, and batch skips coref. Now
+  `parse_batch_response` flags the narrator mention (exact name, or closest spelling
+  variant >= 0.9: the model 'corrects' Vilwak -> Villwak from the text). Pilot went
+  0 -> 44/49 authors merged, 146 verified edges.
+- **`causal` tie class crashed the graph build.** `_TIE_CLASSES` listed 7 of the 8
+  classes; a `caused`/`led_to` edge hit the per-node degree counter (fixed-key dict)
+  and KeyError'd the whole run. Added `causal` (so it gets a deg_causal column) and
+  made the inner counter a defaultdict so a future class can't crash a run.
+- **nazi_era type_hints on.** Renders each relation's argument types in the prompt
+  (employed_by: person->org) to pre-empt the type violations the pilot showed
+  (employed_by/located_in pointed at a town). Extraction-time lever - takes effect
+  on the next --submit, not on re-analyze.
+
+## Mode 4: manual batch (`gemini_batch`)
+
+Process a whole corpus in one long-context pass instead of chunk-by-chunk API
+calls. No chunk-boundary recall loss, no API key, and the model sees each document
+whole (often the most accurate option). Two-step, human in the loop:
+
+```
+python main.py --config <cfg> --mode gemini_batch --stage extract   # writes prompt file(s)
+# paste into Gemini (2M ctx) / Claude / etc.; save the JSON reply to the run dir
+python main.py --config <cfg> --mode gemini_batch --stage analyze    # imports + builds the graph
+```
+
+- **Export** (`--stage extract`): emits `gemini_batch_prompt.txt` - the same system
+  prompt, relation ontology/guide, type hints, and qualifier schema the live
+  backends use, wrapping every document in `<doc id="...">` tags and asking for a
+  single JSON object keyed by doc id. Splits into numbered files past a char budget
+  so a 540-letter corpus still pastes.
+- **Import** (`--stage analyze`, optional `--import-json <glob>`): parses the reply
+  (tolerates ```code fences``` / multiple files) through the same `_map_extraction`
+  the api/ollama backends use, so qualifiers, the evidence-verbatim flag, and the
+  pronoun remap all apply; writes the standard checkpoint and continues the pipeline.
+  Coverage check across split replies flags any doc no reply returned (truncated
+  output -> re-export smaller). `--batch-docs N` (`intelligence.batch_max_docs`)
+  caps documents per file - the reliable anti-truncation knob, since reply length
+  scales with doc count, not input size. First Abel run confirmed the failure: ~67
+  docs/file truncated Gemini's reply to the first ~16; quality on what returned was
+  clean (0 pronoun entities, narrator-attributed edges, in-ontology relations).
+- **First-person corpora** (Abel): when narrator resolution is on, each document's
+  author (filename-derived) is stamped into its `<doc author="...">` tag with a
+  first-person rule, so the model attributes 'ich/wir' to that narrator across all
+  500+ documents in one pass. `--batch-budget` (or `intelligence.batch_char_budget`)
+  tunes docs-per-file.
+- **`--submit`** (auto-API): instead of pasting, POST each batch to the Gemini REST
+  API (free AI Studio key in `$GEMINI_API_KEY`) and continue straight to analyze -
+  one command for the whole corpus. Forces `responseMimeType: application/json` and
+  `maxOutputTokens: 65536` (the truncation fix the chat UI hides), retries 429/5xx
+  with backoff, and skips-and-reports a failed batch rather than aborting. Model via
+  `intelligence.batch_model` / `--batch-model` (default gemini-2.5-flash). Still
+  whole-document batching, just no manual paste.
+- **Thinking off by default** (`--submit`): 2.5-flash reasons before answering and
+  those thinking tokens count against `maxOutputTokens`, so they silently eat the
+  JSON budget and truncate the reply mid-corpus - the real cause of the MAX_TOKENS
+  cut, not input size. `--submit` now sends `thinkingConfig.thinkingBudget: 0` to
+  turn reasoning off (extraction doesn't need it), handing the whole output budget
+  to JSON. `--batch-thinking` / `intelligence.batch_thinking_budget` overrides it;
+  <0 keeps the default reasoning on, and 2.5-pro (no full off) floors a 0 at 128.
+- NER is by the model here (no GLiNER), so entities carry no char spans - the
+  within-doc proximity layer is skipped for span-less mentions (it would otherwise
+  clique a whole document at position 0). Typed relations + cross-doc co-occurrence +
+  affiliation projection are unaffected. No live backend, so enrichment/LLM-dedup are
+  off (like python_only); fold those into the batch prompt later if needed.
+
+---
+
 ## Domain run fixes (from the first InfluenceWatch/OREM ollama runs)
 
 Verifying the first real runs (Arabella/Sixteen-Thirty dark-money doc; an OREM

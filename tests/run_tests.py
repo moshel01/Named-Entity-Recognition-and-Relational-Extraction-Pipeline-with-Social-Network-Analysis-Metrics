@@ -1010,6 +1010,20 @@ def test_causal_tie_class() -> None:
     check("'led to' aligns to caused", al.align("led to") == "caused", str(al.align("led to")))
     check("'resulted from' aligns to caused_by",
           al.align("resulted from") == "caused_by", str(al.align("resulted from")))
+    # The builder once KeyError'd on a causal edge because _TIE_CLASSES omitted it.
+    # A causal edge must build clean and get a deg_causal node column like any class.
+    from core.schema import Entity, Relationship
+    from postprocess.gephi_builder import GephiBuilder
+    cents = [Entity(entity_id="d1", canonical_name="War", label="EVENT"),
+             Entity(entity_id="d2", canonical_name="Hardship", label="EVENT")]
+    crel = Relationship(source="d1", target="d2", rel_type="caused", doc_id="d",
+                        evidence="the war caused hardship")
+    ctab = GephiBuilder().build(cents, [crel], [])
+    check("causal edge builds without crash", len(ctab.edges) == 1, str(len(ctab.edges)))
+    check("deg_causal column on every node",
+          all("deg_causal" in n for n in ctab.nodes), "")
+    src = next(n for n in ctab.nodes if n["Id"] == "d1")
+    check("causal degree counted", src["deg_causal"] == 1, str(src.get("deg_causal")))
 
 
 def test_generic_ontology() -> None:
@@ -1449,6 +1463,137 @@ def test_edge_qualifiers() -> None:
     check("no qualifier slot when none declared", '"monetary_value"' not in bare, "")
 
 
+def test_manual_batch() -> None:
+    from intelligence.manual_batch import (build_batch_prompt, parse_batch_response,
+                                           _coerce_doc_map)
+    print("-- mode 4: manual batch (gemini_batch)")
+
+    docs = [("doc_a", "Acme funded the Berger Fund with $5,000."),
+            ("doc_b", "Jane chairs Acme.")]
+    prompts = build_batch_prompt(docs, ["PERSON", "ORG"], relation_types=["funded", "chairs"],
+                                 edge_qualifiers=["monetary_value"])
+    check("single prompt under budget", len(prompts) == 1, str(len(prompts)))
+    pr = prompts[0]
+    check("both docs embedded", '<doc id="doc_a">' in pr and '<doc id="doc_b">' in pr, "")
+    check("keyed-output instruction present", "SINGLE JSON object" in pr, "")
+    check("qualifier slot in batch schema", '"monetary_value"' in pr, "")
+    check("no narrator instruction without authors", "FIRST-PERSON" not in pr, "")
+
+    # Narrator hint (Abel): author rides in the doc tag + the first-person rule.
+    auth = build_batch_prompt(docs, ["PERSON", "ORG"], authors={"doc_a": "Hans Müller"})
+    check("author stamped in doc tag", '<doc id="doc_a" author="Hans Müller">' in auth[0], "")
+    check("first-person rule present with authors", "FIRST-PERSON" in auth[0], "")
+    check("unauthored doc tag stays bare", '<doc id="doc_b">' in auth[0], "")
+    # Splits when the corpus exceeds the budget; every file keeps the header.
+    many = [(f"d{i}", "x" * 500) for i in range(6)]
+    parts = build_batch_prompt(many, ["ORG"], char_budget=1000)
+    check("splits past budget", len(parts) > 1, str(len(parts)))
+    check("each split self-contained", all("BATCH MODE" in p for p in parts), "")
+    # Doc-count cap is the anti-truncation knob: 10 small docs, 4 per file -> 3 files.
+    ten = [(f"e{i}", "y") for i in range(10)]
+    byn = build_batch_prompt(ten, ["ORG"], max_docs=4)
+    check("splits by doc count", len(byn) == 3, str(len(byn)))
+    # count real doc tags only (the header carries one literal <doc id="..."> example).
+    check("each file at most max_docs", all(p.count('<doc id="e') <= 4 for p in byn),
+          str([p.count('<doc id="e') for p in byn]))
+
+    # Coercion accepts keyed dict, list form, and a bare single-doc object.
+    check("coerce keyed", set(_coerce_doc_map({"d1": {"entities": []}})) == {"d1"}, "")
+    check("coerce list", set(_coerce_doc_map([{"doc_id": "d2", "relationships": []}])) == {"d2"}, "")
+    check("coerce bare single", set(_coerce_doc_map({"entities": [], "relationships": []})) == {""}, "")
+
+    # Parse a reply (code-fence wrapped, like a chat model emits) -> extraction with
+    # the qualifier carried and the evidence-verbatim flag set against the doc text.
+    reply = '```json\n{"doc_a": {"entities": [{"name":"Acme","type":"ORG"}],' \
+            '"relationships": [{"source":"Acme","target":"Berger Fund","type":"funded",' \
+            '"evidence":"Acme funded the Berger Fund with $5,000.","monetary_value":"$5,000"}],' \
+            '"timeline": []}}\n```'
+    meta = {"doc_a": {"text": docs[0][1], "source_path": "a.txt", "author": ""}}
+    exts = parse_batch_response(reply, meta, ["PERSON", "ORG"], edge_qualifiers=["monetary_value"])
+    check("one extraction parsed", len(exts) == 1 and exts[0].doc_id == "doc_a", str(exts))
+    rels = exts[0].relationships
+    check("relationship parsed", len(rels) == 1 and rels[0].rel_type == "funded", str(rels))
+    check("qualifier captured on import",
+          rels[0].attributes.get("qual_monetary_value") == "$5,000", str(rels[0].attributes))
+    check("verbatim evidence not flagged unverified",
+          "evidence_unverified" not in rels[0].attributes, str(rels[0].attributes))
+    check("backend tagged gemini_batch", exts[0].meta.get("backend") == "gemini_batch", "")
+
+    # Narrator flag: the mention matching the doc author is marked is_author, which
+    # the letter_id stamp + German metadata join key off (without it: 0 merges). A
+    # close spelling variant still flags (model 'corrects' Vilwak -> Villwak from the
+    # text); an unrelated person never does.
+    nar = '{"doc_n": {"entities": [{"name":"August Villwak","type":"PERSON"},' \
+          '{"name":"Adolf Hitler","type":"PERSON"}], "relationships": [], "timeline": []}}'
+    meta_n = {"doc_n": {"text": "August Villwak joined.", "source_path": "v.rtf",
+                        "author": "August Vilwak"}}  # filename spelling off by one 'l'
+    ex_n = parse_batch_response(nar, meta_n, ["PERSON"])[0]
+    flagged = {m.text for m in ex_n.mentions if m.attributes.get("is_author")}
+    check("narrator flagged via spelling variant", flagged == {"August Villwak"}, str(flagged))
+    # Exact match flags too; a different person stays unflagged.
+    meta_x = {"doc_n": {"text": "x", "source_path": "v.rtf", "author": "August Villwak"}}
+    ex_x = parse_batch_response(nar, meta_x, ["PERSON"])[0]
+    fx = {m.text for m in ex_x.mentions if m.attributes.get("is_author")}
+    check("narrator flagged on exact name", fx == {"August Villwak"}, str(fx))
+
+
+def test_gemini_submit() -> None:
+    from unittest.mock import MagicMock, patch
+    from intelligence.manual_batch import submit_to_gemini
+    print("-- gemini --submit API call (mocked)")
+
+    seen = {}
+
+    def ok_post(url, json=None, headers=None, timeout=None):
+        seen.update(url=url, headers=headers or {}, body=json or {})
+        m = MagicMock(); m.status_code = 200; m.raise_for_status = lambda: None
+        m.json = lambda: {"candidates": [{"content": {"parts": [{"text": '{"doc_a":{}}'}]},
+                                          "finishReason": "STOP"}]}
+        return m
+
+    with patch("requests.post", ok_post):
+        out = submit_to_gemini("PROMPT", "KEY", model="gemini-2.5-flash")
+    check("returns reply text", out == '{"doc_a":{}}', out)
+    check("hits generateContent endpoint", "gemini-2.5-flash:generateContent" in seen["url"], seen["url"])
+    check("sends api key header", seen["headers"].get("x-goog-api-key") == "KEY", str(seen["headers"]))
+    check("forces JSON output",
+          seen["body"]["generationConfig"]["responseMimeType"] == "application/json", "")
+    check("sets high output cap",
+          seen["body"]["generationConfig"]["maxOutputTokens"] == 65536, "")
+    # Default disables thinking so the output budget isn't burned on reasoning tokens.
+    check("disables thinking on flash",
+          seen["body"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0, "")
+
+    # 2.5-pro can't go to 0; a 0 request is bumped to its 128 floor (not omitted).
+    with patch("requests.post", ok_post):
+        submit_to_gemini("P", "KEY", model="gemini-2.5-pro", thinking_budget=0)
+    check("pro floors thinking at 128",
+          seen["body"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 128, "")
+
+    # Negative budget keeps the model default on -> no thinkingConfig sent at all.
+    with patch("requests.post", ok_post):
+        submit_to_gemini("P", "KEY", model="gemini-2.5-flash", thinking_budget=-1)
+    check("negative budget omits thinkingConfig",
+          "thinkingConfig" not in seen["body"]["generationConfig"], "")
+
+    # 429 -> backoff -> 200 (retry path), with sleep stubbed so the test is instant.
+    calls = {"n": 0}
+
+    def flaky_post(url, json=None, headers=None, timeout=None):
+        calls["n"] += 1
+        m = MagicMock()
+        if calls["n"] == 1:
+            m.status_code = 429
+            return m
+        m.status_code = 200; m.raise_for_status = lambda: None
+        m.json = lambda: {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        return m
+
+    with patch("requests.post", flaky_post), patch("time.sleep", lambda *a: None):
+        out2 = submit_to_gemini("P", "KEY", max_retries=3)
+    check("retries past 429", out2 == "ok" and calls["n"] == 2, str(calls))
+
+
 def test_gexf_parallel_edges() -> None:
     import tempfile
     from pathlib import Path
@@ -1518,6 +1663,8 @@ def main() -> int:
     test_evidence_grounding()
     test_faithfulness_tags_exported()
     test_edge_qualifiers()
+    test_manual_batch()
+    test_gemini_submit()
     test_qid_consolidation()
     test_reference_stripping()
     test_narrative_transitions()

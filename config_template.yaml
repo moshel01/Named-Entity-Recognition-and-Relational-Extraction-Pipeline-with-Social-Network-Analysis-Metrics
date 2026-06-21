@@ -6,9 +6,11 @@
 run_name: "default_run"          # Used for output subdir + checkpoint namespace
 
 # Execution mode
-# api         -> Mode 1: GLiNER + spaCy + cloud LLM (Claude/OpenAI/Bedrock)
-# python_only -> Mode 2: GLiNER + spaCy + rules/embeddings (no network)
-# ollama      -> Mode 3: GLiNER + spaCy + local LLM via Ollama
+# api          -> Mode 1: GLiNER + spaCy + cloud LLM (Claude/OpenAI/Bedrock)
+# python_only  -> Mode 2: GLiNER + spaCy + rules/embeddings (no network)
+# ollama       -> Mode 3: GLiNER + spaCy + local LLM via Ollama
+# gemini_batch -> Mode 4: write one whole-corpus prompt, paste into a 2M-context
+#                 model, save the JSON reply; --stage extract then --stage analyze
 mode: "python_only"
 
 # Input / output
@@ -141,6 +143,18 @@ intelligence:
   # type-violating edges at the source. Only relations with a signature get a hint;
   # loose stance/interaction types are unconstrained. A/B vs type_violations_by_relation.
   type_hints: false
+  # Mode 4 (gemini_batch): docs per emitted prompt file - the anti-truncation knob,
+  # since the model's reply length scales with doc count (0 = char-budget only).
+  batch_max_docs: 0              # e.g. 25 for dense first-person sources
+  # gemini_batch --submit: auto-call the Gemini API instead of pasting. Free key
+  # from aistudio.google.com/apikey in this env var.
+  batch_api_key_env: "GEMINI_API_KEY"
+  batch_model: "gemini-2.5-flash"   # or gemini-2.5-pro (higher quality, lower free RPD)
+  # 2.5-flash thinks by default and those tokens count against the output cap, so
+  # they eat the JSON budget and truncate the reply. 0 = thinking off (right for
+  # extraction; frees the whole output budget). <0 keeps the default reasoning on.
+  # 2.5-pro can't go below 128, so 0 is bumped to 128 there.
+  batch_thinking_budget: 0
   # Mode 3: ollama
   ollama:
     host: "http://localhost:11434"

@@ -89,9 +89,14 @@ class InferenceEngine:
         if window <= 0:
             return []
 
-        # doc_id -> sorted [(doc-absolute pos, surviving entity_id)].
+        # doc_id -> sorted [(doc-absolute pos, surviving entity_id)]. Skip mentions
+        # with no real span (end<=start): LLM-sourced entities carry (0,0), and a
+        # whole document of them at position 0 would otherwise be one big clique
+        # (gemini_batch mode has no GLiNER spans to anchor proximity).
         per_doc: dict[str, list[tuple[int, str]]] = defaultdict(list)
         for m in mentions:
+            if m.end_char <= m.start_char:
+                continue
             eid = name_to_id.get(normalize_name(m.text))
             if eid is not None:
                 per_doc[m.doc_id].append((m.start_char, eid))

@@ -133,7 +133,7 @@ Look in `output/<run_name>/` for `gephi_nodes.csv`, `gephi_edges.csv`,
 
 ---
 
-## 4. The three modes
+## 4. The modes
 
 Set `mode:` in the config, or override with `--mode`.
 
@@ -186,6 +186,50 @@ Set `mode:` in the config, or override with `--mode`.
   Config: `intelligence.ollama.model` + `host`.
 - **Best for:** LLM quality without sending data out.
 - **Trade-off:** needs a capable local machine.
+
+### Mode `gemini_batch` (manual long-context batch)
+Process the whole corpus in one paste-in pass instead of chunking. The model does
+NER + relations over each document whole, so there's no chunk-boundary recall loss,
+no API key, and a 2M-token window (Gemini) eats large documents fast.
+```powershell
+# 1. Write the prompt file(s). --batch-docs caps documents per file: the model's
+#    JSON REPLY length scales with doc count, so this is the anti-truncation knob.
+python main.py --config <cfg> --mode gemini_batch --stage extract --batch-docs 25
+#    -> <run>/gemini_batch_prompt.001.txt, .002.txt, ...
+# 2. In the model, SET MAX OUTPUT TOKENS TO THE MAXIMUM (AI Studio: 65536). Then
+#    upload each prompt; it returns a JSON object keyed by doc id. Save each reply to
+#    the run dir as gemini_batch_response.001.json, ... matching the prompt numbers.
+# 3. Import + build the graph (globs all reply files; flags any doc no reply covered):
+python main.py --config <cfg> --mode gemini_batch --stage analyze
+#    --import-json <path-or-glob> if the replies are saved elsewhere.
+```
+Truncation is the one failure mode: a too-large batch comes back with only the
+first few documents. Keep batches small (`--batch-docs 15-25` for dense first-person
+sources) and max the output-token setting. `--stage analyze` prints `N of M
+documents not covered` if a reply was cut off - re-export those at a smaller
+`--batch-docs` and redo just them.
+
+**`--submit` (no manual paste).** A free Google AI Studio API key turns the whole
+thing into one command - it POSTs each batch to the Gemini API (setting the
+output-token cap the chat UI hides) and runs analyze:
+```powershell
+# one-time: free key at https://aistudio.google.com/apikey
+$env:GEMINI_API_KEY = "AIza..."
+python main.py --config <cfg> --mode gemini_batch --stage extract --batch-docs 25 --submit
+```
+That writes the prompts, calls Gemini for each, writes the replies, imports, and
+builds the graph. `--batch-model gemini-2.5-pro` for higher quality (lower free-tier
+rate limit); default is `gemini-2.5-flash`. A failed/truncated batch is skipped and
+reported - re-run the same command to fill the gaps (analyze flags any missing docs).
+The free tier easily covers a 500-document corpus.
+- The prompt carries the **same** relation ontology, guide, type hints, and qualifier
+  schema as `api`/`ollama` - so domains (InfluenceWatch monetary_value, OREM
+  jurisdiction) work unchanged. The reply tolerates ```code fences``` and split files.
+- **Best for:** large/whole documents, top accuracy, using a subscription chat model
+  with no API wiring.
+- **Trade-off:** manual paste step; NER is the model's (no GLiNER spans, so the
+  within-doc proximity floor is skipped); no live backend means enrichment/LLM-dedup
+  are off (as in python_only).
 
 Switch modes without re-extracting the foundation? Not yet - the mode changes
 extraction, so a mode change means a fresh `extract`. But you can re-run only

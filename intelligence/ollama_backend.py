@@ -60,11 +60,14 @@ class OllamaBackend(IntelligenceBackend):
                 self.cfg.host, exc,
             )
 
-    def _complete(self, system: str, user: str) -> str:
+    def _complete(self, system: str, user: str, schema: dict | None = None) -> str:
         payload = {
             "model": self.cfg.model,
             "stream": False,
-            "format": "json",
+            # Schema-constrained grammar when given (structured_output): the model
+            # can only emit valid JSON of that shape, so reasoning can't leak into
+            # the array slots. Plain "json" mode otherwise.
+            "format": schema if schema else "json",
             # Disable "thinking" so reasoning models (Qwen3.5, etc.) emit clean JSON
             # instead of <think> traces that break parsing. Ignored by models that
             # don't support it.
@@ -104,7 +107,7 @@ class OllamaBackend(IntelligenceBackend):
         import time
         t0 = time.monotonic()
         try:
-            raw = self._complete(self.extraction_system, prompt)
+            raw = self._complete(self.extraction_system, prompt, self._extraction_schema)
             self._consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001
             self._consecutive_failures += 1

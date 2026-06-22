@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Optional
 
 from config import QualityConfig
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _LLM_DROP_BATCH_FRACTION = 0.5    # ignore a batch's drops if it exceeds this share
 _LLM_PROTECT_MENTIONS = 5         # protect entities mentioned at least this often
 _LLM_PROTECT_DOCS = 3             # protect entities spanning at least this many docs
+_LLM_PROTECT_DEGREE = 3           # protect entities anchoring at least this many edges
 
 # Generic terms that are almost never useful standalone entities.
 _STOP_NAMES = {
@@ -198,12 +199,23 @@ class QualityReviewer:
         if not drop_ent and not drop_edge:
             return entities, edges
 
+        # Edge degree: an entity anchoring many relationships is structurally
+        # salient even if it's a mention only once (a person GLiNER tagged once but
+        # the LLM cited as the endpoint of 20 ties). Dropping it cascades to all
+        # those edges - the orphaned-edge failure. mention_count alone misses it.
+        degree: dict[str, int] = defaultdict(int)
+        for r in edges:
+            degree[r.source] += 1
+            degree[r.target] += 1
+
         # Never let the LLM drop a salient entity (author / reference figure /
-        # well-attested). Junk it should drop is low-mention by definition.
+        # well-attested / high-degree). Junk it should drop is low-mention AND
+        # low-degree by definition.
         protected = {
             normalize_name(e.canonical_name) for e in entities
             if e.attributes.get("is_author") or e.attributes.get("reference_figure")
             or e.mention_count >= _LLM_PROTECT_MENTIONS or len(e.doc_ids) >= _LLM_PROTECT_DOCS
+            or degree.get(e.entity_id, 0) >= _LLM_PROTECT_DEGREE
         }
         kept_entities = [
             e for e in entities

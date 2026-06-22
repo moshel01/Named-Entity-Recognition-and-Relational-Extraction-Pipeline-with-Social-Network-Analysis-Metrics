@@ -52,6 +52,17 @@ _BARE_VALUE_RE = re.compile(
 # Model commentary between a string close and the delimiter:
 # `"...house arrest" (implied residence),`. Drop the parenthetical.
 _PAREN_ANNOTATION_RE = re.compile(r'"\s*\([^()"\n]*\)(\s*[,}\]])')
+# Reasoning leaked after a string close via an arrow: `"NSDSP" -> Note: NSDAP is
+# the party. NSV was... assuming standard entities:` running to the array/object
+# close. A weak model thinking out loud inside the JSON. Drop arrow-to-delimiter;
+# the char class excludes quotes/brackets so it can't swallow a following value.
+_ARROW_ANNOTATION_RE = re.compile(r'"\s*->[^"\[\]{}]*?(\s*[,}\]])')
+# Bare prose leaked after a comma inside an array, same line, before the next
+# element: `"Frohlichsein", Frohlichsein is an activity.\n "Liberalismus",`. Only
+# fires when a non-space, non-quote char follows the comma (legit `, "x"` has a
+# quote there, multiline `,\n "x"` has a newline) so it can't eat real values.
+# Leaves a trailing comma the trailing-comma level cleans up.
+_ARRAY_PROSE_RE = re.compile(r',[ \t]*[^\s"\]}][^"\n]*(\r?\n)')
 # A stray sentence-punctuation char the model leaks right after a value's close
 # quote, before the next member: `"...All-powerful;".` then a newline + the next
 # key. `. ; :` are never legal between a value and the next member. Two shapes:
@@ -317,6 +328,22 @@ def _repair_blob(blob: str) -> Optional[Any]:
     fixed47 = _PAREN_ANNOTATION_RE.sub(r'"\1', fixed4)
     try:
         return json.loads(fixed47)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 4.72: arrow-annotation reasoning leak (`"x" -> Note: ...`). Chain off
+    # 4.7 so a blob carrying both annotation shapes is cleaned in one pass.
+    fixed472 = _ARROW_ANNOTATION_RE.sub(r'"\1', fixed47)
+    try:
+        return json.loads(fixed472)
+    except json.JSONDecodeError:
+        pass
+
+    # Level 4.73: bare prose between array elements (weak model commenting on each
+    # alias). Chain off 4.72; trailing comma it leaves is cleaned at the next try.
+    fixed473 = _TRAILING_COMMA_RE.sub(r"\1", _ARRAY_PROSE_RE.sub(r",\1", fixed472))
+    try:
+        return json.loads(fixed473)
     except json.JSONDecodeError:
         pass
 

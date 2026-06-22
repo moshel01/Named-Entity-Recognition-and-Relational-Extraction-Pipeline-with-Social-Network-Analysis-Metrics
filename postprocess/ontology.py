@@ -220,6 +220,52 @@ def check_relation_types(relationships: list[Relationship],
     return out, flagged
 
 
+# Functional properties: at most one true value per subject. A person has one
+# birthplace/birth date/death place; conflicting targets are a contradiction (the
+# narrator-vs-relative birthplace confound, or a misread). Knowledge-alignment noise
+# detection (Hofer et al. 2024) - the global-consistency complement to the per-edge
+# type-signature gate. resided_in/member_of are NOT functional (many residences/orgs).
+FUNCTIONAL_RELATIONS: frozenset[str] = frozenset({
+    "born_in", "birth_date", "date_of_birth", "died_in", "place_of_death",
+    "date_of_death",
+})
+
+
+def check_functional_consistency(
+    relationships: list[Relationship], functional: frozenset[str] | None = None,
+    drop: bool = False,
+) -> tuple[list[Relationship], int]:
+    """Tag (or fuse) functional-property contradictions: a subject with the same
+    functional relation pointing at two different targets. Tags every edge in the
+    conflict `functional_conflict`; with ``drop`` keeps only the best-supported
+    target (most edges, then highest confidence) and drops the rest. Returns the
+    (possibly filtered) list and the count flagged."""
+    from collections import Counter, defaultdict
+    fset = functional or FUNCTIONAL_RELATIONS
+    groups: dict[tuple[str, str], list[Relationship]] = defaultdict(list)
+    for r in relationships:
+        if r.rel_type in fset and r.source and r.target:
+            groups[(r.source, r.rel_type)].append(r)
+
+    flagged = 0
+    drop_ids: set[int] = set()
+    for rels in groups.values():
+        targets = {r.target for r in rels}
+        if len(targets) < 2:
+            continue  # consistent (one target, however many supporting mentions)
+        tc = Counter(r.target for r in rels)
+        best = max(targets, key=lambda t: (tc[t], max(r.confidence for r in rels
+                                                       if r.target == t)))
+        for r in rels:
+            r.attributes["functional_conflict"] = True
+            flagged += 1
+            if drop and r.target != best:
+                drop_ids.add(id(r))
+    out = ([r for r in relationships if id(r) not in drop_ids]
+           if drop and drop_ids else relationships)
+    return out, flagged
+
+
 def resolve_relation_ontology(config, domain=None) -> dict[str, list[str]]:
     """Active relation ontology: config, else domain, else the generic default
     (unless ontology is disabled, which means free-form relations)."""

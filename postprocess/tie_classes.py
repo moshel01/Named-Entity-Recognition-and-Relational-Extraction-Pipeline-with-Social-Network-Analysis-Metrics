@@ -29,6 +29,23 @@ _REL_CLASS: dict[str, str] = {
     # two-mode projection: A and B share a formal group (org/event). An affiliation
     # tie in the SNA sense (Breiger), though derived, not a direct interaction.
     "co_affiliated": "affiliation",
+    # Modern-influence / disaster-response domains: governance, corporate structure,
+    # and money/resource flows. Classed here EXPLICITLY (not via the target-label
+    # fallback) so they survive even when an endpoint label fails to resolve - the
+    # fallback returns "other" with a missing label and the tie drops out of the
+    # substantive network. Governance + structure feed the board/agency co-membership
+    # projection (the spec's intent); flows stay substantive directed ties.
+    "board_member_of": "affiliation", "director_of": "affiliation",
+    "chairs": "affiliation", "affiliated_with": "affiliation",
+    "owns": "affiliation", "owned_by": "affiliation", "controls": "affiliation",
+    "subsidiary_of": "affiliation", "fiscal_sponsor_of": "affiliation",
+    "project_of": "affiliation", "part_of": "affiliation", "reports_to": "affiliation",
+    "managed": "affiliation", "operates_in": "affiliation",
+    "funded": "affiliation", "donated_to": "affiliation", "granted": "affiliation",
+    "provided_resources_to": "affiliation", "contracted": "affiliation",
+    "coordinated_with": "affiliation",
+    # advisory influence is a stance (ideological), not an org membership.
+    "advised": "stance",
     # participation (person/org->event) - incl. multi-agency disaster response,
     # where an agency that responded to a disaster is "participating" in it.
     "participated_in": "participation", "fought_in": "participation",
@@ -166,7 +183,10 @@ _CONNECTION: dict[str, str] = {
     "employed_by": "physical", "worked_for": "physical", "served_with": "physical",
     "served_in": "physical", "fought_against": "physical", "fought_in": "physical",
     "wounded_at": "physical", "commanded": "physical", "recruited": "physical",
-    "imprisoned_by": "physical", "appointed_by": "physical", "promoted_to": "physical",
+    "imprisoned_by": "physical", "appointed_by": "physical",
+    # a rank promotion is a biographical attribute (person->rank), not a physical
+    # connection between two actors.
+    "promoted_to": "biographical",
     # money/material/operational flows are a physical (direct, material) connection.
     "funded": "physical", "donated_to": "physical", "granted": "physical",
     "coordinated_with": "physical", "provided_resources_to": "physical",
@@ -180,6 +200,16 @@ _CONNECTION: dict[str, str] = {
     "founded": "organizational", "studied_at": "organizational",
     "expelled_from": "organizational", "subordinate_to": "organizational",
     "co_affiliated": "organizational",
+    # governance / corporate structure (InfluenceWatch, OREM) - organizational ties.
+    "board_member_of": "organizational", "director_of": "organizational",
+    "chairs": "organizational", "affiliated_with": "organizational",
+    "owns": "organizational", "owned_by": "organizational", "controls": "organizational",
+    "subsidiary_of": "organizational", "fiscal_sponsor_of": "organizational",
+    "project_of": "organizational", "part_of": "organizational",
+    "reports_to": "organizational", "managed": "organizational",
+    "operates_in": "organizational", "advised": "ideological",
+    # taking part in an event is a physical/material involvement.
+    "participated_in": "physical",
     "born_in": "biographical", "resided_in": "biographical", "located_in": "biographical",
     "lived_in": "biographical", "died_in": "biographical",
     "co_occurs_with": "cooccurrence", "alias_of": "none",

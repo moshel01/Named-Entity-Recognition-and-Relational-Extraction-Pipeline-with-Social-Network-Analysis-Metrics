@@ -30,6 +30,84 @@ def _is_narrator(e: Entity) -> bool:
         normalize_name(e.canonical_name).startswith("narrator")
 
 
+def link_known_authors(
+    entities: list[Entity], relationships: list[Relationship],
+    min_len: int = 4, max_merges: int | None = None,
+) -> tuple[list[Entity], list[Relationship]]:
+    """Fold a lone surname mention into the author it UNIQUELY names, across letters.
+
+    Runs after dedup (endpoints are entity ids). The known authors are a closed name
+    registry; a single-token PERSON whose surname matches exactly one author AND no
+    other person in the corpus is the cross-letter reference generic fuzzy dedup can't
+    catch (surname-vs-fullname ratio is too low to merge safely on its own). Strict
+    zero-ambiguity: if any other person shares the surname, skip - that's the whole
+    point of the guard. Full-name variants already merge in dedup, so this only acts
+    on bare surnames."""
+    authors = [e for e in entities if e.label == "PERSON" and (e.attributes or {}).get("is_author")]
+    if not authors:
+        return entities, relationships
+
+    def surname(name: str) -> str:
+        toks = normalize_name(name).split()
+        return toks[-1] if toks else ""
+
+    # Surname -> the authors carrying it; and the full set of persons per surname, so
+    # a surname shared by more than one person (author or not) is never auto-linked.
+    auth_by_surname: dict[str, list[Entity]] = {}
+    persons_by_surname: dict[str, int] = {}
+    for e in entities:
+        if e.label != "PERSON":
+            continue
+        sn = surname(e.canonical_name)
+        if not sn:
+            continue
+        persons_by_surname[sn] = persons_by_surname.get(sn, 0) + 1
+        if (e.attributes or {}).get("is_author"):
+            auth_by_surname.setdefault(sn, []).append(e)
+
+    remap: dict[str, str] = {}  # mention entity_id -> author entity_id
+    drop_ids: set[str] = set()
+    merges = 0
+    for e in entities:
+        if e.label != "PERSON" or (e.attributes or {}).get("is_author"):
+            continue
+        norm = normalize_name(e.canonical_name)
+        toks = norm.split()
+        if len(toks) != 1 or len(norm) < min_len:   # bare surname only
+            continue
+        sn = toks[0]
+        cands = auth_by_surname.get(sn, [])
+        # Unique author AND this surname belongs to no one else (the mention itself
+        # counts once, so a unique author surname yields exactly 2: author + mention).
+        if len(cands) != 1 or persons_by_surname.get(sn, 0) > 2:
+            continue
+        author = cands[0]
+        if author.entity_id == e.entity_id:
+            continue
+        if max_merges is not None and merges >= max_merges:
+            break
+        if e.canonical_name not in author.aliases:
+            author.aliases.append(e.canonical_name)
+        author.mention_count += e.mention_count
+        author.doc_ids = sorted(set(author.doc_ids) | set(e.doc_ids))
+        remap[e.entity_id] = author.entity_id
+        drop_ids.add(e.entity_id)
+        merges += 1
+
+    if not remap:
+        return entities, relationships
+    new_entities = [e for e in entities if e.entity_id not in drop_ids]
+    new_rels: list[Relationship] = []
+    for r in relationships:
+        r.source = remap.get(r.source, r.source)
+        r.target = remap.get(r.target, r.target)
+        if r.source == r.target:
+            continue
+        new_rels.append(r)
+    logger.info("Author anchoring: linked %d surname mention(s) to their author.", merges)
+    return new_entities, new_rels
+
+
 def resolve_narrator_identities(
     entities: list[Entity], relationships: list[Relationship]
 ) -> tuple[list[Entity], list[Relationship]]:

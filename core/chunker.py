@@ -64,11 +64,14 @@ def chunk_document(
     # longer than max_chars with no boundary at all - hard-split those so no
     # chunk ever exceeds the cap (an oversize chunk silently overflows the LLM
     # context window downstream).
+    # step must be > 0 or the hard-split spins forever; clamp in case a config
+    # slips through with overlap_chars >= max_chars (the validator should catch it).
+    step = max(1, max_chars - overlap_chars)
     bounded: list[tuple[int, int]] = []
     for s_start, s_end in sent_spans:
         while s_end - s_start > max_chars:
             bounded.append((s_start, s_start + max_chars))
-            s_start += max_chars - overlap_chars
+            s_start += step
         bounded.append((s_start, s_end))
     sent_spans = bounded
 

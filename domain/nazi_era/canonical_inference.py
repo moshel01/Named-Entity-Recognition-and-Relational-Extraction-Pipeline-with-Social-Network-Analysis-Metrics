@@ -280,6 +280,9 @@ class MembershipInferenceEngine:
 # rule_extracted -> conservative tier, so it counts as text-asserted, not inferred.
 
 _BIRTH_CUE = re.compile(r"\b(?:geboren|geb\.|gebürtig|gebuertig|born)\b", re.IGNORECASE)
+# Strict: full birth words only. For the edge-evidence path, where a bare "geb." is
+# usually a nee maiden-name marker ("Marie, geb. Krotzki"), not a birth.
+_BIRTH_CUE_STRICT = re.compile(r"\b(?:geboren|gebürtig|gebuertig|born)\b", re.IGNORECASE)
 _RESIDENCE_CUE = re.compile(
     r"\b(?:wohnhaft|wohnte?|ansässig|ansaessig|niedergelassen|lebte?|"
     r"resided?|residing|lived|domiciled)\b", re.IGNORECASE)
@@ -297,11 +300,11 @@ def infer_biographical_edges(
     entities: list[Entity], edges: list[Relationship],
     mentions: list, name_to_id: dict[str, str],
 ) -> list[Relationship]:
-    """Narrator -> place born_in/resided_in edges from birth/residence cues in a
-    LOCATION mention's containing sentence. ``mentions`` carry the sentence and
-    doc_id; ``name_to_id`` resolves a place surface to its surviving entity id."""
-    if not mentions or not name_to_id:
-        return []
+    """Narrator -> place born_in/resided_in edges from birth/residence cues. Two
+    paths: (1) a cue in a LOCATION mention's sentence (chunked NER carries sentences)
+    adds or upgrades an edge; (2) a cue in an author->place located_in edge's EVIDENCE
+    (gemini_batch mentions have no sentence, but edges do) upgrades it in place. Either
+    recovers the born_in/resided_in the LLM flattens to a generic located_in."""
     from postprocess.aggregator import normalize_name
 
     author_of_doc: dict[str, str] = {}
@@ -318,15 +321,24 @@ def infer_biographical_edges(
     if not author_of_doc or not place_ids:
         return []
 
-    # Don't duplicate an author->place biographical edge that already exists.
+    # Don't duplicate an existing born_in/resided_in. A generic located_in is NOT
+    # treated as "already present" - the cue UPGRADES it (below) instead of being
+    # blocked by it. The gemini_batch model labels every place located_in, which used
+    # to suppress this inference entirely and cost born_in/resided_in recall.
     existing: set[tuple[str, str, str]] = {
         (r.source, r.target, r.rel_type) for r in edges
-        if r.rel_type in ("born_in", "resided_in", "located_in", "lived_in")
+        if r.rel_type in ("born_in", "resided_in")
     }
+    located_by_pair: dict[tuple[str, str], Relationship] = {}
+    for r in edges:
+        if r.rel_type in ("located_in", "lived_in"):
+            located_by_pair.setdefault((r.source, r.target), r)
 
     new_edges: list[Relationship] = []
     seen: set[tuple[str, str, str]] = set()
-    for m in mentions:
+    for m in (mentions or []):
+        if not name_to_id:
+            break
         if getattr(m, "label", "") != "LOCATION":
             continue
         sent = (getattr(m, "sentence", "") or "").strip()
@@ -344,7 +356,17 @@ def infer_biographical_edges(
             continue
         rel = "born_in" if birth else "resided_in"
         key = (author_id, place_id, rel)
-        if key in seen or key in existing or (author_id, place_id, "located_in") in existing:
+        if key in seen or key in existing:
+            continue
+        # The model already emitted a generic located_in for this exact pair: the cue
+        # is strong evidence of what it really is, so rewrite that edge in place (keep
+        # its provenance/weight) instead of dropping the signal or duplicating it.
+        up = located_by_pair.get((author_id, place_id))
+        if up is not None:
+            up.rel_type = rel
+            up.attributes["biographical_cue"] = (birth or res).group(0).lower()
+            up.attributes["type_upgraded_from"] = "located_in"
+            seen.add(key)
             continue
         seen.add(key)
         new_edges.append(Relationship(
@@ -354,4 +376,31 @@ def infer_biographical_edges(
             attributes={"edge_source": "rule_extracted",
                         "biographical_cue": (birth or res).group(0).lower()},
         ))
+
+    # Path 2 (mode-agnostic, the gemini_batch recovery): the model already emitted an
+    # author->place located_in whose EVIDENCE states a birth/residence cue. Rewrite it
+    # in place. The edge is already author-sourced (the model attributed it to the
+    # narrator), so skip the relative-birth filter - it would wrongly drop the common
+    # first-person "als Sohn des ... geboren". STRICT birth cue only, so a "geb." nee
+    # marker ("Marie, geb. Krotzki") can't masquerade as a birth.
+    author_ids = set(author_of_doc.values())
+    for r in edges:
+        if r.rel_type not in ("located_in", "lived_in"):
+            continue
+        if r.source not in author_ids or r.target not in place_ids or r.source == r.target:
+            continue
+        ev = (getattr(r, "evidence", "") or "").strip()
+        if not ev:
+            continue
+        birth = _BIRTH_CUE_STRICT.search(ev)
+        res = _RESIDENCE_CUE.search(ev)
+        if not (birth or res):
+            continue
+        rel = "born_in" if birth else "resided_in"
+        if (r.source, r.target, rel) in existing or (r.source, r.target, rel) in seen:
+            continue
+        r.rel_type = rel
+        r.attributes["biographical_cue"] = (birth or res).group(0).lower()
+        r.attributes["type_upgraded_from"] = "located_in"
+        existing.add((r.source, r.target, rel))
     return new_edges

@@ -143,6 +143,19 @@ intelligence:
   # type-violating edges at the source. Only relations with a signature get a hint;
   # loose stance/interaction types are unconstrained. A/B vs type_violations_by_relation.
   type_hints: false
+  # Schema-constrained generation: pass a JSON schema to the backend (ollama
+  # format=<schema>, OpenAI/Gemini json_schema) so a weak local model can't leak
+  # prose into the JSON and lose the whole document. Enforces shape + the entity-type
+  # enum, not the relation vocabulary. Recommended for ollama; anthropic/bedrock
+  # ignore it; gemini_batch already forces JSON.
+  structured_output: false
+  # Recall pass: after chunk-by-chunk extraction, re-prompt over the whole document
+  # for relations the first pass missed (mainly ties whose endpoints fell in different
+  # chunks). The recall half of generate-then-verify; pair with quality.verify_relations.
+  # LLM modes only (one extra call/doc), off by default. gemini_batch already sees whole
+  # docs so it mainly lifts api/ollama. A doc longer than recall_max_chars is skipped.
+  recall_pass: false
+  recall_max_chars: 24000
   # Mode 4 (gemini_batch): docs per emitted prompt file - the anti-truncation knob,
   # since the model's reply length scales with doc count (0 = char-budget only).
   batch_max_docs: 0              # e.g. 25 for dense first-person sources
@@ -155,6 +168,11 @@ intelligence:
   # extraction; frees the whole output budget). <0 keeps the default reasoning on.
   # 2.5-pro can't go below 128, so 0 is bumped to 128 there.
   batch_thinking_budget: 0
+  # gemini_batch extracts from the whole-doc reply, so the post-extraction LLM steps
+  # (dedup.llm_assist / quality.llm_review / enrichment) normally have no backend and
+  # are skipped (you get a warning). Flip this on to run them through Gemini's OpenAI
+  # endpoint with the same key - extra API calls at analyze time, so off by default.
+  batch_post_llm: false
   # Mode 3: ollama
   ollama:
     host: "http://localhost:11434"
@@ -186,6 +204,14 @@ quality:
   min_entity_mentions: 1           # Drop entities seen fewer times than this
   min_edge_weight: 1               # Drop edges with weight below this
   llm_review: "auto"               # "auto" (LLM in api/ollama modes), true, false
+  # LLM relation self-verification: re-check each LLM edge against its evidence
+  # ("does this sentence assert that tie?") and tag verification=supported/unsupported
+  # (filterable in Gephi). Catches what verbatim grounding can't - evidence present
+  # but not actually asserting the relation. LLM modes only (api/ollama, or
+  # gemini_batch with batch_post_llm); extra API calls, so off by default.
+  verify_relations: false
+  verify_drop: false               # true = delete unsupported edges instead of tagging
+  verify_max: 0                    # cap edges verified (0 = all eligible); cost knob
 
 # Inference / canonical edges
 inference:
@@ -240,6 +266,14 @@ ontology:
   # or an org) is tagged type_violation (filterable in Gephi). Only constraining
   # relations have a signature; loose stance/interaction relations are exempt.
   drop_type_violations: false      # true = drop the violations instead of tagging
+  # Functional-property consistency (global, vs the per-edge type gate above): a
+  # subject with the same functional relation (born_in, birth_date, died_in...)
+  # pointing at two different targets is a contradiction. Tag every edge in the
+  # conflict `functional_conflict` (filterable; a column appears only on real
+  # conflicts). On by default (tag only). drop_functional_conflicts keeps just the
+  # best-supported target (most edges, then confidence) - knowledge fusion.
+  check_functional_consistency: true
+  drop_functional_conflicts: false
   # null + no domain -> a built-in generic schema (funded/led/member_of...) so a
   # web crawl gets a usable edge vocabulary instead of a unique verb phrase per
   # edge. Set your own to override; ontology.enabled:false to turn it off.

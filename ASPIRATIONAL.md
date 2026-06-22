@@ -11,10 +11,14 @@ Format per item: **Now** (what we do) / **Unlimited** (what we'd do) / **Why def
 
 ## Extraction quality
 
-### Cross-chunk relation extraction (Chain-of-Agents, Google 2024)
+### Cross-chunk relation extraction (Chain-of-Agents, Google 2024)  [partially shipped]
 - **Now.** Coref is chunk-local; a typed relation between two third parties split
   across chunks is lost. We floor the weak part with window co-occurrence and span
-  the boundary with `chunking.overlap_chars`. This is the recall ceiling.
+  the boundary with `chunking.overlap_chars`. The opt-in `intelligence.recall_pass`
+  re-prompts over the REASSEMBLED whole document (entities + already-found relations
+  in hand) for the ties the per-chunk pass missed - the recall half of an L3X
+  generate-then-verify loop, one extra call per doc. gemini_batch sidesteps the
+  ceiling entirely (whole-doc prompts). The chunk-local coref limit itself remains.
 - **Unlimited.** A Chain-of-Agents pass: one worker agent per chunk, each passing a
   short "communication unit" (entities introduced, open referents) forward to the
   next, a manager agent synthesizing the document-level relation set. This dissolves
@@ -32,17 +36,26 @@ Format per item: **Now** (what we do) / **Unlimited** (what we'd do) / **Why def
   path: turn Wikidata linking on and move it *ahead* of relation extraction, then
   pass the QID descriptions as side information. Today linking is post-extraction.
 
-### Multi-agent verify / align / resolve (KARMA, Lu et al. 2025; AEC, Guo 2026)
+### Multi-agent verify / align / resolve (KARMA, Lu et al. 2025; AEC, Guo 2026)  [partially shipped]
 - **Now.** Deterministic guardrails: `json_repair`, ontology alignment, hallucination
-  guards, one optional LLM quality-review pass. The conflict-detection half of KARMA
-  ships (`graph_metrics._polarity_conflicts`).
+  guards, one optional LLM quality-review pass. The verification half of KARMA ships:
+  `quality.verify_relations` re-checks each LLM edge against its own evidence (tag or
+  drop), `ontology.check_functional_consistency` flags a subject with two different
+  birthplaces/birthdates (knowledge alignment), the type-signature gate rejects edges
+  whose endpoints contradict the relation's argument types, and conflict detection
+  surfaces contradictory dyads (`graph_metrics._polarity_conflicts`). AEC's schema-
+  violation guard ships as `intelligence.structured_output`: a JSON schema constrains
+  generation at the grammar level so the model can't emit invalid structure at all
+  (stronger than re-prompting after the fact). Caveat measured on the pilot: a weak
+  local model is a weak SELF-verifier (it over-rejects valid edges), so verify is most
+  trustworthy with a model at least as strong as the extractor.
 - **Unlimited.** KARMA's full nine-agent loop (entity discovery → relation extraction
   → schema alignment → conflict resolution, each its own LLM with cross-agent
-  verification) and AEC's code-as-class-schema with a verification agent that
-  re-prompts on schema violation.
-- **Why deferred.** Many LLM calls per chunk for iterative refinement. Our own prior
-  review (Serdiukov 2026) found iterative prompting trades latency for little gain on
-  a small local model — worth it only at API scale.
+  verification), each step a separate, ideally STRONGER model than the extractor.
+- **Why deferred.** The full nine-agent loop is many LLM calls per chunk; our own prior
+  review (Serdiukov 2026) found iterative prompting trades latency for little gain on a
+  small local model. The cheap, high-value half (one verify pass + schema constraint)
+  shipped; the rest waits for API scale or a stronger verifier model.
 
 ### Code-based event extraction (SALE 2026; AEC 2026)
 - **Now.** We extract actors + typed ties + a light timeline; the narrative-sequence

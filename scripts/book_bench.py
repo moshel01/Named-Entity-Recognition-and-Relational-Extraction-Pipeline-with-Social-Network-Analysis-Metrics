@@ -49,8 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--book", required=True, help="Plain-text book file (UTF-8).")
     ap.add_argument("--gold", required=True, help="Gold JSON (evaluation schema).")
     ap.add_argument("--name", default="", help="Run tag (default: book filename stem).")
-    ap.add_argument("--mode", default="python_only", choices=["python_only", "ollama"])
+    ap.add_argument("--mode", default="python_only",
+                    choices=["python_only", "ollama", "gemini_batch"])
     ap.add_argument("--ollama-model", default="qwen3.5:9b")
+    ap.add_argument("--batch-docs", type=int, default=4,
+                    help="gemini_batch only: chapters per prompt file. Book chapters "
+                         "are long, so keep this low (4) to avoid reply truncation.")
     ap.add_argument("--limit", type=int, default=0, help="Max chapters (0 = all).")
     ap.add_argument("--resume", action="store_true", help="Continue an interrupted run.")
     ap.add_argument("--constrain-relations", action="store_true",
@@ -140,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd = [sys.executable, "main.py", "--config", str(config_path)]
     if args.resume:
         cmd.append("--resume")
+    # gemini_batch completes only with --submit (whole-chapter extraction via the API).
+    if args.mode == "gemini_batch":
+        cmd += ["--submit", "--batch-docs", str(args.batch_docs)]
     print("RUN :", " ".join(cmd))
     rc = subprocess.call(cmd)
     if rc != 0:

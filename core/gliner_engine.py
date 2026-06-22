@@ -96,12 +96,8 @@ class GlinerEngine:
             pos += step
         return windows
 
-    def _predict(self, text: str) -> list[dict]:
-        """Run GLiNER2 and normalize to a list of {text,label,start,end,score}."""
-        with contextlib.redirect_stdout(io.StringIO()):
-            res = self.model.extract_entities(
-                text, self.labels, include_spans=True, include_confidence=True
-            )
+    def _parse_result(self, res: dict) -> list[dict]:
+        """Normalize one GLiNER2 result to [{text,label,start,end,score}]."""
         out: list[dict] = []
         for label, items in (res.get("entities") or {}).items():
             for it in items or []:
@@ -117,6 +113,22 @@ class GlinerEngine:
                             "start": start, "end": end, "score": score})
         return out
 
+    def _predict(self, text: str) -> list[dict]:
+        """Run GLiNER2 and normalize to a list of {text,label,start,end,score}."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = self.model.extract_entities(
+                text, self.labels, include_spans=True, include_confidence=True
+            )
+        return self._parse_result(res)
+
+    def _predict_batch(self, texts: list[str]) -> list[list[dict]]:
+        """One GPU call for many windows. Caller falls back to per-window on error."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self.model.batch_extract_entities(
+                texts, self.labels, include_spans=True, include_confidence=True
+            )
+        return [self._parse_result(r) for r in results]
+
     def extract(
         self,
         text: str,
@@ -126,12 +138,25 @@ class GlinerEngine:
     ) -> list[EntityMention]:
         """Extract entity mentions from chunk ``text``."""
         seen: dict[tuple[int, int], EntityMention] = {}
-        for win_offset, win_text in self._windows(text):
+        windows = self._windows(text)
+        # Batch a multi-window chunk in one GPU call; fall back to per-window on any
+        # error so a batch-API mismatch can never break NER (it only speeds it up).
+        batched: list[list[dict]] | None = None
+        if len(windows) > 1:
             try:
-                preds = self._predict(win_text)
+                batched = self._predict_batch([w for _, w in windows])
             except Exception as exc:  # noqa: BLE001
-                logger.warning("GLiNER2 prediction failed on a window: %s", exc)
-                continue
+                logger.warning("GLiNER2 batch predict failed (%s); per-window.", exc)
+                batched = None
+        for i, (win_offset, win_text) in enumerate(windows):
+            if batched is not None:
+                preds = batched[i]
+            else:
+                try:
+                    preds = self._predict(win_text)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("GLiNER2 prediction failed on a window: %s", exc)
+                    continue
             for p in preds:
                 abs_start = offset + win_offset + p["start"]
                 abs_end = offset + win_offset + p["end"]

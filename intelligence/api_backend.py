@@ -61,12 +61,12 @@ class ApiBackend(IntelligenceBackend):
         raise ValueError(f"Unknown provider: {self.provider}")
 
     # Unified completion
-    def _complete(self, system: str, user: str) -> str:
+    def _complete(self, system: str, user: str, schema: dict | None = None) -> str:
         """Send a (system, user) prompt and return the raw text response."""
         last_exc: Exception | None = None
         for attempt in range(self.cfg.max_retries):
             try:
-                return self._complete_once(system, user)
+                return self._complete_once(system, user, schema)
             except Exception as exc:  # noqa: BLE001 - provider-specific transient errors
                 last_exc = exc
                 wait = min(2 ** attempt, 30)
@@ -77,7 +77,7 @@ class ApiBackend(IntelligenceBackend):
                 time.sleep(wait)
         raise RuntimeError(f"API completion failed after retries: {last_exc}")
 
-    def _complete_once(self, system: str, user: str) -> str:
+    def _complete_once(self, system: str, user: str, schema: dict | None = None) -> str:
         if self.provider == "anthropic":
             resp = self._client.messages.create(
                 model=self.cfg.model,
@@ -99,7 +99,18 @@ class ApiBackend(IntelligenceBackend):
                     {"role": "user", "content": user},
                 ],
             )
-            if self.cfg.json_mode:
+            if schema is not None:
+                # json_schema guides generation on hosts that support it (OpenAI,
+                # Gemini's OpenAI endpoint). non-strict: strict mode demands every
+                # property be required + additionalProperties:false, too rigid for
+                # our optional fields. Hosts that ignore it fall back to plain text,
+                # which json_repair still handles.
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "extraction", "schema": schema,
+                                    "strict": False},
+                }
+            elif self.cfg.json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
             resp = self._client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
@@ -138,7 +149,7 @@ class ApiBackend(IntelligenceBackend):
                                          relation_guide=self.relation_guide or None,
                                          edge_qualifiers=self.edge_qualifiers or None,
                                          type_signatures=self.type_signatures or None)
-        raw = self._complete(self.extraction_system, prompt)
+        raw = self._complete(self.extraction_system, prompt, self._extraction_schema)
         obj = repair_json(raw)
         if obj is None:
             logger.warning("Unparseable LLM output for chunk %s; using candidates.", chunk_id)

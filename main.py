@@ -47,12 +47,33 @@ console = Console()
 
 
 # Backend factory
+def gemini_live_config(config: Config) -> Config:
+    """A config copy whose `api` block points at Gemini's OpenAI-compatible endpoint,
+    so an ApiBackend can run the post-extraction LLM steps (dedup/review/enrich) in
+    gemini_batch mode with the same --submit key. Pure (no I/O) so it's testable."""
+    ic = config.intelligence
+    cfg = config.model_copy(deep=True)
+    api = cfg.intelligence.api
+    api.provider = "openai"
+    api.base_url = ic.batch_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
+    api.model = ic.batch_model
+    api.api_key_env = ic.batch_api_key_env
+    api.json_mode = True
+    api.max_tokens = max(api.max_tokens, 8192)  # headroom for flash thinking + the JSON
+    return cfg
+
+
 def build_backend(config: Config, foundation: FoundationLayer, domain=None) -> IntelligenceBackend:
     """Instantiate the intelligence backend for the configured mode."""
     mode = config.mode
     if mode == "api":
         from intelligence.api_backend import ApiBackend
         return ApiBackend(config, domain=domain)
+    if mode == "gemini_batch":
+        # Extraction came from the batch reply; this backend is only for the post-
+        # extraction LLM steps (dedup/review/enrich) via Gemini's OpenAI endpoint.
+        from intelligence.api_backend import ApiBackend
+        return ApiBackend(gemini_live_config(config), domain=domain)
     if mode == "ollama":
         from intelligence.ollama_backend import OllamaBackend
         return OllamaBackend(config, domain=domain)
@@ -142,10 +163,12 @@ class Pipeline:
     # Mode 4: manual batch (gemini_batch). Export one self-contained prompt holding
     # whole documents, paste it into a long-context model, import the JSON reply.
     def run_batch_export(self, limit: int, extra_urls, urls_file, text, crawl_seeds,
-                         submit: bool = False) -> bool:
+                         submit: bool = False, resume: bool = False) -> bool:
         """Write the batch prompt file(s). With submit=True, POST each to the Gemini
-        API and write the reply files too (no manual paste). Returns True if any
-        reply was written (so run() can continue straight to analyze)."""
+        API and write the reply files too (no manual paste). With resume=True the
+        submit step skips batches whose reply is already on disk and complete, so an
+        interrupted/rate-limited run continues without re-paying for done batches.
+        Returns True if any reply was written (so run() can continue to analyze)."""
         from intelligence.manual_batch import build_batch_prompt, extraction_spec
         documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds)
         if not documents:
@@ -182,7 +205,7 @@ class Pipeline:
         )
 
         if submit:
-            return self._submit_batches(prompts, stem)
+            return self._submit_batches(prompts, stem, resume=resume)
 
         if per > 40:
             console.print(f"[yellow]~{per} docs/file may truncate the reply. Re-run with "
@@ -198,8 +221,13 @@ class Pipeline:
         )
         return False
 
-    def _submit_batches(self, prompts, stem) -> bool:
-        """POST each batch prompt to the Gemini API, writing the reply files."""
+    def _submit_batches(self, prompts, stem, resume: bool = False) -> bool:
+        """POST each batch prompt to the Gemini API, writing the reply files. With
+        resume, a batch whose reply file already exists and parses as complete JSON
+        is skipped (the reply file IS the checkpoint), so an interrupted run picks up
+        where it stopped. A truncated/partial reply does not parse -> it is re-POSTed.
+        Resume assumes the same --batch-docs/--batch-budget (batch boundaries must
+        line up with the saved files)."""
         import os
 
         from intelligence.manual_batch import submit_to_gemini
@@ -211,8 +239,13 @@ class Pipeline:
                           f"  $env:{ic.batch_api_key_env} = \"...\"[/red]")
             sys.exit(2)
         from tqdm import tqdm
-        ok = 0
+        ok = skipped = 0
         for i, pr in enumerate(tqdm(prompts, desc="Gemini", unit="batch"), 1):
+            out_path = self.run_dir / stem(i, "response", "json")
+            if resume and self._reply_complete(out_path):
+                skipped += 1
+                ok += 1
+                continue
             try:
                 reply = submit_to_gemini(
                     pr, key, model=ic.batch_model, base_url=ic.batch_base_url,
@@ -222,20 +255,49 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 - one batch failing must not kill the rest
                 console.print(f"[red]Batch {i} failed: {exc}[/red]")
                 continue
-            (self.run_dir / stem(i, "response", "json")).write_text(reply, encoding="utf-8")
+            out_path.write_text(reply, encoding="utf-8")
             ok += 1
-        console.print(f"[green]Gemini returned {ok}/{len(prompts)} batches "
-                      f"(model={ic.batch_model}).[/green]")
+        done = f"[green]Gemini: {ok}/{len(prompts)} batches done"
+        if skipped:
+            done += f" ({skipped} already on disk, skipped)"
+        console.print(done + f" (model={ic.batch_model}).[/green]")
         if ok < len(prompts):
-            console.print("[yellow]Some batches failed - analyze will flag the missing "
-                          "docs; re-run --stage extract --submit to retry them.[/yellow]")
+            console.print("[yellow]Some batches failed - re-run with --resume to retry "
+                          "only the missing ones; analyze flags any uncovered docs.[/yellow]")
         return ok > 0
 
-    def run_batch_import(self, ckpt: CheckpointManager, import_json: str,
+    @staticmethod
+    def _reply_complete(path: Path) -> bool:
+        """True if a saved reply exists and is complete (strict-parses). A truncated
+        reply fails the strict parse, so it is treated as not-done and re-submitted."""
+        import json
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+            return True
+        except (ValueError, OSError):
+            return False
+
+    def run_batch_import(self, ckpt: CheckpointManager,
+                         import_json: tuple[str, ...] | str,
                          limit: int, extra_urls, urls_file, text, crawl_seeds) -> None:
         from intelligence.manual_batch import extraction_spec, parse_batch_response
+        if isinstance(import_json, str):
+            import_json = (import_json,) if import_json else ()
         if import_json:
-            files = sorted(Path().glob(import_json)) or [Path(import_json)]
+            # Each value is a file, a directory (glob the standard reply name
+            # inside it), or a glob pattern. Directory form avoids the Git Bash
+            # glob-expansion trap (shell splits *.json into N positional args).
+            files: list[Path] = []
+            for pat in import_json:
+                p = Path(pat)
+                if p.is_dir():
+                    files.extend(sorted(p.glob("gemini_batch_response*.json")))
+                else:
+                    expanded = sorted(Path().glob(pat))
+                    files.extend(expanded or [p])
+            files = sorted(set(files))
         else:
             files = sorted(self.run_dir.glob("gemini_batch_response*.json"))
         files = [f for f in files if f.exists()]
@@ -451,7 +513,44 @@ class Pipeline:
             agg.entities, agg.relationships
         )
 
+        # Cross-document author anchoring: fold a lone surname uniquely naming one
+        # author into that author node (forges the cross-letter edge). After dedup so
+        # endpoints are ids; zero-ambiguity + capped.
+        if self.config.inference.link_known_authors:
+            from postprocess.identity_resolution import link_known_authors
+            entities, relationships = link_known_authors(
+                entities, relationships,
+                min_len=self.config.inference.link_known_authors_min_len)
+
         llm_capable = self.config.mode in ("api", "ollama")
+        ic = self.config.intelligence
+        # gemini_batch can run the post-extraction LLM steps through Gemini's OpenAI
+        # endpoint when batch_post_llm is on AND the --submit key is set (else building
+        # the backend would raise). Opt-in: it's extra API calls at analyze time.
+        batch_llm_ready = (self.config.mode == "gemini_batch" and ic.batch_post_llm
+                           and bool(os.environ.get(ic.batch_api_key_env)))
+        if batch_llm_ready:
+            llm_capable = True
+            console.print("[cyan]gemini_batch: running dedup/review/enrichment through "
+                          f"{ic.batch_model} (batch_post_llm).[/cyan]")
+
+        # Surface the silent gap: without a live backend any LLM-assisted post-step the
+        # config asks for is skipped. Tell the user which, so a domain run isn't quietly
+        # weaker than its config implies. (gemini_batch's win is whole-doc extraction.)
+        if not llm_capable:
+            wants = []
+            if self.config.dedup.llm_assist:
+                wants.append("dedup.llm_assist")
+            if self.config.quality.llm_review is True or self.config.quality.llm_review == "auto":
+                wants.append("quality.llm_review")
+            if self.config.enrichment.enabled:
+                wants.append("enrichment")
+            if wants:
+                hint = ("set batch_post_llm + $%s" % ic.batch_api_key_env
+                        if self.config.mode == "gemini_batch" else "run in ollama/api mode")
+                console.print(f"[yellow]Mode '{self.config.mode}' has no live LLM backend - "
+                              f"skipping {', '.join(wants)} (rule-based dedup/review still run). "
+                              f"To use them, {hint}.[/yellow]")
 
         # 2a1. Drop alias_of leftovers - a dedup artifact, not a social edge.
         relationships = [r for r in relationships if r.rel_type != "alias_of"]
@@ -490,6 +589,33 @@ class Pipeline:
             if n_typeviol:
                 verb = "Dropped" if self.config.ontology.drop_type_violations else "Tagged"
                 console.print(f"[cyan]{verb} {n_typeviol} type-signature violations.[/cyan]")
+
+            # 2a3b. Functional-property consistency: a subject with one functional
+            # relation (born_in, ...) pointing at two targets is a contradiction.
+            if self.config.ontology.check_functional_consistency:
+                from postprocess.ontology import check_functional_consistency
+                relationships, n_fc = check_functional_consistency(
+                    relationships, drop=self.config.ontology.drop_functional_conflicts)
+                if n_fc:
+                    verb = "Dropped from" if self.config.ontology.drop_functional_conflicts else "Tagged"
+                    console.print(f"[cyan]{verb} {n_fc} functional-property "
+                                  "conflicts (functional_conflict).[/cyan]")
+
+        # 2a4. Relation self-verification: re-check each LLM edge against its evidence
+        # (does the sentence actually assert that tie?). The post-hoc half of accuracy;
+        # tags verification=supported/unsupported (or drops). LLM modes only.
+        if self.config.quality.verify_relations and llm_capable:
+            from postprocess.relation_verify import verify_relations
+            id_to_name = {e.entity_id: e.canonical_name for e in entities}
+            relationships, n_unsup = verify_relations(
+                relationships, self.backend, id_to_name,
+                batch_size=self.config.quality.verify_batch_size,
+                max_relations=self.config.quality.verify_max,
+                drop=self.config.quality.verify_drop)
+            if n_unsup:
+                verb = "Dropped" if self.config.quality.verify_drop else "Tagged"
+                console.print(f"[cyan]{verb} {n_unsup} evidence-unsupported relations "
+                              "(verification).[/cyan]")
 
         # 2b. LLM-assisted dedup: merge same-entity nodes the rules missed.
         if self.config.dedup.llm_assist and llm_capable:
@@ -707,7 +833,7 @@ class Pipeline:
     # Full run
     def run(self, stage: str, resume: bool, limit: int = 0,
             extra_urls: tuple[str, ...] = (), urls_file: str = "", text: str = "",
-            crawl_seeds: tuple[str, ...] = (), import_json: str = "",
+            crawl_seeds: tuple[str, ...] = (), import_json: tuple[str, ...] | str = "",
             submit: bool = False) -> None:
         self._write_run_meta(stage, resume, limit)
         ckpt = CheckpointManager(
@@ -721,7 +847,7 @@ class Pipeline:
         if self.config.mode == "gemini_batch":
             if stage in ("all", "ingest", "extract"):
                 submitted = self.run_batch_export(limit, extra_urls, urls_file, text,
-                                                  crawl_seeds, submit=submit)
+                                                  crawl_seeds, submit=submit, resume=resume)
                 # Manual path (or ingest, or submit produced nothing): stop after
                 # writing prompts. With --submit the replies are already on disk, so
                 # fall through to import + analyze for a single end-to-end command.
@@ -771,9 +897,10 @@ class Pipeline:
               help="Resume from existing checkpoint, skipping completed documents.")
 @click.option("--mode", type=click.Choice(["api", "python_only", "ollama", "langextract", "gemini_batch"]), default=None,
               help="Override the execution mode from the config.")
-@click.option("--import-json", "import_json", default="",
-              help="gemini_batch: path/glob to the model's JSON reply to import at "
-                   "--stage analyze (default: <run>/gemini_batch_response*.json).")
+@click.option("--import-json", "import_json", multiple=True,
+              help="gemini_batch: reply JSON to import at --stage analyze. Pass a "
+                   "directory (globs gemini_batch_response*.json inside it), a file, "
+                   "or repeat the flag. Default: <run>/gemini_batch_response*.json.")
 @click.option("--batch-budget", "batch_budget", type=int, default=None,
               help="gemini_batch: chars of document text per prompt file (override "
                    "intelligence.batch_char_budget). Lower it for more, smaller "
@@ -793,6 +920,23 @@ class Pipeline:
                    "intelligence.batch_thinking_budget). 0 = off (default; frees the "
                    "output budget for JSON so the reply doesn't truncate). <0 keeps "
                    "the model's default reasoning on.")
+@click.option("--verify-relations", "verify_relations", is_flag=True, default=False,
+              help="Turn on quality.verify_relations: the LLM re-checks each edge "
+                   "against its evidence (tags verification=supported/unsupported). "
+                   "LLM modes (api/ollama, or gemini_batch with --batch-post-llm).")
+@click.option("--recall-pass", "recall_pass", is_flag=True, default=False,
+              help="Turn on intelligence.recall_pass: re-prompt over the whole doc for "
+                   "cross-chunk relations the first pass missed (chunked LLM modes).")
+@click.option("--link-authors", "link_authors", is_flag=True, default=False,
+              help="Turn on inference.link_known_authors: fold a lone surname uniquely "
+                   "naming one author into that author node (cross-document edges).")
+@click.option("--batch-post-llm", "batch_post_llm", is_flag=True, default=False,
+              help="gemini_batch: run dedup/review/enrich/verify through Gemini's "
+                   "OpenAI endpoint with the --submit key (intelligence.batch_post_llm).")
+@click.option("--structured-output", "structured_output", is_flag=True, default=False,
+              help="Turn on intelligence.structured_output: schema-constrain the "
+                   "extraction call (ollama format-schema / OpenAI json_schema) so a "
+                   "weak model can't leak prose into the JSON. Recommended for ollama.")
 @click.option("--limit", type=int, default=0,
               help="Process only the first N documents (handy for quick test runs).")
 @click.option("--url", "urls", multiple=True,
@@ -818,8 +962,10 @@ class Pipeline:
               "e.g. to A/B models without overwriting each other.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose (DEBUG) logging.")
 def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
-        import_json: str, batch_budget: Optional[int], batch_docs: Optional[int],
+        import_json: tuple[str, ...], batch_budget: Optional[int], batch_docs: Optional[int],
         submit: bool, batch_model: str, batch_thinking: Optional[int],
+        verify_relations: bool, recall_pass: bool, link_authors: bool,
+        batch_post_llm: bool, structured_output: bool,
         limit: int, urls: tuple[str, ...], urls_file: str,
         crawl_seeds: tuple[str, ...], crawl_max_pages: Optional[int],
         crawl_max_depth: Optional[int], direct_text: str,
@@ -846,6 +992,17 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
     if min_entity_confidence is not None:
         config.quality.min_entity_confidence = min_entity_confidence
         console.print(f"[cyan]Override: quality.min_entity_confidence = {min_entity_confidence}[/cyan]")
+    # Feature toggles (A/B testing) - all four default off in config.
+    if verify_relations:
+        config.quality.verify_relations = True
+    if recall_pass:
+        config.intelligence.recall_pass = True
+    if link_authors:
+        config.inference.link_known_authors = True
+    if batch_post_llm:
+        config.intelligence.batch_post_llm = True
+    if structured_output:
+        config.intelligence.structured_output = True
     if ollama_model:
         config.intelligence.ollama.model = ollama_model
     if batch_budget is not None:

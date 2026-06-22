@@ -33,6 +33,13 @@ def test_json_repair() -> None:
         ("truncated", '{"a": [1, 2', {"a": [1, 2]}),
         ("dangling key", '{"a": 1, "b":', {"a": 1}),
         ("paren annotation", '{"e": "arrest" (implied), "k": 2}', {"e": "arrest", "k": 2}),
+        # Weak model leaks reasoning into the JSON: an arrow note after a string,
+        # and bare prose between array elements. Both lost the whole doc before.
+        ("arrow annotation", '{"aliases": ["NSV", "NSDSP" -> Note: a typo for NSDAP]}',
+         {"aliases": ["NSV", "NSDSP"]}),
+        ("array element prose",
+         '{"aliases": [\n"Froh", Froh is an activity.\n"Lib", refers to the party.\n]}',
+         {"aliases": ["Froh", "Lib"]}),
         # Stray sentence punctuation the model leaks after a value's close quote,
         # before the next key (`"...powerful;".` then a newline + "confidence").
         ("stray dot after value", '{"e": "all-powerful;".\n  "k": 2}',
@@ -996,6 +1003,35 @@ def test_polarity_conflicts() -> None:
           s["positive"] == ["allied_with"] and s["negative"] == ["fought_against"], str(s))
 
 
+def test_unsupported_excluded_from_substantive() -> None:
+    # Edges the relation verifier flagged "unsupported" stay in the export (tagged)
+    # but must not drive brokerage / bridges / signed balance. They were inflating
+    # the substantive graph - 9% of substantive edges on the Abel pilot, 40 phantom
+    # bridges. Gated: no-op when verification field is empty (verify did not run).
+    from postprocess.graph_metrics import _build_graph, _signed_balance, _polarity_conflicts
+    print("-- unsupported edges excluded from substantive analytics")
+    nodes = ["A", "B", "C"]
+    edges = [
+        {"Source": "A", "Target": "B", "tie_class": "affiliation", "verification": ""},
+        # The only edge tying C in is unsupported -> dropping it isolates C.
+        {"Source": "B", "Target": "C", "tie_class": "affiliation", "verification": "unsupported"},
+    ]
+    g_keep = _build_graph(nodes, edges, {"affiliation"}, drop_unsupported=False)
+    g_drop = _build_graph(nodes, edges, {"affiliation"}, drop_unsupported=True)
+    check("kept: unsupported edge present", g_keep.number_of_edges() == 2, str(g_keep.number_of_edges()))
+    check("dropped: unsupported edge gone", g_drop.number_of_edges() == 1, str(g_drop.number_of_edges()))
+    check("dropped: C isolated", g_drop.degree("C") == 0, str(g_drop.degree("C")))
+
+    # An unsupported stance edge must not create a phantom polarity conflict.
+    sedges = [
+        {"Source": "X", "Target": "Y", "polarity": "positive", "rel_type": "supported", "verification": "unsupported"},
+        {"Source": "X", "Target": "Y", "polarity": "negative", "rel_type": "fought_against", "verification": "supported"},
+    ]
+    filt = [e for e in sedges if e.get("verification") != "unsupported"]
+    c = _polarity_conflicts(filt)
+    check("phantom conflict removed", c["conflicting_dyads"] == 0, str(c))
+
+
 def test_causal_tie_class() -> None:
     from postprocess import tie_classes
     from postprocess.ontology import OntologyAligner, GENERIC_RELATION_ONTOLOGY
@@ -1211,6 +1247,158 @@ def test_biographical_inference() -> None:
         ents, [Relationship(source="a1", target="p1", rel_type="born_in", doc_id="d1")],
         [M("Berlin", "Geboren in Berlin.")], name_to_id)
     check("existing biographical edge not duplicated", dup == [], str(dup))
+    # Upgrade: the model already emitted a generic located_in for the birthplace; the
+    # cue rewrites it in place to born_in instead of being blocked (the gemini_batch
+    # gap that cost typed recall). Edge mutated, not duplicated.
+    loc = Relationship(source="a1", target="p1", rel_type="located_in", doc_id="d1",
+                       attributes={"edge_source": "llm_extracted"})
+    up = infer_biographical_edges(ents, [loc],
+                                  [M("Berlin", "Geboren bin ich in Berlin.")], name_to_id)
+    check("located_in upgraded in place to born_in", loc.rel_type == "born_in", loc.rel_type)
+    check("upgrade adds no duplicate edge", up == [], str(up))
+    check("upgrade tagged with origin type",
+          loc.attributes.get("type_upgraded_from") == "located_in", str(loc.attributes))
+    # Batch path: NO mentions (gemini_batch gives none with sentences), but the
+    # located_in edge's evidence carries the cue. The first-person "als Sohn des ...
+    # geboren" must still upgrade (relative-filter skipped on an author-sourced edge).
+    loc2 = Relationship(source="a1", target="p1", rel_type="located_in", doc_id="d1",
+                        evidence="Bin am 18.2.1898 als Sohn des Adolf in Berlin geboren.",
+                        attributes={"edge_source": "llm_extracted"})
+    ev = infer_biographical_edges(ents, [loc2], [], name_to_id)
+    check("evidence cue upgrades located_in (batch, no mentions)",
+          loc2.rel_type == "born_in", loc2.rel_type)
+    check("evidence upgrade adds no new edge", ev == [], str(ev))
+    # A bare nee 'geb.' (maiden name) is NOT a birth - must not upgrade.
+    loc3 = Relationship(source="a1", target="p2", rel_type="located_in", doc_id="d1",
+                        evidence="Meine Mutter Marie, geb. Krotzki, stammte aus Hamburg.",
+                        attributes={"edge_source": "llm_extracted"})
+    infer_biographical_edges(ents, [loc3], [], name_to_id)
+    check("nee 'geb.' does not upgrade", loc3.rel_type == "located_in", loc3.rel_type)
+
+
+def test_author_anchoring() -> None:
+    from core.schema import Entity, Relationship
+    from postprocess.identity_resolution import link_known_authors
+    print("-- cross-doc author anchoring")
+
+    def E(eid, name, author=False, docs=("d1",)):
+        return Entity(entity_id=eid, canonical_name=name, label="PERSON",
+                      doc_ids=list(docs), attributes={"is_author": True} if author else {})
+
+    # Author "August Spanku" (letter B); a lone "Spanku" in letter A is the same person.
+    auth = E("a_sp", "August Spanku", author=True, docs=("dB",))
+    mention = E("m_sp", "Spanku", docs=("dA",))
+    other = E("p_hans", "Hans Vogel", docs=("dA",))
+    rels = [Relationship(source="p_hans", target="m_sp", rel_type="fought_with", doc_id="dA")]
+    ents, out = link_known_authors([auth, mention, other], rels)
+    ids = {e.entity_id for e in ents}
+    check("surname mention folded into author", "m_sp" not in ids, str(ids))
+    check("edge remapped to author", out and out[0].target == "a_sp", str(out))
+    check("alias recorded on author", "Spanku" in auth.aliases, str(auth.aliases))
+    # Ambiguity: a second person shares the surname -> do NOT auto-link.
+    a2 = E("a_sp", "August Spanku", author=True, docs=("dB",))
+    m2 = E("m_sp", "Spanku", docs=("dA",))
+    sib = E("p_klara", "Klara Spanku", docs=("dC",))
+    ents2, _ = link_known_authors([a2, m2, sib], [])
+    check("ambiguous surname not linked", "m_sp" in {e.entity_id for e in ents2}, "")
+    # Short surname guarded.
+    li = E("a_li", "Li", author=True)
+    ml = E("m_li", "Li")
+    ents3, _ = link_known_authors([li, ml], [], min_len=4)
+    check("short surname guarded", "m_li" in {e.entity_id for e in ents3}, "")
+
+
+def test_relation_verify() -> None:
+    from core.schema import Relationship
+    from postprocess.relation_verify import verify_relations
+    print("-- relation self-verification")
+
+    class FakeBackend:
+        def _complete(self, system, user):
+            return '{"1": "no", "2": "yes"}'   # item 1 unsupported, item 2 supported
+
+    def R(s, t, rt, ev, src="llm_extracted"):
+        return Relationship(source=s, target=t, rel_type=rt, doc_id="d", evidence=ev,
+                            attributes={"edge_source": src})
+
+    id_to_name = {"a": "Alice", "b": "Bob", "c": "Cap", "d": "Dee"}
+    r1 = R("a", "b", "met_with", "They met.")
+    r2 = R("a", "c", "funded", "A funded C.")
+    rrule = R("a", "d", "co_occurs_with", "", src="rule_cooccurrence")  # no evidence -> skipped
+    out, flagged = verify_relations([r1, r2, rrule], FakeBackend(), id_to_name)
+    check("one edge flagged unsupported", flagged == 1, str(flagged))
+    check("unsupported tagged", r1.attributes.get("verification") == "unsupported", str(r1.attributes))
+    check("supported tagged", r2.attributes.get("verification") == "supported", str(r2.attributes))
+    check("non-llm edge not verified", "verification" not in rrule.attributes, str(rrule.attributes))
+    # drop mode removes the unsupported edge; supported stays.
+    r1b, r2b = R("a", "b", "met_with", "They met."), R("a", "c", "funded", "A funded C.")
+    out2, _ = verify_relations([r1b, r2b], FakeBackend(), id_to_name, drop=True)
+    check("drop removes unsupported", r1b not in out2 and r2b in out2, str(len(out2)))
+    # A backend without _complete (python_only) is a no-op, never raises.
+    _, f3 = verify_relations([R("a", "b", "x", "ev")], object(), id_to_name)
+    check("no _complete -> no-op", f3 == 0, str(f3))
+
+
+def test_functional_consistency() -> None:
+    from core.schema import Relationship
+    from postprocess.ontology import check_functional_consistency
+    print("-- functional-property consistency")
+
+    def R(s, t, rt, conf=0.8):
+        return Relationship(source=s, target=t, rel_type=rt, doc_id="d", confidence=conf)
+
+    # One person, two different birthplaces -> contradiction. Two residences -> fine.
+    rels = [R("p1", "Berlin", "born_in", 0.9),
+            R("p1", "Hamburg", "born_in", 0.6),   # conflict with Berlin
+            R("p1", "Munich", "resided_in"),
+            R("p1", "Cologne", "resided_in"),      # resided_in not functional -> ok
+            R("p2", "Bonn", "born_in")]            # single -> ok
+    out, flagged = check_functional_consistency(rels)
+    check("both conflicting born_in tagged", flagged == 2, str(flagged))
+    byt = {(r.source, r.target): r for r in rels}
+    check("conflict edges carry tag",
+          byt[("p1", "Berlin")].attributes.get("functional_conflict") is True
+          and byt[("p1", "Hamburg")].attributes.get("functional_conflict") is True, "")
+    check("non-functional relation untouched",
+          "functional_conflict" not in byt[("p1", "Munich")].attributes, "")
+    check("single-valued subject untouched",
+          "functional_conflict" not in byt[("p2", "Bonn")].attributes, "")
+    # drop=True keeps the best-supported target (Berlin, higher confidence), drops Hamburg.
+    rels2 = [R("p1", "Berlin", "born_in", 0.9), R("p1", "Hamburg", "born_in", 0.6)]
+    out2, _ = check_functional_consistency(rels2, drop=True)
+    kept = {(r.source, r.target) for r in out2}
+    check("drop keeps best target only", kept == {("p1", "Berlin")}, str(kept))
+
+
+def test_recall_pass() -> None:
+    from core.schema import EntityMention, Relationship
+    from intelligence.relation_recall import recall_relations
+    print("-- recall pass (missed cross-chunk relations)")
+
+    def M(name, label="PERSON"):
+        return EntityMention(text=name, label=label, start_char=0, end_char=0,
+                             chunk_id="c", doc_id="d")
+
+    mentions = [M("Alice"), M("Bob"), M("Acme", "ORG")]
+    existing = [Relationship(source="Alice", target="Acme", rel_type="works_at", doc_id="d")]
+    reply = ('{"relationships": ['
+             '{"source":"Alice","target":"Bob","type":"met_with","evidence":"Alice met Bob."},'
+             '{"source":"Alice","target":"Acme","type":"works_at","evidence":"x"},'
+             '{"source":"Alice","target":"Zorg","type":"met_with","evidence":"x"}]}')
+    out = recall_relations(
+        "Alice met Bob. Alice works at Acme.", mentions, existing, lambda s, u: reply,
+        label_types=["PERSON", "ORG"], relation_types=["met_with", "works_at"],
+        relation_guide={}, edge_qualifiers=[], type_signatures={}, doc_id="d")
+    rts = [(r.source, r.target, r.rel_type) for r in out]
+    check("missed cross-entity relation recovered", ("Alice", "Bob", "met_with") in rts, str(rts))
+    check("duplicate not re-added", ("Alice", "Acme", "works_at") not in rts, str(rts))
+    check("unknown-entity relation dropped", all(r.target != "Zorg" for r in out), str(rts))
+    check("recall edges tagged", out and all(r.attributes.get("recall_pass") for r in out), "")
+    # Oversized doc is skipped (won't fit model context).
+    big = recall_relations("x" * 30000, mentions, existing, lambda s, u: reply,
+                           label_types=["PERSON"], relation_types=[], relation_guide={},
+                           edge_qualifiers=[], type_signatures={}, doc_id="d", max_chars=24000)
+    check("oversized doc skipped", big == [], str(big))
 
 
 def test_expansion_schema_load() -> None:
@@ -1320,6 +1508,69 @@ def test_qid_consolidation() -> None:
           "Goebbels" in {goeb.canonical_name, *goeb.aliases}, str(goeb.aliases))
 
 
+def test_extraction_schema() -> None:
+    # Schema-constrained generation (structured_output): the grammar must close the
+    # slots a weak model leaks prose into - chiefly the entity aliases array, where
+    # qwen3.5 wrote '"NSDSP" -> Note: ...' and lost the whole document. Enforce
+    # shape + the canonical entity-type enum, but keep relation type a free string
+    # (the ontology aligner maps surface forms).
+    from intelligence.prompts import extraction_json_schema
+    print("-- extraction json schema")
+    s = extraction_json_schema(["PERSON", "ORG", "LOCATION", "EVENT"], ["monetary_value"])
+    ent = s["properties"]["entities"]["items"]["properties"]
+    rel = s["properties"]["relationships"]["items"]
+    check("aliases is a string array (prose-leak slot closed)",
+          ent["aliases"]["items"]["type"] == "string", str(ent.get("aliases")))
+    check("entity type enum-locked to canonical set",
+          ent["type"].get("enum") == ["EVENT", "LOCATION", "ORG", "PERSON"], str(ent["type"]))
+    check("relation type stays a free string (aligner maps it)",
+          rel["properties"]["type"] == {"type": "string"}, str(rel["properties"]["type"]))
+    check("declared qualifier reaches the schema",
+          "monetary_value" in rel["properties"], str(list(rel["properties"])))
+    check("source+target+type required on a relation",
+          set(rel["required"]) == {"source", "target", "type"}, str(rel["required"]))
+    # No label types -> type is an unconstrained string (generic domain).
+    s2 = extraction_json_schema(None, None)
+    check("no labels -> entity type unconstrained",
+          "enum" not in s2["properties"]["entities"]["items"]["properties"]["type"], "")
+
+
+def test_llm_review_protects_high_degree() -> None:
+    # A weak LLM reviewer flags a low-mention entity for drop, but that entity
+    # anchors many edges (NER tagged it once, the LLM cited it as the endpoint of
+    # 20 ties). Dropping it orphaned all those edges - the 31% edge loss traced on
+    # the ollama pilot. Degree must protect it like mention_count/doc_count do.
+    from core.schema import Entity, Relationship
+    from postprocess.quality_review import QualityReviewer
+    from config import QualityConfig
+    print("-- LLM review protects high-degree entities")
+
+    class StubBackend:
+        def review(self, ents, edges):
+            return {"drop_entities": ["Schreiber"], "drop_edges": []}
+
+    hub = Entity(entity_id="hub", canonical_name="Schreiber", label="PERSON",
+                 mention_count=1, doc_ids=["d1"])
+    others = [Entity(entity_id=f"p{i}", canonical_name=f"Person {i}", label="PERSON",
+                     mention_count=3, doc_ids=["d1"]) for i in range(5)]
+    # Schreiber anchors 5 edges; degree 5 >= protect threshold.
+    edges = [Relationship(source="hub", target=f"p{i}", rel_type="met_with",
+                          doc_id="d1") for i in range(5)]
+    qr = QualityReviewer(QualityConfig(), stopwords=set())
+    kept, kept_edges = qr.llm_filter([hub, *others], edges, StubBackend())
+    names = {e.canonical_name for e in kept}
+    check("high-degree entity survives LLM drop", "Schreiber" in names, str(names))
+    check("its edges survive too", len(kept_edges) == 5, str(len(kept_edges)))
+
+    # Control: a low-mention, low-degree entity the LLM flags IS dropped.
+    lonely = Entity(entity_id="x", canonical_name="Schreiber", label="PERSON",
+                    mention_count=1, doc_ids=["d1"])
+    kept2, _ = qr.llm_filter([lonely, *others], [], StubBackend())
+    check("low-degree flagged entity is dropped",
+          "Schreiber" not in {e.canonical_name for e in kept2},
+          str({e.canonical_name for e in kept2}))
+
+
 def test_reference_stripping() -> None:
     from core.preprocessor import _strip_trailing_sections
     print("-- reference-section stripping")
@@ -1371,11 +1622,19 @@ def test_faithfulness_tags_exported() -> None:
 
     rels = [R("led", type_violation=True),
             R("born_in", evidence_ungrounded="true"),
+            R("employed_by", verification="unsupported"),
+            R("died_in", functional_conflict=True),
             R("met_with")]  # clean
     tables = GephiBuilder().build(ents, rels, [])
     by_rt = {e["rel_type"]: e for e in tables.edges}
     check("type_violation exported", by_rt["led"].get("type_violation") is True,
           str(by_rt["led"].get("type_violation")))
+    check("verification tag exported",
+          by_rt["employed_by"].get("verification") == "unsupported",
+          str(by_rt["employed_by"].get("verification")))
+    check("functional_conflict tag exported",
+          by_rt["died_in"].get("functional_conflict") is True,
+          str(by_rt["died_in"].get("functional_conflict")))
     check("evidence_ungrounded exported",
           by_rt["born_in"].get("evidence_ungrounded") is True,
           str(by_rt["born_in"].get("evidence_ungrounded")))
@@ -1537,6 +1796,36 @@ def test_manual_batch() -> None:
     check("narrator flagged on exact name", fx == {"August Villwak"}, str(fx))
 
 
+def test_gemini_batch_resume() -> None:
+    import tempfile
+    from pathlib import Path
+    from main import Pipeline
+    print("-- gemini_batch --resume checkpoint predicate")
+    # The saved reply file IS the checkpoint: a complete (strict-parsing) reply is
+    # done and skipped on resume; a truncated/empty/missing one gets re-submitted.
+    with tempfile.TemporaryDirectory() as d:
+        dd = Path(d)
+        good = dd / "r1.json"; good.write_text('{"doc_a": {"entities": []}}', encoding="utf-8")
+        trunc = dd / "r2.json"; trunc.write_text('{"doc_a": {"entities": [{"name":"X"', encoding="utf-8")
+        empty = dd / "r3.json"; empty.write_text("", encoding="utf-8")
+        check("complete reply -> skip", Pipeline._reply_complete(good) is True, "")
+        check("truncated reply -> redo", Pipeline._reply_complete(trunc) is False, "")
+        check("empty reply -> redo", Pipeline._reply_complete(empty) is False, "")
+        check("missing reply -> redo", Pipeline._reply_complete(dd / "nope.json") is False, "")
+
+    # batch_post_llm live backend: the post-extraction LLM steps run through Gemini's
+    # OpenAI-compatible endpoint, so the api block is repointed there (no client built).
+    from main import gemini_live_config
+    from config import load_config
+    api = gemini_live_config(load_config("domain/nazi_era/config_nazi_era.yaml")).intelligence.api
+    check("live cfg provider is openai", api.provider == "openai", api.provider)
+    check("live cfg points at gemini endpoint",
+          "generativelanguage.googleapis.com" in api.base_url, api.base_url)
+    check("live cfg forces json mode", api.json_mode is True, "")
+    check("live cfg uses the batch key", api.api_key_env == "GEMINI_API_KEY", api.api_key_env)
+    check("live cfg uses the batch model", api.model.startswith("gemini-"), api.model)
+
+
 def test_gemini_submit() -> None:
     from unittest.mock import MagicMock, patch
     from intelligence.manual_batch import submit_to_gemini
@@ -1649,6 +1938,7 @@ def main() -> int:
     test_new_domain_packages()
     test_disparity_backbone()
     test_signed_balance()
+    test_unsupported_excluded_from_substantive()
     test_polarity_conflicts()
     test_causal_tie_class()
     test_generic_ontology()
@@ -1658,6 +1948,10 @@ def main() -> int:
     test_relation_type_signatures()
     test_type_hint_prompt()
     test_biographical_inference()
+    test_author_anchoring()
+    test_relation_verify()
+    test_functional_consistency()
+    test_recall_pass()
     test_expansion_schema_load()
     test_quality_pillars()
     test_evidence_grounding()
@@ -1665,7 +1959,10 @@ def main() -> int:
     test_edge_qualifiers()
     test_manual_batch()
     test_gemini_submit()
+    test_gemini_batch_resume()
     test_qid_consolidation()
+    test_extraction_schema()
+    test_llm_review_protects_high_degree()
     test_reference_stripping()
     test_narrative_transitions()
     test_bench_bio()

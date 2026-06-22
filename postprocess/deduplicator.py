@@ -22,6 +22,16 @@ def _ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _ratio_ge(a: str, b: str, threshold: float) -> bool:
+    """ratio(a,b) >= threshold, but skip the full alignment when it can't get there.
+    quick_ratio is a cheap upper bound; same result, fewer O(n*m) computations - the
+    token buckets pair many names that share one token but are otherwise far apart."""
+    sm = SequenceMatcher(None, a, b)
+    if sm.quick_ratio() < threshold:
+        return False
+    return sm.ratio() >= threshold
+
+
 def _tokens(name: str) -> list[str]:
     return _TOKEN_RE.findall(name.lower())
 
@@ -501,7 +511,7 @@ class Deduplicator:
                 for surv in survivors:
                     if self._blocked(surv, cand):
                         continue
-                    if _ratio(cnorm, normalize_name(surv.canonical_name)) >= threshold:
+                    if _ratio_ge(cnorm, normalize_name(surv.canonical_name), threshold):
                         matched = surv
                         break
                 if matched is not None:

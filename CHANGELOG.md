@@ -4,6 +4,142 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Structured output + audit round 2 (input paths, domains, robustness)
+
+- **Schema-constrained generation** (`intelligence.structured_output`, opt-in, CLI
+  `--structured-output`). Passes a JSON schema to the backend - ollama
+  `format=<schema>` grammar, OpenAI/Gemini `response_format: json_schema` - so the
+  model can only emit valid JSON of the right shape. Closes the weak-model failure
+  where reasoning leaks into the JSON (the `"NSDSP" -> Note:..." in the aliases array`
+  that lost a whole document) at the GRAMMAR level, not post-hoc repair. Enforces
+  shape + the canonical entity-type enum; relation type stays free (the aligner maps
+  it). Recommended for ollama. anthropic/bedrock ignore it; gemini_batch already
+  forces JSON via responseMimeType.
+- **Chunker can't hang on a bad config.** `overlap_chars >= max_chars` made the
+  hard-split step <= 0 -> infinite loop appending chunks. Added a `ChunkingConfig`
+  validator (clear error at load) + a `max(1, ...)` step clamp in the chunker
+  (terminates even if a bad value slips through).
+- **InfluenceWatch / OREM relations classify robustly.** 21 domain relations
+  (`funded`, `board_member_of`, `owns`, `coordinated_with`, ...) were absent from
+  `tie_classes._REL_CLASS` and relied on the target-label fallback - which returns
+  "other" when an endpoint label fails to resolve, dropping the tie out of the
+  substantive network. Now classed explicitly (governance/structure/flows ->
+  affiliation, `advised` -> stance) with the matching connection_type, so they hold
+  regardless of label resolution. Note for the owner: `funded`/`donated_to` as
+  affiliation feed the co-membership projection (co-funders -> co_affiliated) - a
+  judgment call left as-is; flip them out of affiliation if co-funding shouldn't
+  project.
+
+## Codebase audit: orphaned-edge fix + cross-module consistency
+
+- **High-degree entities protected from LLM-review drops.** Traced a ~31% edge
+  loss on the ollama pilot (483 raw edges -> 331 resolvable against the final
+  entities, the rest orphaned). The entity survived aggregation, type-restriction,
+  and rule-dedup, then the LLM quality reviewer (qwen3.5:9b) dropped it: a person
+  GLiNER tagged ONCE but the model cited as the endpoint of 20+ ties ("Schreiber",
+  "Koch"). The salience guard protected by mention_count / doc_count but not edge
+  DEGREE, so a low-mention high-degree hub was unprotected and its whole edge
+  fan-out died with it. `quality_review.llm_filter` now also protects entities
+  anchoring >= `_LLM_PROTECT_DEGREE` (3) edges. Weak-model reviewers make this
+  load-bearing.
+- **verify allowlist matched to the emitted edge_source.** `relation_verify`
+  listed `"langextract"` but `langextract_backend` stamps `"langextract_extracted"`
+  - langextract edges slipped through unverified. Dormant (langextract isn't an
+  llm_capable mode today) but a latent correctness gap; fixed.
+- **promoted_to connection_type** was `physical`; a rank promotion is a person->rank
+  biographical attribute, not a physical actor-to-actor connection. Corrected.
+
+## Ollama A/B findings: verifier calibration + reasoning-leak JSON repair
+
+- Ollama pilot (12 Abel docs, qwen3.5:9b) put the unsupported rate at 70% (174/249)
+  vs Gemini's 27%. Spot-check shows the local model is a WEAK verifier of its own
+  output: it rejects clearly-valid edges (an explicit dated "trat in die NSDAP ein"
+  -> joined NSDAP was flagged unsupported). Self-verification by a weak model inflates
+  the flag rate with false rejections - precision is ~50-60% vs Gemini's ~80%. Takeaway:
+  the verifier wants a model at least as strong as the extractor; treat ollama self-verify
+  flags as soft.
+- `relation_verify` system prompt recalibrated: bias toward "yes" when evidence states
+  OR clearly paraphrases/implies the relation (was a bare skeptical binary), plus two
+  worked examples (a valid dated join, a hallucinated opposition). Aimed at the weak-model
+  false-rejection failure; strong models were already fine.
+- `json_repair`: two rungs for reasoning leaked INTO the JSON by a weak local model
+  (seen mid-run even with ollama format=json + think:false). `"NSDSP" -> Note: a typo
+  for NSDAP` (arrow annotation) and bare prose between array elements (`"Froh", Froh is
+  an activity.`). Both used to lose the whole document's extraction; now stripped and
+  recovered. Locked with the captured dump + synthetic cases.
+
+## Verifier feeds the analytics (unsupported edges leave the substantive set)
+
+- Pilot finding: on the 49-doc Abel gemini_batch run, verify_relations flagged 136/499
+  checked edges (27%) `unsupported`. Spot-check confirms the verifier is right ~8/10:
+  hallucinated endpoints ("vacation children from Silesia" -> person located_in
+  Silesia), mention-not-tie ("heard the Fuhrer speak" -> met_with; "learned a party had
+  formed" -> supported), direction inversion ("under the leadership of Wagner" ->
+  Motorsturm led Wagner), wrong-endpoint-type (employed_by the town, not the railway).
+  Worst relations: met_with 71%, led 48%, supported/opposed 35-38%, located_in 23%.
+- `graph_metrics` now drops `verification == "unsupported"` edges from the substantive
+  analytics graph (brokerage/bridges/articulation) and the signed-balance/polarity-
+  conflict pass - they stay in the export, tagged, but no longer drive structure.
+  On the pilot: substantive edges 1099->1004, brokerage nodes 873->812, bridges
+  634->594 (40 phantom bridges gone), articulation 135->132. Gated: no-op unless
+  verify_relations ran (field empty). A bad edge the model itself disowns must not
+  read as a structural-hole broker.
+
+## Recall pass + functional consistency (L3X + knowledge-alignment)
+
+- **Recall pass** (`intelligence.recall_pass`, opt-in): the recall half of L3X. After
+  chunk-by-chunk extraction, re-prompt over the REASSEMBLED whole document - entities
+  and already-found relations in hand - for the ties the first pass missed, chiefly
+  relations whose endpoints fell in different chunks (the chunk-boundary recall loss).
+  New edges are constrained to the known entity set, deduped against existing, tagged
+  `recall_pass`, parsed through the same `_map_extraction` + ontology schema. Size-
+  guarded (`recall_max_chars`; a doc that won't fit context is skipped). LLM modes
+  only, one extra call per doc. gemini_batch already sees whole docs, so this mainly
+  lifts api/ollama toward the same cross-chunk recall. Pairs with verify_relations:
+  generate-broad then scrutinize.
+- **Functional-property consistency** (`ontology.check_functional_consistency`, ON by
+  default, tag-only): a subject with the same functional relation (born_in, birth_date,
+  died_in, ...) pointing at two different targets is a contradiction - the narrator-vs-
+  relative birthplace confound or a misread. Tags every edge in the conflict
+  `functional_conflict` (filterable); `drop_functional_conflicts` keeps only the best-
+  supported target (most edges, then confidence) - knowledge alignment -> fusion. The
+  global-consistency complement to the per-edge type-signature gate. resided_in/
+  member_of are not functional (many residences/orgs), so untouched.
+
+## Audit pass: relation verification + efficiency
+
+- **LLM relation self-verification** (`quality.verify_relations`, opt-in): re-checks
+  each LLM edge against its evidence - "does this sentence actually assert that tie?"
+  - and tags `verification=supported/unsupported` (filterable; `verify_drop` deletes
+  instead). The post-hoc half of accuracy that verbatim grounding can't do: evidence
+  present but not asserting the relation. Duck-types `backend._complete`, so it works
+  in api/ollama AND gemini_batch (via batch_post_llm). Batched, capped, fail-safe (a
+  botched batch is skipped, never drops edges). Grounded in the L3X / KARMA
+  scrutinize-after-generate pattern. Tag flows to the edge table (allowlist updated).
+- **Dedup fuzzy prefilter**: `_ratio_ge` runs difflib's cheap `quick_ratio` upper
+  bound before the full O(n*m) alignment - same result, skips the many token-bucket
+  pairs that share one token but are otherwise far apart. (Measured difflib at ~8us a
+  call; this trims the volume without a new dependency.)
+- **GLiNER window batching**: a multi-window (long) chunk now goes through one
+  `batch_extract_entities` GPU call instead of N sequential ones, with a per-window
+  fallback on any error so it can only speed up NER, never break it. Chunked modes
+  only (gemini_batch does its own NER).
+- Audit notes: `relations_family` scoring already credits joined<->member_of (same
+  affiliation tie-class), so no fold needed; `graph_metrics` already caps Burt
+  constraint at 6000 nodes; `json_repair` and the chunker are solid - no bugs found.
+
+## Cross-document author anchoring
+
+- **`inference.link_known_authors`** (opt-in): a corpus where documents have known
+  authors (Abel's 537 letters) is a closed name registry. A lone surname mention in
+  one letter that UNIQUELY names one author - no other person in the corpus shares it
+  - is folded into that author node, forging the cross-letter edge generic fuzzy
+  dedup can't (surname-vs-fullname ratio is too low to merge safely on its own).
+  Strict zero-ambiguity (any other person with the surname -> skip), length-guarded,
+  capped, after dedup. Full-name variants already merge in dedup, so this only acts on
+  bare surnames - the piece that makes the corpus one network, not 537 ego-graphs. Off
+  by default (it's a merge).
+
 ## gemini_batch pilot fixes (Abel, 50 docs)
 
 First real --submit run on the Abel corpus surfaced three things:
@@ -28,6 +164,46 @@ First real --submit run on the Abel corpus surfaced three things:
   (employed_by: person->org) to pre-empt the type violations the pilot showed
   (employed_by/located_in pointed at a town). Extraction-time lever - takes effect
   on the next --submit, not on re-analyze.
+- **gemini_batch/python_only now WARN about skipped LLM post-steps.** These modes
+  have no live per-call backend, so any `dedup.llm_assist` / `quality.llm_review` /
+  `enrichment` the config asks for is silently skipped (rule-based dedup/review still
+  run). All three domain configs (nazi/orem/influencewatch) request them, so a batch
+  run was quietly weaker than its config implied - now it says so. Benchmarks
+  unaffected (their configs don't enable these).
+- **`batch_post_llm` (close the gap).** Opt-in: gemini_batch then runs dedup/review/
+  enrichment through Gemini's OpenAI-compatible endpoint with the same --submit key
+  (the proven openai+base_url path that drives DeepSeek, repointed via
+  `gemini_live_config`). Gated on the key being set, so building the backend can't
+  raise; off by default since it's extra API calls at analyze time. This is what
+  strengthens cross-document entity merging in batch mode (llm-dedup catches the
+  spelling variants rule dedup misses) - the answer to "will it link a person across
+  two letters."
+- **born_in/resided_in upgrade (nazi).** The birth/residence cue inference used to be
+  SUPPRESSED by a generic located_in the model already emitted for the same place
+  (canonical_inference skipped the pair). The gemini_batch model labels every place
+  located_in, so this cost most of the typed born_in/resided_in recall the gold
+  measured. Now the cue REWRITES that located_in in place to born_in/resided_in
+  (`type_upgraded_from: located_in`), keeping its provenance instead of dropping the
+  signal or duplicating it.
+- **Benchmarks: gemini_batch is a first-class mode.** run_benchmark + book_bench take
+  `--mode gemini_batch` and auto-add `--submit --batch-docs`; --constrain-relations
+  and label_map flow into the whole-document prompt (verified), so typed/entity F1 is
+  comparable to api/ollama with no chunk-boundary recall loss.
+- **--submit --resume (checkpoint).** The reply file is the checkpoint: with
+  --resume, a batch whose reply is already on disk and strict-parses is skipped, so
+  an interrupted/rate-limited run continues without re-POSTing (re-paying for) done
+  batches. A truncated reply fails the strict parse -> re-submitted. Assumes the same
+  --batch-docs (boundaries must line up with the saved files).
+
+Gold check (44-author pilot, metadata-derived gold, scored text recall with metadata
+edges excluded so it's not circular): entity recall 1.0 (PERSON/LOCATION/ORG - the
+long-context model misses no spreadsheet entity); untyped relation recall 0.64 (right
+pair found); typed relation recall 0.16. The typed gap is two alignment issues, not
+extraction misses: the model labels the narrator's birthplace/residence `located_in`
+(305x) rather than born_in/resided_in - and that located_in edge then SUPPRESSES the
+domain birth-cue inference (canonical_inference dedup skips a pair already joined by
+located_in); and it splits NSDAP membership across `joined` (92) and `member_of`
+(141) where the gold is member_of. Both are post-extraction alignment levers.
 
 ## Mode 4: manual batch (`gemini_batch`)
 

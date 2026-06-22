@@ -7,6 +7,11 @@ secrets.yaml
 secrets.yml
 credentials.json
 
+# Local editor/agent tooling - never ship
+.claude/commands/
+.claude/hooks/
+.claude/settings.local.json
+
 # Source data and generated output (copyright + PII: real names, birth dates).
 # Keep these out of the repo. To share a non-sensitive sample, force-add it:
 #   git add -f data/sample_en/somefile.txt

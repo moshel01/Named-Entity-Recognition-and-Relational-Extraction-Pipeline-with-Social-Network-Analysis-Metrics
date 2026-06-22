@@ -27,12 +27,18 @@ logger = logging.getLogger(__name__)
 _SUBSTANTIVE = tie_classes.SOCIAL | tie_classes.STRUCTURAL  # interaction + affiliation + participation + biographical
 
 
-def _build_graph(node_ids, edges, keep_classes: set[str] | None):
+def _build_graph(node_ids, edges, keep_classes: set[str] | None,
+                 drop_unsupported: bool = False):
     import networkx as nx
     G = nx.Graph()
     G.add_nodes_from(node_ids)
     for e in edges:
         if keep_classes is not None and e.get("tie_class") not in keep_classes:
+            continue
+        # Edges the relation verifier could not ground in their own evidence are
+        # tagged (and stay in the export) but must not drive structural-hole or
+        # bridge analysis. No-op unless verify_relations ran (else field is "").
+        if drop_unsupported and e.get("verification") == "unsupported":
             continue
         s, t = e.get("Source"), e.get("Target")
         if not s or not t or s == t:
@@ -225,7 +231,7 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     try:
         node_ids = [n["Id"] for n in tables.nodes]
         g_full = _build_graph(node_ids, tables.edges, None)
-        g_sub = _build_graph(node_ids, tables.edges, _SUBSTANTIVE)
+        g_sub = _build_graph(node_ids, tables.edges, _SUBSTANTIVE, drop_unsupported=True)
         report["qa_full"] = _qa(g_full)
         report["qa_substantive"] = _qa(g_sub)
     except Exception as exc:  # noqa: BLE001
@@ -273,10 +279,15 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     report["bridges"] = len(bridges)
     report["articulation_points"] = len(articulation)
 
+    # Verifier-flagged edges drop out of the signed analysis too: an unsupported
+    # stance edge makes false balance triads and phantom polarity conflicts. No-op
+    # when verify_relations did not run (field empty).
+    signed_edges = [e for e in tables.edges if e.get("verification") != "unsupported"]
+
     # Signed structural balance over the full edge set (stance edges carry the
     # sign; substantive-only would drop them since stance is non-social).
     try:
-        report["balance"] = _signed_balance(tables.edges)
+        report["balance"] = _signed_balance(signed_edges)
     except Exception as exc:  # noqa: BLE001
         logger.debug("structural balance failed: %s", exc)
 
@@ -285,7 +296,7 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     # readable sample here for review.
     try:
         id_to_name = {n["Id"]: n.get("Label", n["Id"]) for n in tables.nodes}
-        report["conflicts"] = _polarity_conflicts(tables.edges, id_to_name)
+        report["conflicts"] = _polarity_conflicts(signed_edges, id_to_name)
     except Exception as exc:  # noqa: BLE001
         logger.debug("polarity conflicts failed: %s", exc)
 

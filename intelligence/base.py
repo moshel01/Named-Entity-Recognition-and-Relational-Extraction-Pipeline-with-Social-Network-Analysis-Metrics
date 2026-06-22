@@ -131,6 +131,25 @@ def _dense_enough(mentions, chunk_text: str, chunk_start: int,
     return False
 
 
+def _reassemble_doc(foundation_results) -> str:
+    """Stitch the (overlapping) chunks back into document text, in order, for the
+    recall pass. Uses start_char to drop the overlap each chunk shares with the prior."""
+    chunks = sorted((fr.chunk for fr in foundation_results), key=lambda c: c.start_char)
+    parts: list[str] = []
+    cursor = 0
+    for c in chunks:
+        text = c.text or ""
+        if c.start_char >= cursor:
+            parts.append(text)
+            cursor = c.start_char + len(text)
+        else:
+            overlap = cursor - c.start_char
+            if overlap < len(text):
+                parts.append(text[overlap:])
+                cursor = c.start_char + len(text)
+    return "".join(parts)
+
+
 class IntelligenceBackend(ABC):
     """Base class for relationship/entity extraction backends."""
 
@@ -167,6 +186,15 @@ class IntelligenceBackend(ABC):
             self.type_signatures = relation_signature_hints(self.relation_types)
         else:
             self.type_signatures: dict[str, str] = {}
+        # Optional JSON schema for schema-constrained generation (structured_output).
+        # Built once - label types + qualifiers are fixed for the run. None = plain
+        # JSON mode. Passed to _complete by the LLM backends' extract_chunk.
+        if config.intelligence.structured_output:
+            from .prompts import extraction_json_schema
+            self._extraction_schema: dict | None = extraction_json_schema(
+                self.label_types, self.edge_qualifiers)
+        else:
+            self._extraction_schema = None
         # (month_words, season_words, pivot_max) for normalizing LLM timeline dates.
         v = domain.temporal_vocab() if domain is not None else {}
         self._date_vocab = (v.get("months", {}), v.get("seasons", {}), v.get("pivot_max"))
@@ -270,6 +298,19 @@ class IntelligenceBackend(ABC):
             all_mentions.extend(mentions)
             all_rels.extend(rels)
             all_timeline.extend(timeline)
+
+        # Recall pass: re-prompt over the assembled doc for cross-chunk relations the
+        # per-chunk pass couldn't see. LLM modes only (needs _complete); guarded.
+        if ic.recall_pass and callable(getattr(self, "_complete", None)):
+            from .relation_recall import recall_relations
+            doc_text = _reassemble_doc(foundation_results)
+            extra = recall_relations(
+                doc_text, all_mentions, all_rels, self._complete,
+                label_types=self.label_types, relation_types=self.relation_types,
+                relation_guide=self.relation_guide, edge_qualifiers=self.edge_qualifiers,
+                type_signatures=self.type_signatures, doc_id=doc_id,
+                date_vocab=self._date_vocab, max_chars=ic.recall_max_chars)
+            all_rels.extend(extra)
 
         if author_name:
             all_rels = _remap_pronoun_endpoints(all_rels, author_name)

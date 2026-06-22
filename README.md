@@ -168,6 +168,16 @@ python main.py --config config.yaml --mode api      # override mode
 python main.py --config config.yaml -v              # debug logging
 ```
 
+Quality/recall toggles (all off by default, for A/B without editing YAML):
+
+```bash
+--structured-output   # schema-constrain extraction JSON (recommended for ollama)
+--recall-pass         # re-prompt the whole doc for cross-chunk ties the pass missed
+--verify-relations    # re-check each LLM edge against its evidence (tag/drop)
+--link-authors        # fold a lone surname into the author it uniquely names
+--batch-post-llm      # gemini_batch: route dedup/review/verify through the Gemini key
+```
+
 Stages: `ingest` -> `extract` -> `analyze`. `--stage analyze` reuses the
 checkpoint so you can re-tune dedup/quality/export without re-extracting.
 
@@ -192,7 +202,8 @@ Input docs
         ├─ llm_dedup          [api/ollama, optional] LLM merges rules missed
         ├─ ontology           relation-type alignment (domain/config)
         ├─ enricher           [api/ollama, optional] subtype + attributes
-        ├─ quality_review     rules (+ optional LLM)
+        ├─ quality_review     rules (+ optional LLM); protects salient/high-degree nodes
+        ├─ relation_verify    [opt-in] re-check each LLM edge against its evidence
         ├─ canonical_inference co-occurrence + domain edges
         ├─ bipartite          [opt-in] two-mode affiliation -> co_affiliated actors
         ├─ tagger             scope / relevance_tier / connection_quality
@@ -201,9 +212,13 @@ Input docs
   └─ domain/               pluggable knowledge (aliases, inference rules)
 ```
 
-LLM is called only in **extraction** (per chunk) and these **opt-in** analyze
-passes: `llm_dedup`, `enrichment`, and `quality_review` (when `llm_review` is on).
-Dedup itself is rule-based; the LLM passes are additive and gated by config.
+LLM is called only in **extraction** (per chunk, optionally schema-constrained via
+`structured_output`; an opt-in `recall_pass` re-prompts the whole doc for missed
+cross-chunk ties) and these **opt-in** analyze passes: `verify_relations` (re-check
+each edge against its evidence), `llm_dedup`, `enrichment`, and `quality_review`
+(when `llm_review` is on). Dedup itself is rule-based; the LLM passes are additive
+and gated by config. Every LLM-assisted step is guarded against hallucination
+(merge-group caps, batch-drop caps, salient/high-degree entity protection).
 Change history: [CHANGELOG.md](CHANGELOG.md).
 
 ### Deduplication

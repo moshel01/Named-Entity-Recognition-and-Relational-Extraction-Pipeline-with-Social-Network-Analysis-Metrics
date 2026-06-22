@@ -28,10 +28,14 @@ runs:
    (EN+DE) always; optional third-person pronoun resolution via fastcoref, in
    process or through the coref microservice (below), with a nearest-antecedent
    heuristic fallback. Coref is **chunk-local** (see the recall-ceiling note).
-5. **Relation extraction** (`intelligence/`) — one of four tiers selected by
+5. **Relation extraction** (`intelligence/`) — one of five tiers selected by
    `--mode`: `api` (Anthropic/OpenAI/Bedrock), `ollama` (local; `think:false`
    for qwen3.5), `python_only` (dependency rules + sentence co-occurrence, no LLM),
-   `langextract` (few-shot + char-grounded). The LLM only does relations.
+   `langextract` (few-shot + char-grounded), `gemini_batch` (whole-doc prompts to a
+   long-context model, no chunk-boundary loss). The LLM only does relations (except
+   gemini_batch, where it does NER too). Optional `structured_output` schema-
+   constrains the JSON at the grammar level (kills weak-model prose leaks);
+   `recall_pass` re-prompts the reassembled whole doc for missed cross-chunk ties.
 6. **Aggregate + resolve** (`postprocess/aggregator.py`, `deduplicator.py`,
    `llm_dedup.py`, `identity_resolution.py`) — canonicalize and merge entities
    (author-fold, acronym/subset folds, demonym folding) under hallucination
@@ -42,9 +46,14 @@ runs:
    (canonical membership, window/cross-doc co-occurrence with Newman projection
    weighting); thin the dense co-occurrence layer with the disparity-filter backbone.
    Optional Wikidata QID identity consolidation when linking is on.
-8. **Quality + tier** (`quality_review.py`, `evidence_tiers.py`) — guarded
-   entity/edge filtering (tag by default, filter where the method demands it); map
-   every `edge_source` to an evidence tier.
+8. **Quality + tier** (`quality_review.py`, `relation_verify.py`, `ontology.py`,
+   `evidence_tiers.py`) — guarded entity/edge filtering (tag by default, filter
+   where the method demands it); map every `edge_source` to an evidence tier.
+   Optional faithfulness layer: `verify_relations` re-checks each LLM edge against
+   its evidence, `check_functional_consistency` flags conflicting birthplace/date
+   targets, the type-signature gate flags endpoint-type violations. LLM-review drops
+   protect salient AND high-degree entities (a 1-mention hub anchoring 20 edges is
+   structurally salient — dropping it orphans them all).
 9. **Export** (`gephi_builder.py`, `exporter.py`, `graph_metrics.py`,
    `narrative.py`, `codebook.py`) — nodes/edges CSV, multi-view GEXF, NetworkX
    structural metrics (weighted brokerage, bridges, signed balance), the
@@ -128,16 +137,23 @@ in-process fastcoref, then the heuristic resolver. Setup:
 - **Multi-agent KG enrichment (KARMA, Lu et al. 2025).** Their conflict-resolution
   agent flags contradictory edges before integration; we take the detection half as
   an offline rule (`graph_metrics._polarity_conflicts`): dyads that are both ally
-  and enemy, which signed balance otherwise drops as net-zero. The full nine-agent
-  verify/align/resolve loop is not adopted — it assumes API-scale compute, and
-  schema alignment (`ontology.py`) + the hallucination guards + quality review
-  already cover align/verify on the local box.
+  and enemy, which signed balance otherwise drops as net-zero. The verification half
+  now ships too: `quality.verify_relations` (`relation_verify.py`) re-checks each LLM
+  edge against its evidence (tag or drop), and `ontology.check_functional_consistency`
+  flags a subject with two different birthplaces/birthdates (knowledge alignment).
+  Measured caveat: a weak local model over-rejects as a self-verifier, so verify is
+  most trustworthy with a model at least as strong as the extractor. The full
+  nine-agent loop (each step its own, stronger model) stays deferred — API-scale.
 - **Verified extraction (Serdiukov et al. 2026).** Schema-guided JSON with a
   recovery module that rescues systematically corrupted output. Their finding —
   most LLM extraction failures are correctable formatting, not semantic — is
   exactly what `json_repair.py` does (the multi-`json`-block recovery included);
   their nine-model benchmark also lands on a Qwen model as the best
-  efficiency/low-hallucination fit, matching the `qwen3.5:9b` default.
+  efficiency/low-hallucination fit, matching the `qwen3.5:9b` default. We go one
+  step further with `intelligence.structured_output`: a JSON schema constrains
+  generation at the grammar level (ollama `format=<schema>`, OpenAI/Gemini
+  `json_schema`), so a weak model can't emit invalid structure at all — prevention
+  over repair, for the failure (reasoning leaked into a JSON array) repair can't fix.
 - **Two-stage scenario-prompt RE (Zhao et al. 2025).** Zero-shot document-level RE
   by constraining the LLM to a predefined relation schema instead of letting it
   free-form. We adopt the schema half: the generic (non-domain) path falls back to

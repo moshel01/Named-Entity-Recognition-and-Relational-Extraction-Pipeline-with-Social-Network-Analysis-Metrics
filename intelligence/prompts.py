@@ -65,6 +65,57 @@ def relationship_schema_str(edge_qualifiers: list[str] | None = None) -> str:
     return json.dumps(schema, indent=2)
 
 
+def extraction_json_schema(
+    label_types: list[str] | None = None,
+    edge_qualifiers: list[str] | None = None,
+) -> dict:
+    """JSON schema for the extraction response, for schema-constrained generation.
+    Enforces SHAPE - the weak-model failure where reasoning leaks into the JSON
+    (e.g. prose between alias array elements) and the whole document is lost - and
+    enum-locks the entity type to the canonical set. Relation type stays a free
+    string: the ontology aligner maps surface forms, so over-constraining here
+    would force bad fits. `aliases` is constrained to a string array, which is
+    exactly the slot weak models leak prose into."""
+    ent_type: dict = {"type": "string"}
+    if label_types:
+        ent_type = {"type": "string", "enum": sorted(set(label_types))}
+    rel_props: dict = {
+        "source": {"type": "string"}, "target": {"type": "string"},
+        "type": {"type": "string"}, "directed": {"type": "boolean"},
+        "evidence": {"type": "string"}, "confidence": {"type": "number"},
+    }
+    for q in (edge_qualifiers or []):
+        rel_props[q] = {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "entities": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}, "type": ent_type,
+                    "aliases": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["name", "type"],
+            }},
+            "relationships": {"type": "array", "items": {
+                "type": "object", "properties": rel_props,
+                "required": ["source", "target", "type"],
+            }},
+            "timeline": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string"}, "description": {"type": "string"},
+                    "entities": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["date"],
+            }},
+        },
+        "required": ["entities", "relationships"],
+    }
+
+
 def relation_constraint_block(relation_types: list[str] | None,
                               relation_guide: dict[str, str] | None = None,
                               type_signatures: dict[str, str] | None = None) -> str:

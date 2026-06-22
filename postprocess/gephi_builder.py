@@ -57,7 +57,8 @@ def _aggregate_edges(
                 "origins": set(), "edge_sources": set(), "confidence": 0.0,
                 "evidence": r.evidence, "year": None, "suspect_membership": False,
                 "evidence_unverified": False, "type_violation": False,
-                "evidence_ungrounded": False, "cooccur_strength": None,
+                "evidence_ungrounded": False, "verification": "",
+                "functional_conflict": False, "cooccur_strength": None,
                 "disparity_alpha": None, "affiliation_strength": None,
                 "shared_groups": None,
             }
@@ -72,6 +73,14 @@ def _aggregate_edges(
             bucket["type_violation"] = True
         if r.attributes.get("evidence_ungrounded"):
             bucket["evidence_ungrounded"] = True
+        if r.attributes.get("functional_conflict"):
+            bucket["functional_conflict"] = True
+        # Relation verification (string): "unsupported" taints the aggregated edge.
+        v = r.attributes.get("verification")
+        if v == "unsupported":
+            bucket["verification"] = "unsupported"
+        elif v == "supported" and not bucket["verification"]:
+            bucket["verification"] = "supported"
         # Per-edge qualifiers (qual_*): domain-declared optional fields the LLM
         # filled (monetary_value, jurisdiction, ...). Generic passthrough - first
         # non-empty value per qualifier survives the merge.
@@ -229,6 +238,8 @@ class GephiBuilder:
                 "evidence_unverified": b.get("evidence_unverified", False),
                 "type_violation": b.get("type_violation", False),
                 "evidence_ungrounded": b.get("evidence_ungrounded", False),
+                "verification": b.get("verification", ""),
+                "functional_conflict": b.get("functional_conflict", False),
                 "period": b["period"],
                 "year": b["year"],
                 "origin": ";".join(sorted(b["origins"])),

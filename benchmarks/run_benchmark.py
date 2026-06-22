@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--path", default="", help="Local file path (ace2005 / tacred).")
     ap.add_argument("--workdir", default="data/bench", help="Where to write inputs/output.")
     ap.add_argument("--mode", default="python_only",
-                    choices=["python_only", "api", "ollama"])
+                    choices=["python_only", "api", "ollama", "gemini_batch"])
     ap.add_argument("--spacy-model", default="",
                     help="Default: adapter's preferred model (German for hipe), "
                          "else en_core_web_trf.")
@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Default: adapter's preferred model, else "
                          "fastino/gliner2-large-v1.")
     ap.add_argument("--ollama-model", default="qwen3.5:9b")
+    ap.add_argument("--batch-docs", type=int, default=10,
+                    help="gemini_batch only: docs per prompt file (anti-truncation). "
+                         "Benchmark docs are short, so 10 is safe; raise for speed.")
     ap.add_argument("--types", default="",
                     help="Comma-separated target types (default per dataset), "
                          "e.g. PERSON,ORG,LOCATION. Trims GLiNER labels + gold.")
@@ -134,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd = [py, "main.py", "--config", str(config_path)]
     if args.resume:
         run_cmd.append("--resume")
+    # gemini_batch only completes with --submit (else it writes prompts and stops for
+    # a manual paste). The whole-document path = no chunk-boundary recall loss; the
+    # benchmark scores it through the same evaluate harness. Needs $GEMINI_API_KEY.
+    if args.mode == "gemini_batch":
+        run_cmd += ["--submit", "--batch-docs", str(args.batch_docs)]
     eval_cmds = [
         [py, "-m", "evaluation.evaluate", "--gold", str(gold_path),
          "--run-dir", str(run_dir), "--edge-sources", tier,

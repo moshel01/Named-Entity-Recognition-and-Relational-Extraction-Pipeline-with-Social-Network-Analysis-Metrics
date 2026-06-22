@@ -219,9 +219,31 @@ python main.py --config <cfg> --mode gemini_batch --stage extract --batch-docs 2
 ```
 That writes the prompts, calls Gemini for each, writes the replies, imports, and
 builds the graph. `--batch-model gemini-2.5-pro` for higher quality (lower free-tier
-rate limit); default is `gemini-2.5-flash`. A failed/truncated batch is skipped and
-reported - re-run the same command to fill the gaps (analyze flags any missing docs).
-The free tier easily covers a 500-document corpus.
+rate limit); default is `gemini-2.5-flash`. The free tier easily covers a
+500-document corpus.
+
+Thinking is OFF by default (`batch_thinking_budget: 0`): 2.5-flash otherwise burns
+the output-token budget on reasoning tokens and truncates the JSON. Leave it off for
+extraction; `--batch-thinking <n>` (or `<0` to restore the model default) if you ever
+want it.
+
+**Resume.** A failed/truncated batch is skipped and reported. Re-run the SAME command
+with `--resume` and it skips every batch whose reply is already on disk and complete
+(the reply file is the checkpoint), re-POSTing only the missing/truncated ones - so an
+interrupted or rate-limited run continues without re-paying for done batches. Resume
+assumes the same `--batch-docs`/`--batch-budget` (the batch boundaries must line up
+with the saved files). `--stage analyze` still flags any doc no reply covered.
+```powershell
+python main.py --config <cfg> --mode gemini_batch --stage extract --batch-docs 25 --submit --resume
+```
+
+**LLM post-processing.** Extraction comes from the whole-document reply, so the
+LLM-assisted post steps (`dedup.llm_assist`, `quality.llm_review`, `enrichment`) have
+no live backend and are SKIPPED (you get a warning naming them; rule-based dedup/review
+still run). For a domain that leans on LLM-dedup to merge entities across documents
+(InfluenceWatch, OREM), either run it in `ollama`/`api` mode, or set
+`intelligence.batch_post_llm: true` to route those steps through Gemini's
+OpenAI-compatible endpoint with the same key (extra API calls at analyze time).
 - The prompt carries the **same** relation ontology, guide, type hints, and qualifier
   schema as `api`/`ollama` - so domains (InfluenceWatch monetary_value, OREM
   jurisdiction) work unchanged. The reply tolerates ```code fences``` and split files.

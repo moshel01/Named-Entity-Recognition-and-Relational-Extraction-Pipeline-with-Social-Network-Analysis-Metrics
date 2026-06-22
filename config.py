@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # Sub-models
@@ -47,6 +47,18 @@ class ChunkingConfig(BaseModel):
     max_chars: int = 6000
     overlap_chars: int = 400
     respect_sentences: bool = True
+
+    @model_validator(mode="after")
+    def _overlap_below_max(self) -> "ChunkingConfig":
+        # overlap >= max stalls the chunker's hard-split (step <= 0) and makes the
+        # sentence-overlap back-up a no-op. Catch the misconfig at load, not mid-run.
+        if self.overlap_chars >= self.max_chars:
+            raise ValueError(
+                f"chunking.overlap_chars ({self.overlap_chars}) must be < "
+                f"max_chars ({self.max_chars})")
+        if self.overlap_chars < 0 or self.max_chars <= 0:
+            raise ValueError("chunking.max_chars must be > 0 and overlap_chars >= 0")
+        return self
 
 
 class CoreferenceConfig(BaseModel):
@@ -174,6 +186,24 @@ class IntelligenceConfig(BaseModel):
     # have a signature; loose stance/interaction types are unconstrained. Off by
     # default - flip on and A/B against type_violations_by_relation in the report.
     type_hints: bool = False
+    # Schema-constrained generation for the extraction call: pass a JSON schema to
+    # the backend so the model can only emit valid JSON of the right shape (ollama
+    # format=<schema> grammar; OpenAI/Gemini response_format json_schema). Kills the
+    # weak-model failure where reasoning leaks into the JSON and the whole document's
+    # extraction is lost (the json_repair arms race). Enforces shape + the canonical
+    # entity types, not the relation vocabulary (the aligner still maps surface
+    # forms). Recommended for local models; off by default (some hosts/older ollama
+    # builds ignore or mishandle format-schema). anthropic/bedrock ignore it.
+    structured_output: bool = False
+    # Recall pass: after chunk-by-chunk extraction, re-prompt over the WHOLE document
+    # (entities + already-found relations in hand) for the ties the first pass missed
+    # - chiefly relations whose endpoints fell in different chunks. The recall half of
+    # the L3X loop; pair with quality.verify_relations for precision. LLM modes only,
+    # one extra call per doc, so off by default. gemini_batch already sees whole docs,
+    # so this mainly lifts api/ollama. A doc longer than recall_max_chars is skipped
+    # (won't fit context); raise it for big-context models.
+    recall_pass: bool = False
+    recall_max_chars: int = 24000
     # gemini_batch: max characters of document text per emitted prompt file. A
     # corpus past this splits into numbered files. Lower it if the model truncates
     # its JSON reply (output length, not input context, is usually the limit).
@@ -195,6 +225,12 @@ class IntelligenceConfig(BaseModel):
     # reclaims the whole output budget). <0 = leave the API default on. 2.5-pro can't
     # go below 128, so 0 is bumped to 128 there.
     batch_thinking_budget: int = 0
+    # gemini_batch extracts from the whole-document reply, so the post-extraction LLM
+    # steps (dedup.llm_assist / quality.llm_review / enrichment) have no live backend
+    # and are skipped. Flip this on to run them through Gemini's OpenAI-compatible
+    # endpoint with the same --submit key (extra API calls at analyze time; off so a
+    # benchmark/Abel run doesn't pay for them unasked). Needs the key set.
+    batch_post_llm: bool = False
     batch_request_timeout: int = 600
 
 
@@ -244,6 +280,15 @@ class QualityConfig(BaseModel):
     llm_review: Any = "auto"        # "auto" | True | False
     review_batch_size: int = 150    # entities per LLM review call (large corpora)
     drop_isolated_nodes: bool = False   # drop degree-0 nodes from the final graph
+    # LLM relation self-verification: re-check each LLM edge against its evidence
+    # ("does this sentence assert that tie?") and tag verification=supported/unsupported
+    # (filterable in Gephi). Catches the case verbatim grounding can't - evidence
+    # present but not actually asserting the relation. LLM modes only; extra API calls,
+    # so off by default. verify_drop deletes the unsupported instead of tagging.
+    verify_relations: bool = False
+    verify_drop: bool = False
+    verify_max: int = 0             # cap edges verified (0 = all eligible); cost knob
+    verify_batch_size: int = 20
 
 
 class InferenceConfig(BaseModel):
@@ -288,6 +333,14 @@ class InferenceConfig(BaseModel):
     affiliation_actor_kinds: list[str] = Field(default_factory=lambda: ["PERSON"])
     affiliation_group_kinds: list[str] = Field(
         default_factory=lambda: ["ORG", "INSTITUTION", "EVENT"])
+    # Cross-document author anchoring: a corpus where many documents have a known
+    # author (Abel's 537 letters) gives a closed name registry. A lone surname
+    # mention in one letter that UNIQUELY identifies one author (no other person
+    # shares it) is folded into that author node, forging the cross-letter edge that
+    # makes the corpus one network instead of 537 ego-graphs. Zero-ambiguity only,
+    # capped. Off by default (a merge, so conservative).
+    link_known_authors: bool = False
+    link_known_authors_min_len: int = 4   # ignore short/initial surnames
     enable_canonical_inference: bool = False
     # How the corpus-level mandatory-membership assumption is applied by domains
     # that implement one (e.g. nazi_era NSDAP). "authors_only" is the defensible
@@ -311,6 +364,14 @@ class OntologyConfig(BaseModel):
     # entity types contradict its signature ("led" pointing at a place) is
     # tagged type_violation, filterable in Gephi. Set true to drop instead.
     drop_type_violations: bool = False
+    # Functional-property consistency (global, vs the per-edge type gate): a subject
+    # with the same functional relation (born_in, birth_date, ...) pointing at two
+    # different targets is a contradiction - the narrator-vs-relative birthplace
+    # confound or a misread. Tag every edge in the conflict `functional_conflict`
+    # (filterable). On by default (tag only; a column appears solely on real
+    # conflicts). drop_functional_conflicts keeps only the best-supported target.
+    check_functional_consistency: bool = True
+    drop_functional_conflicts: bool = False
     relations: Any = None              # dict[str, list[str]] | list[str] | None
     # label -> one-line definition shown to the LLM next to the allowed types.
     # Make confusable labels contrastive ("associate: companions, NOT friends").

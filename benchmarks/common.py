@@ -273,17 +273,23 @@ def build_config(
     label_map: dict[str, str],
     mode: str = "python_only",
     spacy_model: str = "en_core_web_sm",
-    gliner_model: str = "fastino/gliner2-large-v1",
+    gliner_model: str = "fastino/gliner2-multi-v1",
     config_path: Path,
     ollama_model: str = "qwen3.5:9b",
     ontology_relations: list[str] | None = None,
     min_entity_confidence: float = 0.0,
+    structured_output: bool = False,
+    coref: bool = False,
 ) -> Path:
     """Write a pipeline config tuned for a benchmark run.
 
-    Benchmarks use the GENERIC domain with coreference, canonical inference, and
-    mandatory membership all OFF - those are corpus-specific helpers (Abel) that
-    would add non-gold nodes/edges and depress precision on benchmark data.
+    Benchmarks default to the GENERIC domain with coreference, canonical inference,
+    and mandatory membership all OFF. Canonical inference / mandatory membership ADD
+    non-gold edges and depress precision, so they stay off. Coreference does not add
+    nodes - it resolves pronouns/aliases across sentences - so it is the relation-
+    recall ceiling on cross-sentence RE sets (DocRED, DWIE) where the tie spans a
+    pronoun the chunk LLM never linked. Off by default (mis-merges can dent entity
+    precision), opt-in via ``coref`` to A/B that recall.
     """
     cfg: dict[str, Any] = {
         "run_name": run_name,
@@ -304,12 +310,15 @@ def build_config(
             "use_spacy_ner": True,
             "device": "auto",
         },
-        "coreference": {"enabled": False, "narrator_resolution": False,
-                        "pronoun_resolution": False},
+        # narrator_resolution stays off (benchmark docs have no detected author);
+        # coref here means cross-sentence pronoun/alias resolution only.
+        "coreference": {"enabled": coref, "narrator_resolution": False,
+                        "pronoun_resolution": coref},
         "intelligence": {
             "ollama": {"model": ollama_model, "request_timeout": 600},
             "python_only": {"cooccurrence_window": "sentence",
                             "min_relationship_confidence": 0.30},
+            "structured_output": structured_output,
         },
         "inference": {
             "enable_cooccurrence_edges": True,

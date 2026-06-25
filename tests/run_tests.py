@@ -44,6 +44,12 @@ def test_json_repair() -> None:
         # before the next key (`"...powerful;".` then a newline + "confidence").
         ("stray dot after value", '{"e": "all-powerful;".\n  "k": 2}',
          {"e": "all-powerful;", "k": 2}),
+        # Parenthetical close leaked outside the quote: the model opened `(` inside
+        # the value, shut the string early, and left the `)` before the close
+        # (`"evidence": "(1948 Indian film")`). Lost a whole redocred doc.
+        ("stray paren before close", '{"e": "(1948 film")\n}', {"e": "(1948 film"}),
+        ("stray paren before key", '{"e": "(1948 film")\n  "k": 2}',
+         {"e": "(1948 film", "k": 2}),
         # A period that legitimately ENDS the string content must be left alone.
         ("period inside string", '{"e": "He left.", "k": 2}', {"e": "He left.", "k": 2}),
         ("paren in string", '{"e": "real (aside) inside", "k": 3}',
@@ -884,6 +890,17 @@ def test_affiliation_projection() -> None:
     proj2 = project_affiliations(ents, edges, min_shared=2)
     check("min_shared=2 drops single-group pairs", proj2 == [], str(proj2))
 
+    # Co-funding must NOT project: two donors to the same PAC are not co-members.
+    fund_edges = [Relationship("a", "pac", "funded", "d"),
+                  Relationship("b", "pac", "funded", "d"),
+                  Relationship("c", "pac", "member_of", "d")]
+    pf = project_affiliations(ents, fund_edges, min_shared=1)
+    pf_pairs = {frozenset((r.source, r.target)) for r in pf}
+    check("co-funders not projected as co_affiliated",
+          frozenset(("a", "b")) not in pf_pairs, str(pf_pairs))
+    check("a funder + a member still not co-membership",
+          frozenset(("a", "c")) not in pf_pairs, str(pf_pairs))
+
 
 def test_org_actor_projection() -> None:
     # OREM/OPAL: agencies (orgs) are the actors, sharing a disaster EVENT.
@@ -1030,6 +1047,32 @@ def test_unsupported_excluded_from_substantive() -> None:
     filt = [e for e in sedges if e.get("verification") != "unsupported"]
     c = _polarity_conflicts(filt)
     check("phantom conflict removed", c["conflicting_dyads"] == 0, str(c))
+
+
+def test_trust_verification_gates_metric_drop() -> None:
+    # A weak local verifier over-rejects (qwen ~50% unsupported on the Abel pilot),
+    # so its flags must only TAG - not prune the metric graph - unless the run
+    # opts in via quality.trust_verification (set when a strong api/gemini verifier
+    # ran). enrich() carries the gate; default off keeps the ties in the structure.
+    from postprocess.graph_metrics import enrich
+    from postprocess.gephi_builder import GraphTables
+    print("-- trust_verification gates the metric-graph prune")
+    nodes = [{"Id": "A", "Label": "A"}, {"Id": "B", "Label": "B"}, {"Id": "C", "Label": "C"}]
+    # B-C is the only tie holding C in, and the verifier flagged it unsupported.
+    edges = [
+        {"Source": "A", "Target": "B", "tie_class": "affiliation", "verification": "supported", "Weight": 1},
+        {"Source": "B", "Target": "C", "tie_class": "affiliation", "verification": "unsupported", "Weight": 1},
+    ]
+    soft = enrich(GraphTables(nodes=list(nodes), edges=[dict(e) for e in edges]),
+                  trust_verification=False)
+    hard = enrich(GraphTables(nodes=list(nodes), edges=[dict(e) for e in edges]),
+                  trust_verification=True)
+    check("soft (default): unsupported tie kept, C connected",
+          soft["qa_substantive"]["edges"] == 2 and soft["qa_substantive"]["isolates"] == 0,
+          str(soft["qa_substantive"]))
+    check("trusted: unsupported tie pruned, C isolated",
+          hard["qa_substantive"]["edges"] == 1 and hard["qa_substantive"]["isolates"] == 1,
+          str(hard["qa_substantive"]))
 
 
 def test_causal_tie_class() -> None:
@@ -1708,6 +1751,20 @@ def test_edge_qualifiers() -> None:
     e = GephiBuilder().build(ents, [rel], []).edges[0]
     check("qualifier reaches edge table column", e.get("qual_monetary_value") == "$50,000", str(e))
 
+    # Schema stability: a declared qualifier no edge fills still gets an (empty)
+    # column, so the CSV header is fixed run-to-run. orem_smoke emitted zero
+    # qual_jurisdiction edges and the column silently vanished before this.
+    plain = Relationship(source="p1", target="s1", rel_type="funded", doc_id="d",
+                         attributes={"edge_source": "llm_extracted"})
+    e2 = GephiBuilder().build(ents, [plain], [],
+                              edge_qualifiers=["monetary_value", "jurisdiction"]).edges[0]
+    check("declared qualifier seeds empty column",
+          e2.get("qual_jurisdiction") == "" and "qual_monetary_value" in e2, str(e2))
+    e3 = GephiBuilder().build(ents, [rel], [],
+                              edge_qualifiers=["monetary_value", "jurisdiction"]).edges[0]
+    check("filled value overrides the seed",
+          e3.get("qual_monetary_value") == "$50,000" and e3.get("qual_jurisdiction") == "", str(e3))
+
     # Regression: the model only fills a qualifier if it sees the slot in the JSON
     # schema example (it copies the example literally). A real ollama run left
     # $1,415,274 in the evidence with no monetary_value key because the schema
@@ -1939,6 +1996,7 @@ def main() -> int:
     test_disparity_backbone()
     test_signed_balance()
     test_unsupported_excluded_from_substantive()
+    test_trust_verification_gates_metric_drop()
     test_polarity_conflicts()
     test_causal_tie_class()
     test_generic_ontology()

@@ -43,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
                          "else en_core_web_trf.")
     ap.add_argument("--gliner-model", default="",
                     help="Default: adapter's preferred model, else "
-                         "fastino/gliner2-large-v1.")
+                         "fastino/gliner2-multi-v1 (same model the domains run; "
+                         "gliner2-large-v1 segfaults on CPU load on some boxes).")
     ap.add_argument("--ollama-model", default="qwen3.5:9b")
     ap.add_argument("--batch-docs", type=int, default=10,
                     help="gemini_batch only: docs per prompt file (anti-truncation). "
@@ -59,6 +60,14 @@ def main(argv: list[str] | None = None) -> int:
                          "the LLM emits those labels (makes TYPED relation F1 "
                          "comparable; meaningful only with --mode ollama/api and "
                          "readable labels like DWIE).")
+    ap.add_argument("--structured-output", action="store_true",
+                    help="Schema-constrain the extraction call (ollama format / "
+                         "OpenAI json_schema) so a weak local model can't leak prose "
+                         "into the JSON. Tags the run variant _struct for A/B.")
+    ap.add_argument("--coref", action="store_true",
+                    help="Enable cross-sentence pronoun/alias coreference (off by "
+                         "default). Lifts relation recall on coref-heavy RE sets "
+                         "(redocred, dwie); needs fastcoref. Tags variant _coref.")
     ap.add_argument("--run", action="store_true", help="Invoke the pipeline after prep.")
     ap.add_argument("--resume", action="store_true",
                     help="Pass --resume to the pipeline: skip docs already in the "
@@ -71,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     spacy_model = (args.spacy_model
                    or getattr(adapter, "DEFAULT_SPACY_MODEL", "en_core_web_trf"))
     gliner_model = (args.gliner_model
-                    or getattr(adapter, "DEFAULT_GLINER_MODEL", "fastino/gliner2-large-v1"))
+                    or getattr(adapter, "DEFAULT_GLINER_MODEL", "fastino/gliner2-multi-v1"))
 
     # 1. Load + convert.
     print(f"Loading {args.dataset} (split={split}, limit={args.limit}) ...")
@@ -110,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         variant += f"_minconf{int(round(args.min_entity_confidence * 100))}"
     if ontology_relations:
         variant += "_constr"
+    if args.structured_output:
+        variant += "_struct"
+    if args.coref:
+        variant += "_coref"
     work = Path(args.workdir)
     ds_dir = work / args.dataset
     input_dir = ds_dir / "inputs"
@@ -127,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         config_path=config_path, ollama_model=args.ollama_model,
         ontology_relations=ontology_relations,
         min_entity_confidence=args.min_entity_confidence,
+        structured_output=args.structured_output,
+        coref=args.coref,
     )
     run_dir = output_dir / run_name
     print(f"  inputs : {input_dir}")

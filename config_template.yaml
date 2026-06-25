@@ -212,6 +212,12 @@ quality:
   verify_relations: false
   verify_drop: false               # true = delete unsupported edges instead of tagging
   verify_max: 0                    # cap edges verified (0 = all eligible); cost knob
+  # Whether unsupported flags are reliable enough to PRUNE the SNA metric graph
+  # (brokerage/bridges/signed balance), not just tag the export. A weak local
+  # self-verifier over-rejects (~50% on the Abel pilot), so leave this false for
+  # ollama or half the real ties vanish from the structure before it is measured.
+  # Turn it on only behind a strong verifier (api/gemini). Export is unchanged.
+  trust_verification: false
 
 # Inference / canonical edges
 inference:

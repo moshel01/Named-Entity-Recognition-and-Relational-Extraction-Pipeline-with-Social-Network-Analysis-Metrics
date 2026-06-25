@@ -134,8 +134,14 @@ class GephiBuilder:
         entity_id_to_name: dict[str, str] | None = None,
         manifest: dict[str, dict[str, str]] | None = None,
         period_fn: Callable[[int], str] | None = None,
+        edge_qualifiers: list[str] | None = None,
     ) -> GraphTables:
-        """Build node/edge/timeline tables."""
+        """Build node/edge/timeline tables.
+
+        ``edge_qualifiers`` are the domain-declared qualifier names; their
+        ``qual_*`` columns are emitted on every edge (empty when unfilled) so the
+        CSV schema stays fixed run-to-run even when a run extracts none of them.
+        """
         id_to_name = entity_id_to_name or {e.entity_id: e.canonical_name for e in entities}
         id_to_label = {e.entity_id: e.label for e in entities}
         valid_ids = {e.entity_id for e in entities}
@@ -176,7 +182,7 @@ class GephiBuilder:
                 node_years[t].append(b["year"])
 
         nodes = self._node_rows(entities, class_deg, node_years)
-        edges = self._edge_rows(agg, id_to_name, letter_of)
+        edges = self._edge_rows(agg, id_to_name, letter_of, edge_qualifiers or [])
         timeline_rows = self._timeline_rows(timeline, letter_of)
 
         n_int = sum(1 for b in agg.values() if b["tie_class"] == "interaction")
@@ -212,7 +218,11 @@ class GephiBuilder:
         return nodes
 
     @staticmethod
-    def _edge_rows(agg, id_to_name, letter_of) -> list[dict[str, Any]]:
+    def _edge_rows(agg, id_to_name, letter_of, edge_qualifiers=()) -> list[dict[str, Any]]:
+        # Declared qualifier columns default to "" so the schema is stable even
+        # when no edge in this run carried one (the LLM filled qual_* on the
+        # bucket overrides the seed below).
+        qual_seed = {f"qual_{q}": "" for q in edge_qualifiers}
         edges: list[dict[str, Any]] = []
         for (s, t, rt), b in agg.items():
             doc0 = next(iter(b["doc_ids"]), "")
@@ -250,6 +260,9 @@ class GephiBuilder:
                 "letter_id": letter_of(doc0),
                 "evidence": (b["evidence"] or "")[:500],
                 # Per-edge qualifiers (qual_*) ride through generically as columns.
+                # Seed the declared set to "" so they survive an empty run, then let
+                # any value the LLM actually filled override.
+                **qual_seed,
                 **{k: v for k, v in b.items() if k.startswith("qual_")},
             })
         return edges

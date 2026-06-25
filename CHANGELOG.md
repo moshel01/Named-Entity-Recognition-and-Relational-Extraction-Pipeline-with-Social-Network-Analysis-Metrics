@@ -4,6 +4,54 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## Post-run audit: weak-verifier metric prune, benchmark fixes, qualifier schema
+
+Validated the prior round on real runs (abel_ol_v2 ollama + InfluenceWatch/OREM
+smoke), then fixed what the data exposed.
+
+- **A weak verifier no longer silently prunes the SNA metric graph.**
+  `verify_relations` with qwen3.5:9b flagged ~51% of its OWN edges unsupported
+  (down from 70% pre-calibration, but still over-rejecting - the documented
+  self-verifier weakness). `graph_metrics` was hard-dropping every
+  `verification=unsupported` edge from brokerage / bridges / signed balance,
+  so half the real ties vanished from the structure before it was measured -
+  contradicting the "treat ollama flags as soft" rule. Now gated by
+  `quality.trust_verification` (default off): weak flags only TAG the export;
+  the prune is earned only when a strong verifier (api/gemini, ~80% precision)
+  ran and the owner opts in. Export is unchanged either way.
+- **Benchmark default GLiNER model now matches the domains.** The runner defaulted
+  to `fastino/gliner2-large-v1`, which access-violates (0xC0000005) on CPU load on
+  the owner's box - the redocred Tier-3 run died at model load. Every domain uses
+  `fastino/gliner2-multi-v1` (loads fine, ran minutes earlier). Defaulted the
+  benchmark to multi-v1 too: no segfault, and benchmark NER now uses the same model
+  production does, so the scores transfer. Override with `--gliner-model`.
+- **`--structured-output` is now a benchmark flag.** It was plumbed into the
+  pipeline but not the benchmark runner, so the structured-output A/B couldn't be
+  run on gold. Added to `run_benchmark.py` (bakes `intelligence.structured_output`
+  into the generated config, tags the variant `_struct` so A/B dirs don't clobber).
+- **Declared edge qualifiers keep a stable column.** `qual_*` columns were harvested
+  only from edges that filled them, so a run that extracted zero of a declared
+  qualifier (OREM smoke: no `qual_jurisdiction` at all) silently dropped the column
+  and the CSV header shifted run-to-run. The builder now seeds every declared
+  `intelligence.edge_qualifiers` as an empty column; a filled value still overrides.
+- **json_repair recovers a leaked parenthetical close.** A redocred run lost a whole
+  doc to `"evidence": "(1948 Indian film")` - the model opened `(` inside the value,
+  shut the string early, and left the `)` between the close quote and `}`. Extended
+  the stray-punctuation rungs (`)`/`(` join `.;:`) since none is ever legal between a
+  value and the next member. The "paren inside a string" guard still holds.
+- **Benchmark `--coref` flag.** redocred relation recall is coref-limited (conservative
+  untyped R 0.14): the builder hard-disabled coreference, which is right for the
+  edge-adding helpers (canonical inference, mandatory membership) but wrong for
+  cross-sentence pronoun/alias resolution on an RE benchmark. `--coref` turns just
+  that on (narrator stays off - no benchmark authors), tagged variant `_coref`, to
+  A/B the recall ceiling. Default still off (mis-merges can dent entity precision).
+
+Measured on redocred (25 docs, ollama qwen3.5:9b): entity F1 0.78 (NER is GLiNER, so
+structured_output leaves it unchanged, as expected). structured_output on relations
+lifted untyped precision 0.29 -> 0.33 at ~flat recall (18% fewer false-positive edges)
+- F1 neutral, output cleaner. `--constrain-relations` is the only meaningful TYPED RE
+measure (typed F1 0.02 free-form -> 0.16 constrained); use it for typed numbers.
+
 ## Structured output + audit round 2 (input paths, domains, robustness)
 
 - **Schema-constrained generation** (`intelligence.structured_output`, opt-in, CLI
@@ -25,10 +73,14 @@ Sequential record of what shipped. Newest first. Terse on purpose.
   "other" when an endpoint label fails to resolve, dropping the tie out of the
   substantive network. Now classed explicitly (governance/structure/flows ->
   affiliation, `advised` -> stance) with the matching connection_type, so they hold
-  regardless of label resolution. Note for the owner: `funded`/`donated_to` as
-  affiliation feed the co-membership projection (co-funders -> co_affiliated) - a
-  judgment call left as-is; flip them out of affiliation if co-funding shouldn't
-  project.
+  regardless of label resolution.
+- **Funding flows no longer project as co-membership.** A directed transaction
+  (`funded`, `donated_to`, `granted`, `owns`, `subsidiary_of`, `coordinated_with`,
+  ...) stays a substantive directed edge but is excluded from the two-mode projection
+  (`bipartite._NON_PROJECTING`): two donors to the same PAC are not "members together"
+  the way two board members are, and projecting them made co-funding indistinguishable
+  from co-membership in the `co_affiliated` output. Only real co-membership /
+  participation (board_member_of, member_of, responded_to, ...) forges co_affiliated now.
 
 ## Codebase audit: orphaned-edge fix + cross-module consistency
 

@@ -65,13 +65,15 @@ _ARROW_ANNOTATION_RE = re.compile(r'"\s*->[^"\[\]{}]*?(\s*[,}\]])')
 _ARRAY_PROSE_RE = re.compile(r',[ \t]*[^\s"\]}][^"\n]*(\r?\n)')
 # A stray sentence-punctuation char the model leaks right after a value's close
 # quote, before the next member: `"...All-powerful;".` then a newline + the next
-# key. `. ; :` are never legal between a value and the next member. Two shapes:
-# before the next KEY it is the missing comma; before a CLOSE bracket just drop
-# it. The lookahead (a key-quote, i.e. `"..."` then `:`, or `}`/`]`) keeps
-# punctuation INSIDE strings - always followed by more content - untouched.
+# key. `. ; : ( )` are never legal between a value and the next member - the parens
+# are a parenthetical whose close leaked outside the quote (`"(1948 Indian film")`
+# - the model shut the string early and left the `)` behind). Two shapes: before
+# the next KEY it is the missing comma; before a CLOSE bracket just drop it. The
+# lookahead (a key-quote, i.e. `"..."` then `:`, or `}`/`]`) keeps punctuation
+# INSIDE strings - always followed by more content - untouched.
 _STRAY_PUNCT_BEFORE_KEY_RE = re.compile(
-    r'("\s*)[.;:]+(\s*\n\s*"(?:[^"\\]|\\.)*"\s*:)')
-_STRAY_PUNCT_BEFORE_CLOSE_RE = re.compile(r'("\s*)[.;:]+(\s*[}\]])')
+    r'("\s*)[.;:()]+(\s*\n\s*"(?:[^"\\]|\\.)*"\s*:)')
+_STRAY_PUNCT_BEFORE_CLOSE_RE = re.compile(r'("\s*)[.;:()]+(\s*[}\]])')
 # Several comma-separated strings as one value, no array brackets:
 # `"evidence": "s1", "s2", "s3",`. Merge them. The anchor on `:` keeps real
 # array elements out; the lookahead keeps the next key (always followed by a

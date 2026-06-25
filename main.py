@@ -693,13 +693,15 @@ class Pipeline:
         # 6. Build graph + metrics.
         builder = GephiBuilder()
         tables = builder.build(entities, relationships, agg.timeline, manifest=manifest,
-                               period_fn=self.domain.temporal_period)
+                               period_fn=self.domain.temporal_period,
+                               edge_qualifiers=self.config.intelligence.edge_qualifiers)
 
         # 6b. Optional NetworkX SNA metrics Gephi can't compute (brokerage,
         # bridges, articulation) + graph-health QA. Fail-soft; opt-in.
         if self.config.export.graph_metrics:
             from postprocess import graph_metrics
-            report = graph_metrics.enrich(tables)
+            report = graph_metrics.enrich(
+                tables, trust_verification=self.config.quality.trust_verification)
             if report:
                 report["quality_pillars"] = graph_metrics.quality_pillars(report, tables)
                 import json as _json

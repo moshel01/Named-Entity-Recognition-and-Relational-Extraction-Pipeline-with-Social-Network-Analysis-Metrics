@@ -37,7 +37,9 @@ def _build_graph(node_ids, edges, keep_classes: set[str] | None,
             continue
         # Edges the relation verifier could not ground in their own evidence are
         # tagged (and stay in the export) but must not drive structural-hole or
-        # bridge analysis. No-op unless verify_relations ran (else field is "").
+        # bridge analysis - IF the verifier is trustworthy (quality.trust_verification).
+        # A weak local self-verifier over-rejects, so this defaults off and the
+        # flags only tag. No-op unless verify_relations ran (else field is "").
         if drop_unsupported and e.get("verification") == "unsupported":
             continue
         s, t = e.get("Source"), e.get("Target")
@@ -214,12 +216,17 @@ def quality_pillars(report: dict[str, Any], tables) -> dict[str, Any]:
         return {}
 
 
-def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
+def enrich(tables, *, trust_verification: bool = False,
+           max_constraint_nodes: int = 6000) -> dict[str, Any]:
     """Attach brokerage/bridge columns to ``tables`` and return a QA report.
 
     Mutates ``tables.nodes`` (adds ``sna_constraint``, ``sna_effective_size``,
     ``sna_is_articulation``) and ``tables.edges`` (adds ``is_bridge``). Returns a
     diagnostics dict for logging / a report file. Fail-soft throughout.
+
+    ``trust_verification`` (quality.trust_verification) gates whether
+    verification=unsupported edges are pruned from the metric graphs; off for
+    weak local verifiers that over-reject (see QualityConfig).
     """
     report: dict[str, Any] = {}
     try:
@@ -231,7 +238,8 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     try:
         node_ids = [n["Id"] for n in tables.nodes]
         g_full = _build_graph(node_ids, tables.edges, None)
-        g_sub = _build_graph(node_ids, tables.edges, _SUBSTANTIVE, drop_unsupported=True)
+        g_sub = _build_graph(node_ids, tables.edges, _SUBSTANTIVE,
+                             drop_unsupported=trust_verification)
         report["qa_full"] = _qa(g_full)
         report["qa_substantive"] = _qa(g_sub)
     except Exception as exc:  # noqa: BLE001
@@ -279,10 +287,12 @@ def enrich(tables, *, max_constraint_nodes: int = 6000) -> dict[str, Any]:
     report["bridges"] = len(bridges)
     report["articulation_points"] = len(articulation)
 
-    # Verifier-flagged edges drop out of the signed analysis too: an unsupported
-    # stance edge makes false balance triads and phantom polarity conflicts. No-op
-    # when verify_relations did not run (field empty).
-    signed_edges = [e for e in tables.edges if e.get("verification") != "unsupported"]
+    # Verifier-flagged edges drop out of the signed analysis too - same trust
+    # gate: an unsupported stance edge makes false balance triads, but only a
+    # reliable verifier earns the drop. Weak local flags stay in (tagged, not
+    # cut). No-op when verify_relations did not run (field empty).
+    signed_edges = [e for e in tables.edges
+                    if not (trust_verification and e.get("verification") == "unsupported")]
 
     # Signed structural balance over the full edge set (stance edges carry the
     # sign; substantive-only would drop them since stance is non-social).

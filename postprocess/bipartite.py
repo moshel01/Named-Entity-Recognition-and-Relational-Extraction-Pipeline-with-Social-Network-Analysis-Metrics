@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 _GROUP_LABELS = frozenset({"ORG", "INSTITUTION", "EVENT"})
 _ACTOR_LABELS = frozenset({"PERSON"})
 
+# Affiliation-class relations that are directed TRANSACTIONS or ownership, not
+# shared-group co-membership. They stay substantive directed edges but must not
+# forge a co_affiliated tie: two donors to the same PAC are not "members together"
+# the way two board members are, and projecting them makes co-funding
+# indistinguishable from co-membership in the output. Co-membership/participation
+# (board_member_of, member_of, responded_to, ...) still projects.
+_NON_PROJECTING = frozenset({
+    "funded", "donated_to", "granted", "provided_resources_to", "contracted",
+    "owns", "owned_by", "controls", "subsidiary_of", "fiscal_sponsor_of",
+    "coordinated_with",
+})
+
 
 def project_affiliations(
     entities: list[Entity], edges: list[Relationship], min_shared: int = 1,
@@ -60,6 +72,8 @@ def project_affiliations(
         cls = tie_classes.classify(r.rel_type, sl, tl)
         if cls not in ("affiliation", "participation"):
             continue
+        if (r.rel_type or "").lower() in _NON_PROJECTING:
+            continue  # directed transaction/ownership, not shared-group membership
         # The group is the org/institution/event endpoint, the actor the other.
         if tl in groups and sl in actors:
             group, actor = r.target, r.source

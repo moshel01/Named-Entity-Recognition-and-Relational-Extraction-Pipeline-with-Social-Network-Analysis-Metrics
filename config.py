@@ -289,6 +289,14 @@ class QualityConfig(BaseModel):
     verify_drop: bool = False
     verify_max: int = 0             # cap edges verified (0 = all eligible); cost knob
     verify_batch_size: int = 20
+    # Whether the verifier's unsupported flags are reliable enough to PRUNE the
+    # SNA metric graph (brokerage/bridges/signed balance), not just tag edges in
+    # the export. Strong verifiers (api/gemini, ~80% precision) earn the prune;
+    # weak local self-verifiers (qwen over-rejects ~50%) do not - keep this False
+    # for ollama or half the real ties vanish from the structure before it is
+    # measured. Off => unsupported is tagged everywhere, dropped from metrics
+    # nowhere. The export is unchanged either way.
+    trust_verification: bool = False
 
 
 class InferenceConfig(BaseModel):

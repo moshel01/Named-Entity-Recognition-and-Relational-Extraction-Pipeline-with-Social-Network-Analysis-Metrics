@@ -141,9 +141,13 @@ in-process fastcoref, then the heuristic resolver. Setup:
   now ships too: `quality.verify_relations` (`relation_verify.py`) re-checks each LLM
   edge against its evidence (tag or drop), and `ontology.check_functional_consistency`
   flags a subject with two different birthplaces/birthdates (knowledge alignment).
-  Measured caveat: a weak local model over-rejects as a self-verifier, so verify is
-  most trustworthy with a model at least as strong as the extractor. The full
-  nine-agent loop (each step its own, stronger model) stays deferred — API-scale.
+  Measured caveat: a weak local model over-rejects as a self-verifier (qwen3.5:9b
+  flagged ~50% of its own edges on the Abel pilot), so verify is most trustworthy
+  with a model at least as strong as the extractor. Because of that, the flag only
+  TAGS by default; `quality.trust_verification` gates whether it also prunes the SNA
+  metric graph (brokerage/bridges/balance) — on only behind a strong verifier, else
+  the over-rejection deletes half the real ties before the structure is measured.
+  The full nine-agent loop (each step its own, stronger model) stays deferred — API-scale.
 - **Verified extraction (Serdiukov et al. 2026).** Schema-guided JSON with a
   recovery module that rescues systematically corrupted output. Their finding —
   most LLM extraction failures are correctable formatting, not semantic — is

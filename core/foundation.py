@@ -260,4 +260,12 @@ class FoundationLayer:
             "Foundation: %s -> %d chunks, %d mentions",
             document.doc_id, len(chunks), n_ent,
         )
+        # Coref yield per doc: makes a silent heuristic-fallback visible (0 added
+        # on multi-person text is the tell). Only when pronoun resolution is on.
+        if self.coref is not None and self.coref.pronoun_resolution:
+            logger.debug(
+                "Foundation: %s coref (%s) added %d pronoun + %d narrator mentions",
+                document.doc_id, self.coref.pronoun_backend or "none",
+                self.coref.n_pronoun_added, self.coref.n_narrator_added,
+            )
         return results

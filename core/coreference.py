@@ -48,6 +48,20 @@ class CoreferenceResolver:
         self._fcoref_failed = False
         self._service_failed = False
         self._service_warmed = False
+        # Observability: which pronoun backend is live + how much it produced, so a
+        # run shows whether neural coref actually ran or quietly fell back to the
+        # heuristic (the easy-to-miss "fastcoref unavailable" warning). Announced
+        # once on first use; counts logged per document in foundation.
+        self.pronoun_backend = ""        # "service" | "neural" | "heuristic"
+        self.n_pronoun_added = 0
+        self.n_narrator_added = 0
+
+    def _announce_backend(self, backend: str) -> None:
+        if backend != self.pronoun_backend:
+            self.pronoun_backend = backend
+            note = ("nearest-antecedent heuristic (install fastcoref + transformers<5 "
+                    "for neural coref)" if backend == "heuristic" else backend)
+            logger.info("Coref pronoun backend: %s.", note)
 
     # Narrator (always available)
     def narrator_mentions(
@@ -74,6 +88,7 @@ class CoreferenceResolver:
                                 "surface_pronoun": m.group(0)},
                 )
             )
+        self.n_narrator_added += len(mentions)
         return mentions
 
     # fastcoref (optional)
@@ -88,6 +103,8 @@ class CoreferenceResolver:
             # (all_tied_weights_keys API change) - probe with a tiny input now
             # so we fall back once instead of failing on every chunk.
             self._fcoref.predict(texts=["He met Tom."])
+            logger.info("Coref: neural fastcoref loaded (%s, device=%s).",
+                        self.model_name, dev)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "fastcoref unavailable (%s); falling back to the heuristic "
@@ -271,10 +288,15 @@ class CoreferenceResolver:
             return []
         clusters = self._get_clusters(text)
         if clusters is None:
-            return self.heuristic_pronoun_mentions(text, mentions, doc_id,
-                                                   chunk_id, offset)
-        return self._mentions_from_clusters(clusters, text, mentions, doc_id,
-                                            chunk_id, offset)
+            self._announce_backend("heuristic")
+            out = self.heuristic_pronoun_mentions(text, mentions, doc_id,
+                                                  chunk_id, offset)
+        else:
+            self._announce_backend("service" if self.service_url else "neural")
+            out = self._mentions_from_clusters(clusters, text, mentions, doc_id,
+                                               chunk_id, offset)
+        self.n_pronoun_added += len(out)
+        return out
 
     # Combined
     def resolve(

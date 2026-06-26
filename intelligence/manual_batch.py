@@ -137,6 +137,29 @@ def _assemble(header: str, blocks: list[str]) -> str:
     return header + "\nDOCUMENTS:\n" + "\n".join(blocks)
 
 
+def _retry_after_seconds(resp) -> "float | None":
+    """The server-requested wait for a throttled response, or None.
+
+    Honors the `Retry-After` header, else Gemini's RetryInfo.retryDelay (e.g.
+    "27s") in the error body. Lets a 429 back off exactly to the quota refresh
+    instead of guessing - the per-minute limit refreshes in seconds, so a fixed
+    exponential climb both over-waits (early) and under-waits (re-trips the limit)."""
+    ra = getattr(resp, "headers", {}).get("Retry-After") if hasattr(resp, "headers") else None
+    if ra:
+        try:
+            return float(ra)
+        except (TypeError, ValueError):
+            pass
+    try:
+        for d in (resp.json().get("error", {}).get("details", []) or []):
+            rd = d.get("retryDelay")
+            if isinstance(rd, str) and rd.endswith("s"):
+                return float(rd[:-1])
+    except Exception:  # noqa: BLE001 - body not JSON / unexpected shape -> no hint
+        pass
+    return None
+
+
 def submit_to_gemini(prompt: str, api_key: str, model: str = "gemini-2.5-flash",
                      base_url: str = "", max_output_tokens: int = 65536,
                      thinking_budget: int = 0, timeout: int = 600,
@@ -156,7 +179,10 @@ def submit_to_gemini(prompt: str, api_key: str, model: str = "gemini-2.5-flash",
     url = f"{base}/v1beta/models/{model}:generateContent"
     gen_config = {"temperature": 0, "maxOutputTokens": max_output_tokens,
                   "responseMimeType": "application/json"}
-    if thinking_budget >= 0:
+    # thinkingConfig is a Gemini 2.5+ feature; Gemma (and the open models) reject it,
+    # so never send it for those - lets `--batch-model gemma-...` work unchanged.
+    supports_thinking = "gemma" not in model.lower()
+    if thinking_budget >= 0 and supports_thinking:
         tb = thinking_budget
         if tb == 0 and "pro" in model.lower():
             tb = 128  # 2.5-pro can't fully disable thinking; 128 is its floor
@@ -170,9 +196,14 @@ def submit_to_gemini(prompt: str, api_key: str, model: str = "gemini-2.5-flash",
     for attempt in range(max_retries):
         resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
         if resp.status_code in (429, 500, 503) and attempt < max_retries - 1:
-            logger.warning("Gemini %s (attempt %d/%d); backing off %.0fs",
-                           resp.status_code, attempt + 1, max_retries, backoff)
-            time.sleep(backoff)
+            server = _retry_after_seconds(resp)
+            # Server hint wins (capped so a day-quota delay fails fast -> --resume
+            # later rather than hang for hours); else exponential backoff.
+            wait = min(server, 120.0) if server is not None else backoff
+            logger.warning("Gemini %s (attempt %d/%d); waiting %.0fs%s",
+                           resp.status_code, attempt + 1, max_retries, wait,
+                           " (server-requested)" if server is not None else "")
+            time.sleep(wait)
             backoff = min(backoff * 2, 120)
             continue
         resp.raise_for_status()

@@ -232,6 +232,26 @@ class IntelligenceConfig(BaseModel):
     # benchmark/Abel run doesn't pay for them unasked). Needs the key set.
     batch_post_llm: bool = False
     batch_request_timeout: int = 600
+    # gemini_batch only: after the whole-doc reply lands, re-run local GLiNER/spaCy
+    # NER and fold the spans back onto the span-less LLM entities (the model gives
+    # names, not offsets). Re-activates the within-doc proximity co-occurrence floor
+    # + evidence grounding that gemini_batch otherwise loses. Post-hoc, not prompt
+    # priming (priming anchors the model to GLiNER's noise). Loads the foundation
+    # models at analyze time. Off by default; A/B it before committing a big run.
+    reconcile_ner: bool = False
+    # The recall net: also ADD GLiNER entities the LLM missed, tagged ner_only.
+    # Measured FALSE by default: on the Abel pilot it added ~1850 GLiNER over-
+    # extractions to 297 real entities (asserted tier collapsed 85% -> 2%), because a
+    # thorough whole-doc extractor leaves GLiNER mostly noise. Turn on only for a
+    # SPARSE corpus where the LLM genuinely under-extracts. Span transfer (the useful
+    # half) does not need it.
+    reconcile_add_missed: bool = False
+    # Proactive client-side request cap for --submit (requests/minute). The free
+    # gemini-2.5-flash tier is ~10 RPM; without pacing the loop POSTs back-to-back,
+    # trips 429, and eats exponential backoff. Set to the tier limit to space
+    # request starts evenly instead. No-op when batches are slower than the interval
+    # anyway (whole-doc replies usually are). 0 = unthrottled (rely on 429 retry).
+    batch_rpm: int = 0
 
 
 class DedupConfig(BaseModel):

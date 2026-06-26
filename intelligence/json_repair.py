@@ -28,7 +28,24 @@ _MISSING_COMMA_NUM_RE = re.compile(r'(\d)\s*\n(\s*["{\[])')
 
 
 def _outermost_span(text: str) -> str:
-    """Trim a blob to its outermost { } / [ ] span, dropping prose either side."""
+    """Trim a blob to its outermost { } / [ ] span, dropping prose either side.
+
+    A prose preamble can carry stray brackets - gemma ignores responseMimeType and
+    echoes the prompt ("`confidence` float [0, 1]. {...the real JSON...}") - so
+    anchoring on the first of ANY bracket lands the start inside the prose. Try the
+    object span and the array span on their own; if one parses cleanly, take it.
+    Otherwise fall back to the outermost-any-bracket span for the repair ladder.
+    """
+    obj_s, obj_e = text.find("{"), text.rfind("}")
+    arr_s, arr_e = text.find("["), text.rfind("]")
+    for s, e in ((obj_s, obj_e), (arr_s, arr_e)):
+        if 0 <= s < e:
+            span = text[s:e + 1]
+            try:
+                json.loads(span)
+                return span
+            except json.JSONDecodeError:
+                pass
     starts = [i for i, c in enumerate(text) if c in "{["]
     ends = [i for i, c in enumerate(text) if c in "}]"]
     if starts and ends:

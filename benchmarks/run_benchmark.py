@@ -66,8 +66,16 @@ def main(argv: list[str] | None = None) -> int:
                          "into the JSON. Tags the run variant _struct for A/B.")
     ap.add_argument("--coref", action="store_true",
                     help="Enable cross-sentence pronoun/alias coreference (off by "
-                         "default). Lifts relation recall on coref-heavy RE sets "
-                         "(redocred, dwie); needs fastcoref. Tags variant _coref.")
+                         "default; needs fastcoref + transformers<5, else it silently "
+                         "uses a weak heuristic). Feeds a pronoun->name REFERENCE KEY "
+                         "into the extraction prompt (the cross-sentence recall lever) "
+                         "plus the co-occurrence layer. A/B it - the gain depends on "
+                         "neural clusters firing. Tags variant _coref.")
+    ap.add_argument("--coref-service", default="",
+                    help="Route coref to the uvicorn microservice at this URL "
+                         "(e.g. http://127.0.0.1:8000) instead of in-process "
+                         "fastcoref. Implies --coref. Use when the pipeline venv has "
+                         "transformers>=5 (in-process fastcoref breaks there).")
     ap.add_argument("--run", action="store_true", help="Invoke the pipeline after prep.")
     ap.add_argument("--resume", action="store_true",
                     help="Pass --resume to the pipeline: skip docs already in the "
@@ -121,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         variant += "_constr"
     if args.structured_output:
         variant += "_struct"
-    if args.coref:
+    if args.coref or args.coref_service:
         variant += "_coref"
     work = Path(args.workdir)
     ds_dir = work / args.dataset
@@ -142,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         min_entity_confidence=args.min_entity_confidence,
         structured_output=args.structured_output,
         coref=args.coref,
+        coref_service_url=args.coref_service,
     )
     run_dir = output_dir / run_name
     print(f"  inputs : {input_dir}")

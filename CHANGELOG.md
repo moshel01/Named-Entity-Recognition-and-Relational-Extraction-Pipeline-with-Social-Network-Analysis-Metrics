@@ -4,6 +4,113 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## run_meta provenance fix (analyze no longer clobbers the extract model)
+
+Two bugs in `run_meta.json`: (1) the top-level `model` field read `<mode>.model`,
+which is empty for gemini_batch (its model is `intelligence.batch_model`, no
+`gemini_batch` sub-config) - so the recorded model was blank; (2) `_write_run_meta`
+overwrote the file wholesale on every invocation, so an analyze-only re-run (which
+carries default settings - the user rarely re-passes `--batch-model`) clobbered the
+model/config that the extract step recorded. A `--stage analyze` after a
+`--batch-model gemini-3.5-flash` extract silently rewrote the model to the default.
+Now `_effective_model` resolves gemini_batch -> batch_model, and an analyze-only run
+PRESERVES the prior extract-time model + config snapshot instead of overwriting them.
+
+## json_repair: strip a prose preamble that carries stray brackets
+
+Gemma-4-31b ignores `responseMimeType: application/json` and prepends a prose
+paraphrase of the prompt before the real JSON - and that prose carries stray
+brackets ("`confidence` float [0, 1]."). `_outermost_span` anchored on the first of
+ANY bracket, so the span started inside the prose and every doc failed to parse (the
+5-doc gemma test imported 0). Now it tries the `{`-object span and `[`-array span on
+their own and takes whichever parses cleanly, falling back to the old behavior for
+the repair ladder. The extraction content was always fine - this was purely a parse
+anchor. Both failed gemma replies recover; +regression test.
+
+## gemini_batch: Gemma support + server-aware retry backoff
+
+The free flash tiers have a hard daily request cap that walls a 537-doc run; Gemma 4
+31B on AI Studio is free with an UNLIMITED daily quota (15 RPM), so it's the practical
+bulk extractor. Two fixes to make `--batch-model gemma-...` work on the same
+gemini_batch path: (1) `thinkingConfig` is a Gemini 2.5+ feature that Gemma's endpoint
+rejects - now never sent for gemma models; (2) `submit_to_gemini` reads the server's
+`Retry-After` header / `RetryInfo.retryDelay` and waits exactly that long on a 429/503
+(capped 120s so a day-quota delay fails fast for `--resume`) instead of guessing with
+fixed exponential backoff. Pair with `--batch-rpm` set to the model's RPM.
+
+## Reconciliation recall-net OFF by default (Abel A/B result)
+
+A/B on the 40-doc Abel pilot: `--reconcile-ner` with the recall net ON blew the graph
+up - 297 -> 2150 nodes, asserted tier 85% -> 2%, 16k co-occurrence edges - because
+GLiNER over-extracts on German text (places, partial spans, common nouns) exactly the
+noise a thorough whole-doc extractor correctly skips. The span-transfer half (giving
+the ~250 real entities positions) worked but drowned. So `reconcile_add_missed`
+defaults FALSE now: `--reconcile-ner` does span transfer only (proximity floor +
+grounding for the real entities), and the recall net is opt-in for sparse corpora
+where the LLM genuinely under-extracts.
+
+## Span reconciliation for gemini_batch (--reconcile-ner)
+
+gemini_batch entities arrive span-less (the model returns names, not offsets), so
+`(0,0)` mentions are skipped by the proximity builder - gemini_batch has no within-doc
+co-occurrence floor and no verbatim evidence grounding. `--reconcile-ner` /
+`intelligence.reconcile_ner` re-runs local GLiNER+spaCy on each doc AFTER the whole-doc
+reply and folds spans back in (`postprocess/span_reconcile.py`): a GLiNER mention whose
+normalized name matches an LLM entity is relabeled to the LLM type and added (span
+transfer - it aggregates to the same node, now positioned), re-activating proximity;
+unmatched GLiNER mentions are added as a recall net (`reconcile_add_missed`, tagged
+`ner_only`, filterable). Deliberately POST-HOC, not prompt priming - priming a strong
+model with GLiNER candidates anchors it to GLiNER's noise (measured: ollama entity F1
+== GLiNER's standalone F1, the LLM rubber-stamped the candidate list). Off by default;
+loads the foundation at analyze time. A/B knob for "best data" runs.
+
+## gemini_batch free-tier pacing (--batch-rpm)
+
+Before a full Abel run: `--submit` POSTed batches back-to-back and only backed off
+after a 429, churning exponential backoff against the free gemini-2.5-flash 10-RPM
+limit. Added `intelligence.batch_rpm` / `--batch-rpm` to proactively space request
+starts (pure `_rpm_delay` helper, tested). 0 = unthrottled; no-op when whole-doc
+replies are slower than the interval anyway. For reference, gemini_batch hits the
+API for EXTRACTION ONLY (NER + relations + timeline, coref handled internally by the
+whole-doc model); dedup/identity/wikidata/ontology/projection/backbone/graph-metrics
+all run locally. `--batch-post-llm` is the opt-in that also routes the guarded LLM
+post-steps (dedup/review/enrichment) through Gemini.
+
+## Coref reference-key in the extraction prompt
+
+The reason `--coref` didn't move LLM typed-RE recall: the resolved name collapsed
+into the deduped candidate list, so the pronoun->name mapping never reached the
+model, which extracts from raw chunk text. Now `build_extraction_prompt` emits a
+REFERENCE KEY block from the coref mentions' `resolved_from` attribute
+(`"he" -> John Smith`), telling the model to attribute a tie stated through a
+pronoun to the named entity. Strictly additive + gated: no resolved mentions (any
+non-coref run) -> no block -> byte-identical prompt, so nothing else changes. This
+is the cross-sentence-recall lever coref was supposed to be; A/B it with `--coref`
+(needs neural fastcoref to produce useful clusters - the heuristic yields almost
+nothing on multi-person text).
+
+## Coref observability + an honest correction
+
+Ran the `--coref` redocred A/B. It barely moved (untyped conservative R 0.136 -> 0.139,
++1 tp; full recall identical; +15 co-occurrence edges) and "looked like coref didn't
+activate." Two reasons, now addressed:
+
+- **Silent heuristic fallback is no longer silent.** Without fastcoref (or under
+  transformers 5.x, where the predict-time API broke), the resolver quietly used the
+  nearest-antecedent heuristic - which skips any pronoun with >1 candidate, i.e. almost
+  everything in multi-person text. The only signal was an easy-to-miss one-time warning.
+  Now the resolver records the live pronoun backend (`neural`/`service`/`heuristic`),
+  announces it once at INFO, logs neural load success, and counts pronoun/narrator
+  mentions per doc (foundation, DEBUG). 0 added on multi-person text is the tell.
+- **Correction: `--coref` is not an LLM typed-RE recall lever.** Last round's help text
+  claimed it "lifts relation recall on coref-heavy RE sets." The data says otherwise:
+  coref re-emits pronoun->name MENTIONS that feed co-occurrence + the LLM candidate
+  list, but the LLM still extracts from raw chunk text, so typed-RE recall is ~flat.
+  It densifies the co-occurrence / character-graph layer (python_only), which is where
+  it earns its keep. Help text + builder docstring corrected to match the measurement.
+  (Raising LLM typed-RE recall via coref would mean passing the cluster map INTO the
+  extraction prompt - a separate, unbuilt experiment.)
+
 ## Post-run audit: weak-verifier metric prune, benchmark fixes, qualifier schema
 
 Validated the prior round on real runs (abel_ol_v2 ollama + InfluenceWatch/OREM

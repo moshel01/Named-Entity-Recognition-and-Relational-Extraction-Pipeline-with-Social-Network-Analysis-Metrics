@@ -48,6 +48,13 @@ def test_json_repair() -> None:
         # the value, shut the string early, and left the `)` before the close
         # (`"evidence": "(1948 Indian film")`). Lost a whole redocred doc.
         ("stray paren before close", '{"e": "(1948 film")\n}', {"e": "(1948 film"}),
+        # Gemma ignores responseMimeType and prepends a prose paraphrase of the
+        # prompt - which carries stray brackets ("confidence float [0, 1].") - then
+        # the real JSON. Anchoring on the first bracket lands in the prose; the object
+        # span must win. Lost every gemma-4-31b doc before this.
+        ("prose preamble with stray bracket",
+         'Task: extract. confidence float [0, 1].\n{"doc_a": {"entities": []}}',
+         {"doc_a": {"entities": []}}),
         ("stray paren before key", '{"e": "(1948 film")\n  "k": 2}',
          {"e": "(1948 film", "k": 2}),
         # A period that legitimately ENDS the string content must be left alone.
@@ -414,6 +421,54 @@ def test_coref_clusters() -> None:
     # No named identity overlapping the cluster -> nothing emitted.
     check("no identity -> empty",
           r._mentions_from_clusters([[[14, 16]]], text, [], "d1", "c0", 0) == [])
+
+
+def test_coref_prompt_hint() -> None:
+    # Coref clusters never reached the LLM (the resolved name deduped into the
+    # candidate list). The REFERENCE KEY surfaces pronoun->name so the model can
+    # attribute a cross-sentence tie. Gated: no resolved mentions -> no block, so a
+    # non-coref prompt is byte-identical.
+    from intelligence.prompts import coref_reference_block, build_extraction_prompt
+    from core.schema import EntityMention
+    print("-- coref reference-key prompt hint")
+    plain = EntityMention(text="John Smith", label="PERSON", start_char=0, end_char=10,
+                          chunk_id="c", doc_id="d")
+    resolved = EntityMention(text="John Smith", label="PERSON", start_char=40, end_char=42,
+                             chunk_id="c", doc_id="d", attributes={"resolved_from": "he"})
+    resolved2 = EntityMention(text="John Smith", label="PERSON", start_char=60, end_char=63,
+                              chunk_id="c", doc_id="d", attributes={"resolved_from": "his"})
+    blk = coref_reference_block([plain, resolved, resolved2])
+    check("reference key lists the name", "John Smith" in blk and "REFERENCE KEY" in blk, blk)
+    check("both pronouns grouped", '"he"' in blk and '"his"' in blk, blk)
+    # No resolved mentions -> empty, and the prompt is unchanged vs candidates-only.
+    check("no coref -> no block", coref_reference_block([plain]) == "", "")
+    p_plain = build_extraction_prompt("Some text.", [plain], ["PERSON"])
+    p_coref = build_extraction_prompt("Some text.", [plain, resolved], ["PERSON"])
+    check("non-coref prompt has no reference key", "REFERENCE KEY" not in p_plain, "")
+    check("coref prompt injects the key", "REFERENCE KEY" in p_coref, "")
+
+
+def test_coref_observability() -> None:
+    # A silent heuristic fallback (no fastcoref) looked like coref "not activating".
+    # The resolver now records the live backend + a mention count so a run can show
+    # it. With no service and no fastcoref, pronoun_mentions resolves to heuristic.
+    from types import SimpleNamespace
+    from config import CoreferenceConfig
+    from core.coreference import CoreferenceResolver
+    from core.schema import EntityMention
+    print("-- coref observability (backend + counts)")
+    cfg = SimpleNamespace(coreference=CoreferenceConfig(
+        enabled=True, pronoun_resolution=True))   # no service_url, no fastcoref
+    r = CoreferenceResolver(cfg)
+    r._fcoref_failed = True        # force the fastcoref-unavailable path
+    check("backend unset before use", r.pronoun_backend == "", r.pronoun_backend)
+    text = "Hitler spoke at length. He then left the hall."   # one unambiguous PERSON
+    m = EntityMention(text="Hitler", label="PERSON", start_char=0, end_char=6,
+                      chunk_id="c0", doc_id="d1")
+    out = r.pronoun_mentions(text, [m], "d1", "c0", 0)
+    check("heuristic backend recorded", r.pronoun_backend == "heuristic", r.pronoun_backend)
+    check("pronoun count tracked", r.n_pronoun_added == len(out) and len(out) >= 1,
+          f"added={r.n_pronoun_added} out={len(out)}")
 
 
 def test_html_extraction() -> None:
@@ -1779,6 +1834,82 @@ def test_edge_qualifiers() -> None:
     check("no qualifier slot when none declared", '"monetary_value"' not in bare, "")
 
 
+def test_run_meta_provenance() -> None:
+    # run_meta records the model that produced the checkpoint AT EXTRACT TIME. An
+    # analyze-only re-run carries default settings (the user rarely re-passes
+    # --batch-model), so it must not clobber the extraction model. Also: gemini_batch
+    # keeps its model in batch_model, not a `gemini_batch` sub-config.
+    import json
+    import tempfile
+    from pathlib import Path
+    from main import Pipeline
+    from config import load_config
+    print("-- run_meta preserves the extraction model across analyze re-runs")
+    cfg = load_config("domain/nazi_era/config_nazi_era.yaml")
+    cfg.mode = "gemini_batch"
+    cfg.intelligence.batch_model = "gemini-3.5-flash"
+    p = Pipeline(cfg)
+    p.run_dir = Path(tempfile.mkdtemp())
+    p._write_run_meta("extract", resume=False, limit=40)
+    m1 = json.loads((p.run_dir / "run_meta.json").read_text(encoding="utf-8"))
+    check("extract records batch_model (not blank)", m1["model"] == "gemini-3.5-flash", m1["model"])
+    # Analyze re-run carrying the DEFAULT model must preserve the extraction model.
+    cfg.intelligence.batch_model = "gemini-2.5-flash"
+    p._write_run_meta("analyze", resume=False, limit=40)
+    m2 = json.loads((p.run_dir / "run_meta.json").read_text(encoding="utf-8"))
+    check("analyze preserves the extraction model", m2["model"] == "gemini-3.5-flash", m2["model"])
+    check("analyze still updates the stage", m2["stage"] == "analyze", m2["stage"])
+    check("preserved config keeps the extract model",
+          m2["config"]["intelligence"]["batch_model"] == "gemini-3.5-flash",
+          m2["config"]["intelligence"]["batch_model"])
+
+
+def test_span_reconcile() -> None:
+    # gemini_batch entities are span-less (0,0); reconciliation folds local GLiNER
+    # spans onto them (span transfer, relabeled to the LLM type so they aggregate to
+    # the same node) and adds GLiNER-only mentions as a recall net (tagged ner_only).
+    from core.schema import DocumentExtraction, EntityMention
+    from postprocess.span_reconcile import reconcile_spans
+    print("-- span reconciliation (gemini_batch GLiNER fold-in)")
+
+    def llm_m(name, label):
+        return EntityMention(text=name, label=label, start_char=0, end_char=0,
+                             chunk_id="c", doc_id="d", sources=["llm"])
+    ex = DocumentExtraction("d", "p", mentions=[llm_m("Adolf Hitler", "PERSON"),
+                                                llm_m("NSDAP", "ORG")])
+    # GLiNER (span-grounded): "Hitler" matches the LLM person but GLiNER mistyped it
+    # ORG; "Munich" is GLiNER-only (recall net). normalize_name folds "Adolf Hitler"
+    # and "Hitler"? No - different surfaces. Use the LLM's own surface to prove transfer.
+    # (coref-sourced mentions are dropped by the main wrapper before this, so the
+    # stub returns only GLiNER spans - what reconcile_spans actually receives.)
+    def ner_fn(doc_id, text):
+        return [
+            EntityMention(text="Adolf Hitler", label="ORG", start_char=10, end_char=22,
+                          chunk_id="c", doc_id="d", sources=["gliner"]),
+            EntityMention(text="Munich", label="LOCATION", start_char=30, end_char=36,
+                          chunk_id="c", doc_id="d", sources=["gliner"]),
+        ]
+    stats = reconcile_spans([ex], {"d": "x" * 50}, ner_fn, add_missed=True)
+    check("one span transferred", stats["transferred"] == 1, str(stats))
+    check("one ner-only added", stats["added"] == 1, str(stats))
+    transferred = [m for m in ex.mentions if m.attributes.get("reconciled") == "ner_reconciled"]
+    check("transfer relabeled to LLM type (PERSON not ORG)",
+          len(transferred) == 1 and transferred[0].label == "PERSON", str(transferred))
+    check("transfer carries a real span",
+          transferred and transferred[0].start_char == 10 and transferred[0].end_char == 22, "")
+    only = [m for m in ex.mentions if m.attributes.get("reconciled") == "ner_only"]
+    check("ner-only is the unmatched Munich", len(only) == 1 and only[0].text == "Munich", str(only))
+
+    # add_missed off: span transfer still happens, recall net suppressed.
+    ex2 = DocumentExtraction("d", "p", mentions=[llm_m("Adolf Hitler", "PERSON")])
+    s2 = reconcile_spans([ex2], {"d": "x" * 50}, ner_fn, add_missed=False)
+    check("add_missed off -> no recall net", s2["added"] == 0 and s2["transferred"] == 1, str(s2))
+    # A doc with no text is skipped (no NER run).
+    ex3 = DocumentExtraction("d", "p", mentions=[llm_m("X", "PERSON")])
+    s3 = reconcile_spans([ex3], {}, ner_fn, add_missed=True)
+    check("missing text -> doc skipped", s3["docs"] == 0, str(s3))
+
+
 def test_manual_batch() -> None:
     from intelligence.manual_batch import (build_batch_prompt, parse_batch_response,
                                            _coerce_doc_map)
@@ -1882,6 +2013,17 @@ def test_gemini_batch_resume() -> None:
     check("live cfg uses the batch key", api.api_key_env == "GEMINI_API_KEY", api.api_key_env)
     check("live cfg uses the batch model", api.model.startswith("gemini-"), api.model)
 
+    # Proactive --submit pacing: hold request starts at batch_rpm/min so a free-tier
+    # run doesn't trip 429 and burn backoff. 0 = unthrottled.
+    from main import _rpm_delay
+    check("rpm 0 -> no throttle", _rpm_delay(100.0, 100.0, 0) == 0.0, "")
+    check("rpm 10 -> 6s spacing, full wait at t=0",
+          abs(_rpm_delay(100.0, 100.0, 10) - 6.0) < 1e-9, str(_rpm_delay(100.0, 100.0, 10)))
+    check("interval already elapsed -> no wait",
+          _rpm_delay(100.0, 110.0, 10) == 0.0, str(_rpm_delay(100.0, 110.0, 10)))
+    check("partway through interval -> remainder",
+          abs(_rpm_delay(100.0, 104.0, 10) - 2.0) < 1e-9, str(_rpm_delay(100.0, 104.0, 10)))
+
 
 def test_gemini_submit() -> None:
     from unittest.mock import MagicMock, patch
@@ -1922,6 +2064,13 @@ def test_gemini_submit() -> None:
     check("negative budget omits thinkingConfig",
           "thinkingConfig" not in seen["body"]["generationConfig"], "")
 
+    # Gemma has no thinking mode and rejects thinkingConfig -> never send it, even at
+    # the default budget (so --batch-model gemma-... works unchanged).
+    with patch("requests.post", ok_post):
+        submit_to_gemini("P", "KEY", model="gemma-4-31b-it", thinking_budget=0)
+    check("gemma omits thinkingConfig",
+          "thinkingConfig" not in seen["body"]["generationConfig"], "")
+
     # 429 -> backoff -> 200 (retry path), with sleep stubbed so the test is instant.
     calls = {"n": 0}
 
@@ -1938,6 +2087,33 @@ def test_gemini_submit() -> None:
     with patch("requests.post", flaky_post), patch("time.sleep", lambda *a: None):
         out2 = submit_to_gemini("P", "KEY", max_retries=3)
     check("retries past 429", out2 == "ok" and calls["n"] == 2, str(calls))
+
+    # Server-requested retry delay is honored exactly (capped), not guessed.
+    from intelligence.manual_batch import _retry_after_seconds
+    h = MagicMock(); h.headers = {"Retry-After": "12"}; h.json = lambda: {}
+    check("Retry-After header parsed", _retry_after_seconds(h) == 12.0, "")
+    b = MagicMock(); b.headers = {}
+    b.json = lambda: {"error": {"details": [{"@type": "RetryInfo", "retryDelay": "27s"}]}}
+    check("retryDelay body parsed", _retry_after_seconds(b) == 27.0, "")
+    n = MagicMock(); n.headers = {}; n.json = lambda: {"error": {}}
+    check("no hint -> None (falls back to backoff)", _retry_after_seconds(n) is None, "")
+    # The 429 retry actually waits the server-requested delay.
+    waited = {}
+
+    def post_with_delay(url, json=None, headers=None, timeout=None):
+        calls["n"] += 1
+        m = MagicMock()
+        if calls["n"] == 1:
+            m.status_code = 429; m.headers = {}
+            m.json = lambda: {"error": {"details": [{"retryDelay": "9s"}]}}
+            return m
+        m.status_code = 200; m.raise_for_status = lambda: None
+        m.json = lambda: {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        return m
+    calls["n"] = 0
+    with patch("requests.post", post_with_delay), patch("time.sleep", lambda s: waited.update(s=s)):
+        submit_to_gemini("P", "KEY", max_retries=3)
+    check("429 waits the server-stated 9s", waited.get("s") == 9.0, str(waited))
 
 
 def test_gexf_parallel_edges() -> None:
@@ -2015,6 +2191,8 @@ def main() -> int:
     test_evidence_grounding()
     test_faithfulness_tags_exported()
     test_edge_qualifiers()
+    test_run_meta_provenance()
+    test_span_reconcile()
     test_manual_batch()
     test_gemini_submit()
     test_gemini_batch_resume()
@@ -2025,6 +2203,8 @@ def main() -> int:
     test_narrative_transitions()
     test_bench_bio()
     test_coref_clusters()
+    test_coref_prompt_hint()
+    test_coref_observability()
     test_connection_type()
     test_html_extraction()
     test_crawl_url_norm()

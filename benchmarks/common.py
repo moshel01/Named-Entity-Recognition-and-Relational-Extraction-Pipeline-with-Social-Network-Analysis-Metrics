@@ -280,16 +280,18 @@ def build_config(
     min_entity_confidence: float = 0.0,
     structured_output: bool = False,
     coref: bool = False,
+    coref_service_url: str = "",
 ) -> Path:
     """Write a pipeline config tuned for a benchmark run.
 
     Benchmarks default to the GENERIC domain with coreference, canonical inference,
     and mandatory membership all OFF. Canonical inference / mandatory membership ADD
-    non-gold edges and depress precision, so they stay off. Coreference does not add
-    nodes - it resolves pronouns/aliases across sentences - so it is the relation-
-    recall ceiling on cross-sentence RE sets (DocRED, DWIE) where the tie spans a
-    pronoun the chunk LLM never linked. Off by default (mis-merges can dent entity
-    precision), opt-in via ``coref`` to A/B that recall.
+    non-gold edges and depress precision, so they stay off. ``coref`` resolves
+    pronouns/aliases to named mentions, which feed co-occurrence + the LLM candidate
+    list (NOT a resolved-text view the LLM extracts from). Measured ~flat on LLM
+    typed-RE recall (redocred), so it is opt-in for co-occurrence / python_only graphs,
+    not a typed-RE recall lever - see CHANGELOG. Needs fastcoref or it falls back to a
+    weak heuristic.
     """
     cfg: dict[str, Any] = {
         "run_name": run_name,
@@ -311,9 +313,13 @@ def build_config(
             "device": "auto",
         },
         # narrator_resolution stays off (benchmark docs have no detected author);
-        # coref here means cross-sentence pronoun/alias resolution only.
-        "coreference": {"enabled": coref, "narrator_resolution": False,
-                        "pronoun_resolution": coref},
+        # coref here means cross-sentence pronoun/alias resolution only. A
+        # service_url routes resolution to the uvicorn microservice (isolates
+        # fastcoref in a transformers<5 venv); empty = in-process fastcoref.
+        "coreference": {"enabled": coref or bool(coref_service_url),
+                        "narrator_resolution": False,
+                        "pronoun_resolution": coref or bool(coref_service_url),
+                        "service_url": coref_service_url},
         "intelligence": {
             "ollama": {"model": ollama_model, "request_timeout": 600},
             "python_only": {"cooccurrence_window": "sentence",

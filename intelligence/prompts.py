@@ -148,6 +148,41 @@ def relation_constraint_block(relation_types: list[str] | None,
     )
 
 
+def coref_reference_block(candidates: list[EntityMention], *, max_names: int = 12,
+                          max_pronouns: int = 4) -> str:
+    """A REFERENCE KEY from coref-resolved mentions (pronoun surface -> named entity).
+
+    Coref re-emits a name at each pronoun span (attribute ``resolved_from`` = the
+    surface pronoun); those collapse into the deduped candidate list, so the
+    pronoun->name mapping never reaches the model. Surfacing it lets the LLM
+    attribute a relation stated through "he"/"it" to the named entity instead of
+    missing the cross-sentence tie. Empty (no block) when coref produced nothing,
+    so a non-coref run's prompt is unchanged. Narrator first-person mentions carry
+    ``surface_pronoun`` (not ``resolved_from``) and are handled by NARRATOR, so they
+    do not double up here.
+    """
+    by_name: dict[str, list[str]] = {}
+    for m in candidates:
+        surface = (m.attributes or {}).get("resolved_from")
+        name = (m.text or "").strip()
+        if not surface or not name:
+            continue
+        prons = by_name.setdefault(name, [])
+        if surface not in prons and len(prons) < max_pronouns:
+            prons.append(surface)
+    if not by_name:
+        return ""
+    lines = []
+    for name, prons in list(by_name.items())[:max_names]:
+        refs = ", ".join(f'"{p}"' for p in prons)
+        lines.append(f"  - {refs} -> {name}")
+    return (
+        "\nREFERENCE KEY - a coref model resolved these pronouns to named entities. "
+        "When a relationship is stated through one of these references, attribute it "
+        "to the named entity, not the pronoun:\n" + "\n".join(lines) + "\n"
+    )
+
+
 def qualifier_constraint_block(edge_qualifiers: list[str] | None) -> str:
     """The EDGE QUALIFIERS instruction (pairs with the schema-injected slots)."""
     if not edge_qualifiers:
@@ -195,12 +230,13 @@ def build_extraction_prompt(
 
     rel_constraint = relation_constraint_block(relation_types, relation_guide, type_signatures)
     qual_constraint = qualifier_constraint_block(edge_qualifiers)
+    coref_ref = coref_reference_block(candidates)
 
     return f"""ENTITY CANDIDATES (from a base NER model - confirm, refine, extend):
 {cand_block}
 
 ENTITY TYPES IN USE: {", ".join(label_types)}
-{narrator}{rel_constraint}{qual_constraint}
+{narrator}{coref_ref}{rel_constraint}{qual_constraint}
 PASSAGE:
 \"\"\"
 {text}

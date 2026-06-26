@@ -46,6 +46,14 @@ console = Console()
 # builder doesn't sort endpoints (which flips display, e.g. "<org> member_of <person>").
 
 
+def _rpm_delay(last_start: float, now: float, rpm: int) -> float:
+    """Seconds to sleep before the next --submit POST to hold request starts at
+    <= ``rpm`` per minute. 0 when rpm<=0 (unthrottled) or the interval has elapsed."""
+    if rpm <= 0:
+        return 0.0
+    return max(0.0, 60.0 / rpm - (now - last_start))
+
+
 # Backend factory
 def gemini_live_config(config: Config) -> Config:
     """A config copy whose `api` block points at Gemini's OpenAI-compatible endpoint,
@@ -229,6 +237,7 @@ class Pipeline:
         Resume assumes the same --batch-docs/--batch-budget (batch boundaries must
         line up with the saved files)."""
         import os
+        import time
 
         from intelligence.manual_batch import submit_to_gemini
         ic = self.config.intelligence
@@ -240,12 +249,17 @@ class Pipeline:
             sys.exit(2)
         from tqdm import tqdm
         ok = skipped = 0
+        last_post = 0.0
         for i, pr in enumerate(tqdm(prompts, desc="Gemini", unit="batch"), 1):
             out_path = self.run_dir / stem(i, "response", "json")
             if resume and self._reply_complete(out_path):
                 skipped += 1
                 ok += 1
                 continue
+            wait = _rpm_delay(last_post, time.monotonic(), ic.batch_rpm)
+            if wait > 0:
+                time.sleep(wait)
+            last_post = time.monotonic()
             try:
                 reply = submit_to_gemini(
                     pr, key, model=ic.batch_model, base_url=ic.batch_base_url,
@@ -338,6 +352,37 @@ class Pipeline:
                           f"covered by any reply (truncated output?). Re-export with a "
                           f"smaller --batch-budget and redo those. First few: "
                           f"{missing[:5]}[/yellow]")
+
+    def _reconcile_ner(self, extractions, doc_texts: dict[str, str]) -> None:
+        """gemini_batch: re-run local NER and fold spans onto the LLM entities.
+
+        Loads the foundation (GLiNER + spaCy) - which gemini_batch otherwise never
+        touches - so this pays a model-load + per-doc NER cost for the proximity
+        floor + recall net. Coref-sourced mentions are dropped (the whole-doc model
+        already handled the narrator)."""
+        from core.schema import Document
+        from postprocess.span_reconcile import reconcile_spans
+
+        console.print("[cyan]Reconciling whole-doc entities against local GLiNER/spaCy "
+                      "NER (loads foundation models)...[/cyan]")
+
+        def ner_fn(doc_id: str, text: str):
+            results = self.foundation.process_document(
+                Document(doc_id=doc_id, source_path="", text=text))
+            out = []
+            for r in results:
+                for m in r.mentions:
+                    if any(str(s).startswith("coref") for s in (m.sources or [])):
+                        continue
+                    out.append(m)
+            return out
+
+        stats = reconcile_spans(
+            extractions, doc_texts, ner_fn,
+            add_missed=self.config.intelligence.reconcile_add_missed)
+        console.print(
+            f"[green]Reconciliation: {stats['transferred']} spans transferred, "
+            f"{stats['added']} NER-only mentions added across {stats['docs']} docs.[/green]")
 
     def _batch_authors(self, documents) -> dict[str, str]:
         """doc_id -> narrator name for first-person corpora, when narrator
@@ -811,25 +856,48 @@ class Pipeline:
             files.add_row(name, path)
         console.print(files)
 
+    def _effective_model(self) -> str:
+        """The model that does the work for the current mode. gemini_batch keeps it
+        in batch_model (no `gemini_batch` sub-config), the others in <mode>.model."""
+        if self.config.mode == "gemini_batch":
+            return self.config.intelligence.batch_model
+        mode_cfg = getattr(self.config.intelligence, self.config.mode, None)
+        return getattr(mode_cfg, "model", "")
+
     def _write_run_meta(self, stage: str, resume: bool, limit: int) -> None:
         """Snapshot the effective config into the run dir so every output is
-        traceable to the exact model/mode/settings that produced it."""
+        traceable to the exact model/mode/settings that produced it.
+
+        The model/config that produced the checkpoint is recorded at EXTRACT time;
+        an analyze-only re-run carries default settings (the user rarely re-passes
+        --batch-model on analyze), so it must PRESERVE the extraction provenance
+        instead of clobbering it with defaults."""
         import json
         from datetime import datetime, timezone
 
-        mode_cfg = getattr(self.config.intelligence, self.config.mode, None)
+        model = self._effective_model()
+        config_snap = self.config.model_dump(mode="json")
+        path = self.run_dir / "run_meta.json"
+        did_extract = stage in ("all", "ingest", "extract")
+        if not did_extract and path.exists():
+            try:
+                prior = json.loads(path.read_text(encoding="utf-8"))
+                model = prior.get("model") or model
+                config_snap = prior.get("config") or config_snap
+            except Exception:  # noqa: BLE001 - a corrupt prior meta just gets replaced
+                pass
         meta = {
             "run_name": self.config.run_name,
             "mode": self.config.mode,
-            "model": getattr(mode_cfg, "model", ""),
+            "model": model,
             "stage": stage,
             "resume": resume,
             "limit": limit,
             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "platform": sys.platform,
-            "config": self.config.model_dump(mode="json"),
+            "config": config_snap,
         }
-        (self.run_dir / "run_meta.json").write_text(
+        path.write_text(
             json.dumps(meta, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
     # Full run
@@ -861,6 +929,10 @@ class Pipeline:
                                      for_extract=False)
             current_ids = {d.doc_id for d in documents}
             extractions = [ex for ex in ckpt.load_all() if ex.doc_id in current_ids]
+            # Optional: fold local GLiNER/spaCy spans onto the span-less whole-doc
+            # entities so the proximity co-occurrence floor + evidence grounding work.
+            if self.config.intelligence.reconcile_ner:
+                self._reconcile_ner(extractions, {d.doc_id: d.text for d in documents})
             self.run_analyze(extractions)
             return
 
@@ -922,6 +994,15 @@ class Pipeline:
                    "intelligence.batch_thinking_budget). 0 = off (default; frees the "
                    "output budget for JSON so the reply doesn't truncate). <0 keeps "
                    "the model's default reasoning on.")
+@click.option("--batch-rpm", "batch_rpm", type=int, default=None,
+              help="gemini_batch --submit: cap request starts at this many per "
+                   "minute (override intelligence.batch_rpm). Set to the free-tier "
+                   "limit (e.g. 10 for gemini-2.5-flash) to avoid 429 backoff churn.")
+@click.option("--reconcile-ner", "reconcile_ner", is_flag=True, default=False,
+              help="gemini_batch: re-run local GLiNER/spaCy after the whole-doc reply "
+                   "and fold spans onto the span-less LLM entities (turns on the "
+                   "proximity co-occurrence floor + adds GLiNER-only entities as a "
+                   "recall net). Loads foundation models at analyze time.")
 @click.option("--verify-relations", "verify_relations", is_flag=True, default=False,
               help="Turn on quality.verify_relations: the LLM re-checks each edge "
                    "against its evidence (tags verification=supported/unsupported). "
@@ -966,6 +1047,7 @@ class Pipeline:
 def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         import_json: tuple[str, ...], batch_budget: Optional[int], batch_docs: Optional[int],
         submit: bool, batch_model: str, batch_thinking: Optional[int],
+        batch_rpm: Optional[int], reconcile_ner: bool,
         verify_relations: bool, recall_pass: bool, link_authors: bool,
         batch_post_llm: bool, structured_output: bool,
         limit: int, urls: tuple[str, ...], urls_file: str,
@@ -1015,6 +1097,10 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.intelligence.batch_model = batch_model
     if batch_thinking is not None:
         config.intelligence.batch_thinking_budget = batch_thinking
+    if batch_rpm is not None:
+        config.intelligence.batch_rpm = batch_rpm
+    if reconcile_ner:
+        config.intelligence.reconcile_ner = True
     if metadata_file:
         config.io.metadata_file = metadata_file
     if run_name:

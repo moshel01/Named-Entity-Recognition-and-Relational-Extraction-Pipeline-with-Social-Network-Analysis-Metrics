@@ -173,6 +173,20 @@ intelligence:
   # are skipped (you get a warning). Flip this on to run them through Gemini's OpenAI
   # endpoint with the same key - extra API calls at analyze time, so off by default.
   batch_post_llm: false
+  # Cap --submit request starts per minute to match the free-tier RPM (10 for
+  # gemini-2.5-flash) so the loop spaces requests instead of tripping 429 + backoff.
+  # 0 = unthrottled. No-op when whole-doc replies are already slower than the interval.
+  batch_rpm: 0
+  # gemini_batch: after the whole-doc reply, re-run local GLiNER/spaCy and fold spans
+  # onto the span-less LLM entities - turns on the within-doc proximity co-occurrence
+  # floor + evidence grounding the model's name-only output can't give. Post-hoc, not
+  # priming. Loads the foundation models at analyze time. Off by default; A/B it.
+  reconcile_ner: false
+  # The recall net: also ADD GLiNER entities the LLM missed (tagged ner_only). FALSE
+  # by default - on the Abel pilot it flooded 297 real entities with ~1850 GLiNER
+  # over-extractions (asserted tier 85% -> 2%). Turn on only for a sparse corpus where
+  # the LLM under-extracts; span transfer (the useful half) works without it.
+  reconcile_add_missed: false
   # Mode 3: ollama
   ollama:
     host: "http://localhost:11434"

@@ -15,6 +15,11 @@ io:
   input_glob: "**/*"
   output_dir: "./output"
   encoding: "auto"
+  # LittleSis: import the curated influence graph DIRECTLY as asserted edges (donations
+  # with amounts, boards, ownership). The highest-quality layer for this domain - human-
+  # sourced, not LLM-extracted. CC BY-SA: attribute it in any published network.
+  # littlesis: ["search:Koch Industries", "search:Arabella Advisors", "id:28220"]
+  # littlesis_limit: 10                  # seed entities per search spec
   # Whole-site crawl of the influencewatch.org profile DB. Server-rendered WordPress
   # (no JS render needed). robots.txt allows everything but /wp-json/; sitemap_index.xml
   # seeds the profile URLs. allow/deny keep the page budget on profiles, not chrome.

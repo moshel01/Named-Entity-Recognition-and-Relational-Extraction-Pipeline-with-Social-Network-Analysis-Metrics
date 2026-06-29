@@ -96,6 +96,7 @@ The pipeline ingests, in any combination:
 | **Live web pages / PDFs** | `--url https://...` (repeatable), or `io.urls` / `io.urls_file` |
 | **A whole site (subpages)** | `--crawl https://...` (bounded, polite, resumable); or `io.crawl`. Add `--render-js` for SPA/JS sites (needs Playwright) |
 | **Wikis (MediaWiki)** | `--wiki host:Title` or `--wiki host:Category:X` (repeatable); or `io.wiki`. Clean API prose, not page HTML |
+| **Influence graph (LittleSis)** | `--littlesis "search:Koch Industries"` or `--littlesis id:28220`; or `io.littlesis`. Imports curated typed edges (donations w/ amounts) directly. CC BY-SA |
 | **Social media** | `--social platform:target` (repeatable); or `io.social` |
 | **A portable corpus snapshot** | `--ingest-from documents.jsonl` (scrape once with `--stage fetch`, extract anywhere) |
 | **Direct / pasted text** | `--text "..."` |

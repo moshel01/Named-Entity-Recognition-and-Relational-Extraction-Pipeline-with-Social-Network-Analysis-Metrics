@@ -167,6 +167,13 @@ class Pipeline:
                     sm, se = social_structure(doc)
                     extraction.mentions.extend(sm)
                     extraction.relationships.extend(se)
+                # LittleSis: fold in the curated relationship graph (asserted typed edges,
+                # donations carry qual_monetary_value) + PERSON/ORG nodes.
+                if (doc.meta or {}).get("source_type") == "littlesis":
+                    from core.littlesis import littlesis_structure
+                    lm, le = littlesis_structure(doc)
+                    extraction.mentions.extend(lm)
+                    extraction.relationships.extend(le)
                 ckpt.save(extraction, flush=(processed % flush_every == 0))
                 processed += 1
 
@@ -448,6 +455,7 @@ class Pipeline:
         documents.extend(self._gather_crawl(crawl_seeds, for_extract, resume=resume))
         documents.extend(self._gather_social(for_extract))
         documents.extend(self._gather_wiki(for_extract))
+        documents.extend(self._gather_littlesis(for_extract))
 
         # Dedup by doc_id (a crawled url may also be in io.urls / a file mirror).
         seen: set[str] = set()
@@ -530,6 +538,43 @@ class Pipeline:
                 console.print(f"[green]Wiki {spec}: {len(wd)} page(s).[/green]")
             except Exception as exc:  # noqa: BLE001 - one source failing isn't fatal
                 console.print(f"[red]Wiki {spec} failed: {exc}[/red]")
+        try:
+            write_documents_snapshot(docs, cache)
+        except Exception:  # noqa: BLE001 - cache is a nicety
+            pass
+        return docs
+
+    def _gather_littlesis(self, for_extract: bool) -> list[Document]:
+        """Fetch LittleSis sources (io.littlesis: 'search:term' / 'id:N' specs) as entity
+        Documents carrying their curated relationships (imported as asserted edges by the
+        structure hook in run_extract). Cached to littlesis_docs.jsonl; reused on analyze."""
+        specs = list(self.config.io.littlesis)
+        if not specs:
+            return []
+        from core.preprocessor import read_documents_snapshot, write_documents_snapshot
+        cache = self.run_dir / "littlesis_docs.jsonl"
+        if not for_extract:
+            if cache.exists():
+                docs = read_documents_snapshot(cache)
+                console.print(f"[cyan]LittleSis: reusing {len(docs)} cached entities "
+                              "(no re-fetch).[/cyan]")
+                return docs
+            return []
+        from core.littlesis import fetch_littlesis
+        limit = self.config.io.littlesis_limit
+        docs: list[Document] = []
+        for spec in specs:
+            try:
+                ld = fetch_littlesis(spec, limit=limit)
+                docs.extend(ld)
+                n_edges = sum(len((d.meta or {}).get("ls_edges") or []) for d in ld)
+                console.print(f"[green]LittleSis {spec}: {len(ld)} entit(ies), "
+                              f"{n_edges} edge(s).[/green]")
+            except Exception as exc:  # noqa: BLE001 - one source failing isn't fatal
+                console.print(f"[red]LittleSis {spec} failed: {exc}[/red]")
+        if docs:
+            console.print("[dim]LittleSis data is CC BY-SA 4.0 - attribute "
+                          "'LittleSis / Public Accountability Initiative' in any published network.[/dim]")
         try:
             write_documents_snapshot(docs, cache)
         except Exception:  # noqa: BLE001 - cache is a nicety
@@ -1246,6 +1291,10 @@ class Pipeline:
                    "prose via the API (not the page HTML).")
 @click.option("--wiki-limit", "wiki_limit", type=int, default=None,
               help="Pages per --wiki source / category cap (override io.wiki_limit).")
+@click.option("--littlesis", "littlesis", multiple=True,
+              help="LittleSis source 'search:term' or 'id:N' (repeatable): imports the "
+                   "curated relationship graph as asserted edges (donations carry amounts). "
+                   "CC BY-SA - attribute in any published network.")
 @click.option("--text", "direct_text", default="",
               help="Analyze a raw text string directly (e.g. pasted input).")
 @click.option("--min-entity-confidence", "min_entity_confidence", type=float, default=None,
@@ -1267,6 +1316,7 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         crawl_max_depth: Optional[int], render_js: bool,
         social: tuple[str, ...], social_limit: Optional[int], social_depth: Optional[int],
         wiki: tuple[str, ...], wiki_limit: Optional[int],
+        littlesis: tuple[str, ...],
         direct_text: str,
         min_entity_confidence: Optional[float], ollama_model: str, metadata_file: str,
         ingest_from: str, run_name: str, verbose: bool) -> None:
@@ -1344,6 +1394,8 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.io.wiki = list(config.io.wiki) + list(wiki)
     if wiki_limit is not None:
         config.io.wiki_limit = wiki_limit
+    if littlesis:
+        config.io.littlesis = list(config.io.littlesis) + list(littlesis)
 
     console.rule(f"[bold]NER + SNA Pipeline - run '{config.run_name}' (mode={config.mode})")
     pipeline = Pipeline(config)

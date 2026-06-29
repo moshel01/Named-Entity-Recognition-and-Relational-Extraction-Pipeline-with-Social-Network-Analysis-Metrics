@@ -2639,6 +2639,123 @@ def test_wiki_connector() -> None:
     check("wiki explicit titles fetched", len(docs2) == 2, str(len(docs2)))
 
 
+def test_littlesis_connector() -> None:
+    import json as _json
+    from core.littlesis import fetch_littlesis, littlesis_structure, parse_spec, _endpoint
+    from postprocess.evidence_tiers import tier_allows
+    from postprocess.tie_classes import classify
+    print("-- littlesis: curated relationship graph")
+
+    check("ls spec search", parse_spec("search:Koch Industries") == ("search", "Koch Industries"), "")
+    check("ls spec id", parse_spec("id:28220") == ("id", "28220"), "")
+    check("ls spec bare == search", parse_spec("Koch") == ("search", "Koch"), "")
+    # URL endpoint parse keeps internal hyphens in the name, splits id off the first.
+    check("ls endpoint parse",
+          _endpoint("https://littlesis.org/org/12-Coca-Cola_Co") == ("ORG", "12", "Coca-Cola Co"),
+          str(_endpoint("https://littlesis.org/org/12-Coca-Cola_Co")))
+
+    search = _json.dumps({"data": [{"type": "entities", "id": 28220, "attributes": {
+        "id": 28220, "name": "Koch Industries, Inc.", "primary_ext": "Org",
+        "blurb": "Private conglomerate.", "summary": "Owns many companies."}}]})
+    rels = _json.dumps({"meta": {"currentPage": 1, "pageCount": 1}, "data": [
+        {"attributes": {"category_id": 1, "amount": None, "currency": None,
+                        "start_date": None, "description": "Rich Fink has a position at Koch Industries, Inc.",
+                        "category_attributes": {"is_board": True, "is_executive": True}},
+         "entity": "https://littlesis.org/person/41346-Rich_Fink",
+         "related": "https://littlesis.org/org/28220-Koch_Industries,_Inc."},
+        {"attributes": {"category_id": 5, "amount": 1500000, "currency": "usd",
+                        "start_date": "2023-07-05", "description": "Koch gave money to Senate Leadership Fund"},
+         "entity": "https://littlesis.org/org/28220-Koch_Industries,_Inc.",
+         "related": "https://littlesis.org/org/244260-Senate_Leadership_Fund_(Super_PAC)"}]})
+
+    def lsfetch(url):
+        return rels if "/relationships" in url else search
+
+    docs = fetch_littlesis("search:Koch", limit=5, fetch=lsfetch)
+    check("ls one seed entity", len(docs) == 1 and docs[0].meta.get("name") == "Koch Industries, Inc.", "")
+    check("ls license recorded", docs[0].meta.get("license") == "CC BY-SA 4.0", str(docs[0].meta.get("license")))
+    check("ls edges captured", len(docs[0].meta.get("ls_edges") or []) == 2, "")
+
+    ments, edges = littlesis_structure(docs[0])
+    et = {(e.source, e.target, e.rel_type) for e in edges}
+    check("ls position -> board_member_of",
+          ("Rich Fink", "Koch Industries, Inc.", "board_member_of") in et, str(et))
+    check("ls donation -> donated_to",
+          ("Koch Industries, Inc.", "Senate Leadership Fund (Super PAC)", "donated_to") in et, str(et))
+    donation = next(e for e in edges if e.rel_type == "donated_to")
+    check("ls donation amount -> qual_monetary_value",
+          donation.attributes.get("qual_monetary_value") == 1500000, str(donation.attributes))
+    check("ls edges are littlesis source",
+          all(e.attributes.get("edge_source") == "littlesis" for e in edges), "")
+    check("ls person node is PERSON",
+          any(m.text == "Rich Fink" and m.label == "PERSON" for m in ments), "")
+    check("ls org node is ORG",
+          any(m.text == "Senate Leadership Fund (Super PAC)" and m.label == "ORG" for m in ments), "")
+    check("ls is asserted tier",
+          tier_allows("littlesis", "conservative") and tier_allows("littlesis", "full"), "")
+    check("ls donated_to tie-class affiliation",
+          classify("donated_to", "ORG", "ORG") == "affiliation", "")
+
+
+def test_littlesis_bulk() -> None:
+    import gzip
+    import json as _json
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from core.littlesis import load_bulk, littlesis_structure, _iter_json_array
+    print("-- littlesis: bulk dump import")
+
+    # Streaming array parser must yield all objects across a tiny chunk boundary.
+    import io as _io
+    arr = '[{"a":1},{"a":2},{"a":3}]'
+    got = list(_iter_json_array(_io.StringIO(arr), chunk_size=4))
+    check("stream array parser crosses chunks",
+          [o["a"] for o in got] == [1, 2, 3], str(got))
+
+    recs = [
+        {"attributes": {"category_id": 1, "amount": None,
+                        "category_attributes": {"is_board": True},
+                        "description": "Allen Questrom position at Walmart"},
+         "entity": "https://littlesis.org/person/1006-Allen_Questrom",
+         "related": "https://littlesis.org/org/1-Walmart_Inc."},
+        {"attributes": {"category_id": 5, "amount": 50000, "currency": "usd",
+                        "start_date": "2020-01-01", "description": "Walmart gave to Some PAC"},
+         "entity": "https://littlesis.org/org/1-Walmart_Inc.",
+         "related": "https://littlesis.org/org/999-Some_PAC"},
+        {"attributes": {"category_id": 10, "amount": None,
+                        "description": "Walmart owns Sam's Club"},
+         "entity": "https://littlesis.org/org/1-Walmart_Inc.",
+         "related": "https://littlesis.org/org/777-Sams_Club"},
+    ]
+    d = Path(tempfile.mkdtemp(prefix="lsbulk_"))
+    gz = d / "relationships.json.gz"
+    with gzip.open(gz, "wt", encoding="utf-8") as fh:
+        fh.write(_json.dumps(recs))
+    try:
+        docs = load_bulk(gz)
+        total = sum(len(x.meta["ls_edges"]) for x in docs)
+        check("bulk imports all edges", total == 3, str(total))
+        # category filter: only the donation
+        only_donation = load_bulk(gz, categories={5})
+        de = [e for doc in only_donation for e in doc.meta["ls_edges"]]
+        check("bulk category filter", len(de) == 1 and de[0]["rel"] == "donated_to", str(de))
+        # the donation maps with the amount on the asserted edge
+        _, edges = littlesis_structure(only_donation[0])
+        check("bulk donation amount carried",
+              edges[0].attributes.get("qual_monetary_value") == 50000
+              and edges[0].attributes.get("edge_source") == "littlesis", str(edges[0].attributes))
+        # name filter keeps only edges touching the named entity (normalized, drops "Inc.")
+        wal = load_bulk(gz, names={"Walmart"})
+        check("bulk name filter (normalized) keeps Walmart edges",
+              sum(len(x.meta["ls_edges"]) for x in wal) == 3, "")
+        # id filter
+        pac = load_bulk(gz, ids={"999"})
+        check("bulk id filter", sum(len(x.meta["ls_edges"]) for x in pac) == 1, "")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     test_json_repair()
     test_checkpoint_scoring()
@@ -2710,6 +2827,8 @@ def main() -> int:
     test_social_telegram()
     test_input_adapters()
     test_wiki_connector()
+    test_littlesis_connector()
+    test_littlesis_bulk()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES: {FAILURES}")

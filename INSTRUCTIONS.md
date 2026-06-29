@@ -722,6 +722,7 @@ entity types you care about (they are plain English phrases; GLiNER is zero-shot
 | Many URLs | put them (one per line) in a file -> `--urls-file urls.txt` or `io.urls_file` |
 | A whole site + its subpages | `--crawl https://site/section/` or `io.crawl.{enabled,seeds}` (resumable; see below) |
 | A wiki (Wikipedia / Fandom / any MediaWiki) | `--wiki "host:Page Title"` or `--wiki "host:Category:X"` or `io.wiki` |
+| An influence graph (LittleSis: donors, boards, PACs) | `--littlesis "search:Koch Industries"` or `--littlesis id:28220` or `io.littlesis`. Imports curated typed edges (CC BY-SA — attribute it) |
 | A subreddit / Mastodon / Bluesky / Telegram / etc. | `--social platform:target` or `io.social` (see README's social table) |
 | A raw string / pasted text | `--text "Hitler met Goebbels in 1926."` |
 
@@ -772,6 +773,34 @@ the right levers. Make a domain only when you have real domain *knowledge* to in
 The point: **one generic domain handles the relation vocabulary for all of them.** Add an
 ingestion adapter (a connector / file reader) for a new *shape* of input, and a thin config
 preset for a new *medium* — not a full domain. A full domain is for injected knowledge.
+
+#### Importing LittleSis (curated influence graph)
+
+LittleSis is a sourced graph of donations / boards / ownership / lobbying — import the edges
+directly (they land as asserted `edge_source=littlesis` ties; donations carry
+`qual_monetary_value`). Two ways:
+
+- **Targeted (API).** `--littlesis "search:Koch Industries"` or `--littlesis id:28220` pulls
+  an ego-network around those seeds. Cheap; good for specific actors.
+- **Bulk (full dump).** Download `relationships.json.gz` from
+  [littlesis.org/bulk_data](https://littlesis.org/bulk_data) (the edges are self-contained —
+  you don't need the entities file), then convert with a filter so you import the slice you
+  want out of the ~1.5M-edge graph:
+  ```powershell
+  # enrich exactly the entities already in your scraped network:
+  python -m scripts.littlesis_bulk relationships.json.gz `
+    --names-from output/influencewatch/entities.json `
+    --append output/influencewatch/documents.jsonl
+  # ...or a category/amount slice of the whole graph (1=position 5=donation 10=ownership):
+  python -m scripts.littlesis_bulk relationships.json.gz --categories 1,5,10 --min-amount 100000 `
+    --out littlesis_bulk.jsonl
+  # then extract; dedup folds LittleSis nodes into your scraped nodes by name:
+  python main.py --config domain/influencewatch/config_influencewatch.yaml `
+    --ingest-from output/influencewatch/documents.jsonl --mode python_only
+  ```
+  `--names-from <run>/entities.json` is the merge lever: it keeps only LittleSis edges that
+  touch an entity you already have, so the curated ties attach to your scraped network
+  instead of swamping it. **LittleSis is CC BY-SA 4.0 — attribute it in any published network.**
 
 #### Crawling a whole site
 `--crawl <seed>` (repeatable) expands a seed URL into its subpages and merges them
@@ -871,6 +900,9 @@ python main.py --config <path> [options]
                      via the API. 'en.wikipedia.org:Ada Lovelace' or
                      'en.wikipedia.org:Category:Physicists'.
   --wiki-limit N     Pages per --wiki source / category cap (override io.wiki_limit).
+  --littlesis SPEC   LittleSis source 'search:term' or 'id:N' (repeatable): imports the
+                     curated influence graph as asserted typed edges (donations carry
+                     amounts). CC BY-SA - attribute it in any published network.
   --social SPEC      Social source 'platform:target' (repeatable): reddit:datascience,
                      bluesky:climate, telegram:durov, ... Pulls posts + the explicit
                      reply/mention/forwarded/posted_in graph.

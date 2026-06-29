@@ -4,6 +4,37 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## littlesis: import the curated influence graph directly
+
+LittleSis (Public Accountability Initiative) is a sourced graph of who-funds/controls/sits-
+on-the-board-of whom - the InfluenceWatch problem already solved as explicit typed
+relationships. So we IMPORT the edges, not crawl prose and re-extract.
+
+- `core/littlesis.py` + `io.littlesis` / `--littlesis`: spec "search:Koch Industries" or
+  "id:28220". Public API v2, no token. Each relationship resolves both endpoints
+  (name + person/org) from one call; donations carry amount/currency/dates.
+- LittleSis's 12 categories map onto the existing ontology: Position -> board_member_of /
+  director_of / employed_by (by is_board/is_executive), Donation -> donated_to (amount ->
+  `qual_monetary_value`), Ownership -> owns, Membership -> member_of, Family -> family_of,
+  Lobbying -> lobbied, ... No new relation vocabulary.
+- Imported as ASSERTED edges (`edge_source=littlesis`, conservative tier - a curated,
+  sourced record like the metadata sheet). A structure hook in run_extract folds them in
+  (same pattern as the social connectors), so they land in every mode incl. python_only.
+- One seed ("Koch Industries") pulls ~170 curated edges / ~140 nodes with dollar amounts.
+  Best paired with the influencewatch domain.
+- BULK import of the full CC BY-SA dump (`core/littlesis.load_bulk` + `scripts/littlesis_bulk.py`):
+  the dump is two gzipped JSON ARRAYS (entities/relationships); relationships.json.gz is
+  self-contained (each record's URLs carry both endpoint names), so the whole edge graph
+  builds from it alone. Streamed element-by-element (the file is GB-scale, no json.load).
+  Filters slice the ~1.5M-edge graph: `--names-from <run>/entities.json` keeps only edges
+  touching entities ALREADY in your scraped network (the enrich-my-data path), or
+  `--categories`/`--min-amount`/`--ids`. Writes a documents.jsonl snapshot (or `--append`s
+  to your crawl snapshot) -> `--ingest-from` merges it; dedup folds LittleSis nodes into the
+  scraped nodes by name. Validated against the live dump (14k edges parsed from one partial).
+- LICENSE: CC BY-SA 4.0 - attribution + share-alike REQUIRED. The license/attribution
+  ride on each source Document's meta and a run prints the attribution line; surface it in
+  any published network.
+
 ## input reach: epub, mediawiki API, and a boilerplate strip
 
 Closing the gaps for "books, wikis, any input" - all opt-in.

@@ -22,9 +22,12 @@ runs:
    progress bar and a frontier/page-log checkpoint so a big crawl Ctrl-C's and resumes
    (`--resume`); optional `io.crawl.boilerplate` strips site nav fragments, `render_js`
    renders SPA pages. Structured sources return ready Documents: social connectors
-   (`core/social/`, `io.social` / `--social`) and the MediaWiki API (`core/wiki.py`,
-   `io.wiki` / `--wiki` — clean article prose, not page HTML). Any gather can freeze to a
-   portable `documents.jsonl` (`--stage fetch`) and re-run elsewhere (`--ingest-from`).
+   (`core/social/`, `io.social` / `--social`), the MediaWiki API (`core/wiki.py`,
+   `io.wiki` / `--wiki` — clean article prose, not page HTML), and LittleSis
+   (`core/littlesis.py`, `io.littlesis` / `--littlesis` — a curated relationship graph
+   imported DIRECTLY as asserted typed edges, donations carrying `qual_monetary_value`;
+   CC BY-SA, attribution required). Any gather can freeze to a portable `documents.jsonl`
+   (`--stage fetch`) and re-run elsewhere (`--ingest-from`).
    Author/narrator detection in `core/foundation.py`.
 2. **Chunk** (`core/chunker.py`) — sentence-aligned, with a hard char split for
    boundary-less text. `max_chars` ~5-6k, `overlap_chars` 400-600 (~7-12%); the

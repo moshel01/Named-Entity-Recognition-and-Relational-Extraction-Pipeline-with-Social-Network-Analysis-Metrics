@@ -67,6 +67,11 @@ class IOConfig(BaseModel):
     # core/wiki pulls clean article prose via the API (not the page HTML). CLI: --wiki.
     wiki: list[str] = Field(default_factory=list)
     wiki_limit: int = 50                       # pages per spec (category cap)
+    # LittleSis sources: each entry is "search:Koch Industries" or "id:28220". core/littlesis
+    # imports the curated relationship graph DIRECTLY as asserted edges (CC BY-SA - attribute
+    # in any published network). CLI: --littlesis. Best paired with the influencewatch domain.
+    littlesis: list[str] = Field(default_factory=list)
+    littlesis_limit: int = 10                  # seed entities per search spec
     request_timeout: int = 30
     metadata_file: str = ""                   # xlsx of per-doc metadata, keyed by letter_id
     use_docling: bool = False                 # structure-aware ingestion (PDF tables/OCR); fail-soft

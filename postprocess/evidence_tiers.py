@@ -21,6 +21,7 @@
 #   rule_extracted         intelligence/relationship_patterns
 #   metadata               domain/*/metadata + main.py metadata spec
 #   social_graph           core/social (platform-stated reply/mention/posted_in)
+#   littlesis              core/littlesis (curated, sourced relationship DB)
 #   canonical_inferred     domain/nazi_era canonical inference (signal detected)
 #   pipeline_inferred      domain/nazi_era mandatory-membership assumption
 #   rule_cooccurrence      postprocess/canonical_inference + python_only backend
@@ -32,9 +33,11 @@ from __future__ import annotations
 
 # social_graph: the platform STATES the structure (X replied to / mentioned / posted
 # in Y) - a verified record like the metadata sheet, so the high-precision tier.
+# littlesis: a curated, human-sourced relationship DB (CC BY-SA) - a verified record,
+# so the same asserted tier as the metadata sheet.
 ASSERTED = frozenset({
     "llm_extracted", "langextract_extracted", "rule_extracted", "metadata",
-    "social_graph",
+    "social_graph", "littlesis",
 })
 INFERRED = frozenset({"canonical_inferred"})
 ASSUMPTION = frozenset({"pipeline_inferred"})

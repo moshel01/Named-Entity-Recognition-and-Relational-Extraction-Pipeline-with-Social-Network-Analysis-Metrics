@@ -28,6 +28,11 @@ class CrawlConfig(BaseModel):
     user_agent: str = ""                      # blank -> pipeline default UA
     timeout: int = 30
     max_bytes: int = 5_000_000                # per-page download ceiling
+    # Render JavaScript with headless Chromium (Playwright) before reading the page.
+    # Needed for SPA / JS-built sites that return an empty shell to a plain GET; a
+    # no-op cost for server-rendered sites. Optional dep: `pip install playwright`
+    # then `playwright install chromium`. robots.txt/sitemaps/PDFs bypass the browser.
+    render_js: bool = False                   # CLI: --render-js
 
 
 class IOConfig(BaseModel):
@@ -37,7 +42,20 @@ class IOConfig(BaseModel):
     encoding: str = "auto"
     urls: list[str] = Field(default_factory=list)   # web pages / PDFs to fetch
     urls_file: str = ""                       # path to a newline-delimited URL list
+    # Portable corpus snapshot (the ingestion checkpoint). If set, the run LOADS
+    # documents straight from this JSONL - no crawl, no fetch, no file walk - so a
+    # scrape+preprocess done once on one machine can be shipped to another and run
+    # in any --mode. Written automatically to <run_dir>/documents.jsonl on a normal
+    # gather; `--stage fetch` writes it and stops. CLI: --ingest-from PATH.
+    documents_file: str = ""
     crawl: CrawlConfig = Field(default_factory=CrawlConfig)   # whole-site expansion
+    # Social-media sources: each entry is "platform:target" (reddit:datascience,
+    # hackernews:top, mastodon:mastodon.social/tag/ai, twitter:from:nasa). The connector
+    # (core/social) fetches posts AND the explicit reply/mention/posted_in structure.
+    # CLI: --social. Twitter needs $TWITTER_BEARER_TOKEN; Facebook is not supported.
+    social: list[str] = Field(default_factory=list)
+    social_limit: int = 100                   # posts/items per source
+    social_depth: int = 1                      # 1 = also pull comment/reply trees
     request_timeout: int = 30
     metadata_file: str = ""                   # xlsx of per-doc metadata, keyed by letter_id
     use_docling: bool = False                 # structure-aware ingestion (PDF tables/OCR); fail-soft
@@ -204,6 +222,13 @@ class IntelligenceConfig(BaseModel):
     # (won't fit context); raise it for big-context models.
     recall_pass: bool = False
     recall_max_chars: int = 24000
+    # Script/screenplay co-presence: when a document parses as a script (scene slugs +
+    # speaker cues), add Newman-weighted co_present_in_scene edges between characters
+    # who share a scene (core/script_parser). The standard character-network signal the
+    # proximity window only approximates. Co-presence, not an asserted tie -> weakest
+    # evidence tier (script_copresence), filterable by tie class. Off by default;
+    # non-scripts are untouched (the heuristic returns nothing).
+    parse_scripts: bool = False
     # gemini_batch: max characters of document text per emitted prompt file. A
     # corpus past this splits into numbered files. Lower it if the model truncates
     # its JSON reply (output length, not input context, is usually the limit).
@@ -452,6 +477,11 @@ class ExportConfig(BaseModel):
     # element->element transitions from the timeline. Writes narrative.gexf +
     # narrative_transitions.csv. Best on first-person life narratives. Fail-soft.
     narrative_network: bool = False
+    # Element scheme for the narrative network: "life_course" (war/politics/family
+    # life-course buckets - the Abel default) or "fiction" (plot beats: conflict ->
+    # revelation -> resolution, for novels/scripts). A domain's narrative_rules()
+    # overrides this. "auto" = life_course unless a domain supplies its own.
+    narrative_scheme: Literal["auto", "life_course", "fiction"] = "auto"
     # Write codebook.xlsx into the run dir: variable definitions + this run's
     # type/tie-class/relation inventories, for readers new to the data. Fail-soft.
     codebook: bool = True

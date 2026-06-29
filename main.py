@@ -155,6 +155,18 @@ class Pipeline:
                 extraction = self.backend.extract_document(
                     doc.doc_id, doc.source_path, foundation_results
                 )
+                # Scripts: fold in scene co-presence edges (opt-in; a no-op on prose).
+                if self.config.intelligence.parse_scripts:
+                    from core.script_parser import script_copresence
+                    extraction.relationships.extend(
+                        script_copresence(doc.text, doc.doc_id))
+                # Social posts: fold in the platform-stated reply/mention/posted_in
+                # structure (asserted social_graph edges + USER/COMMUNITY nodes).
+                if (doc.meta or {}).get("source_type") == "social":
+                    from core.social import social_structure
+                    sm, se = social_structure(doc)
+                    extraction.mentions.extend(sm)
+                    extraction.relationships.extend(se)
                 ckpt.save(extraction, flush=(processed % flush_every == 0))
                 processed += 1
 
@@ -282,16 +294,22 @@ class Pipeline:
 
     @staticmethod
     def _reply_complete(path: Path) -> bool:
-        """True if a saved reply exists and is complete (strict-parses). A truncated
-        reply fails the strict parse, so it is treated as not-done and re-submitted."""
+        """True if a saved reply exists and holds a complete JSON body. Strips a prose
+        preamble first (_outermost_span) then STRICT-parses: gemma ignores the JSON
+        mime type and prepends a prose paraphrase, so a bare strict parse rejected its
+        complete replies and made --resume re-POST every finished gemma batch into the
+        flaky endpoint. Not repair_json - that balances unclosed braces and would pass
+        a TRUNCATED reply, which must be re-POSTed (smaller --batch-docs), not kept."""
         import json
+
+        from intelligence.json_repair import _outermost_span
         if not path.exists() or path.stat().st_size == 0:
             return False
         try:
-            json.loads(path.read_text(encoding="utf-8"))
-            return True
-        except (ValueError, OSError):
+            obj = json.loads(_outermost_span(path.read_text(encoding="utf-8")))
+        except (ValueError, OSError, RecursionError):
             return False
+        return bool(obj)
 
     def run_batch_import(self, ckpt: CheckpointManager,
                          import_json: tuple[str, ...] | str,
@@ -405,6 +423,18 @@ class Pipeline:
         honoring --limit. Dedups by doc_id so the same URL from two sources is one
         node."""
         io = self.config.io
+        # Ingestion checkpoint: if a corpus snapshot is set, load it and skip all
+        # live sources (crawl/fetch/file walk). The portable, mode-independent path -
+        # scrape once, ship the jsonl, extract anywhere. doc_ids are preserved.
+        if io.documents_file:
+            from core.preprocessor import read_documents_snapshot
+            docs = read_documents_snapshot(io.documents_file)
+            console.print(f"[cyan]Loaded {len(docs)} documents from snapshot "
+                          f"{io.documents_file} (no crawl/fetch).[/cyan]")
+            if limit and limit > 0:
+                docs = docs[:limit]
+                console.print(f"[yellow]--limit active: {len(docs)} documents.[/yellow]")
+            return docs
         documents = gather_documents(
             input_path=io.input_path or None,
             glob=io.input_glob,
@@ -416,6 +446,7 @@ class Pipeline:
             use_docling=io.use_docling,
         )
         documents.extend(self._gather_crawl(crawl_seeds, for_extract))
+        documents.extend(self._gather_social(for_extract))
 
         # Dedup by doc_id (a crawled url may also be in io.urls / a file mirror).
         seen: set[str] = set()
@@ -425,7 +456,52 @@ class Pipeline:
         if limit and limit > 0:
             documents = documents[:limit]
             console.print(f"[yellow]--limit active: {len(documents)} documents.[/yellow]")
+
+        # Freeze the ingestion checkpoint: a portable snapshot of the gathered corpus
+        # (crawl + fetch + preprocess result). Only on a real gather with text - never
+        # overwrite it with the text-less stubs the analyze path rebuilds. Ship this
+        # file or feed it back with --ingest-from to re-extract in another mode.
+        if for_extract and any(d.text for d in documents):
+            try:
+                from core.preprocessor import write_documents_snapshot
+                snap = self.run_dir / "documents.jsonl"
+                write_documents_snapshot(documents, snap)
+            except Exception:  # noqa: BLE001 - snapshot is a convenience, not load-bearing
+                pass
         return documents
+
+    def _gather_social(self, for_extract: bool) -> list[Document]:
+        """Fetch social-media sources (io.social: 'platform:target' specs) into posts as
+        Documents. The explicit reply/mention/posted_in structure is added per-post in
+        run_extract. On extract, fetch + cache to social_docs.jsonl; on analyze, reuse
+        the cache so re-analysis never re-hits the APIs."""
+        specs = list(self.config.io.social)
+        if not specs:
+            return []
+        from core.preprocessor import read_documents_snapshot, write_documents_snapshot
+        cache = self.run_dir / "social_docs.jsonl"
+        if not for_extract:
+            if cache.exists():
+                docs = read_documents_snapshot(cache)
+                console.print(f"[cyan]Social: reusing {len(docs)} cached posts "
+                              "(no re-fetch).[/cyan]")
+                return docs
+            return []
+        from core.social import fetch_social, posts_to_documents
+        io = self.config.io
+        docs: list[Document] = []
+        for spec in specs:
+            try:
+                posts = fetch_social(spec, limit=io.social_limit, depth=io.social_depth)
+                docs.extend(posts_to_documents(posts))
+                console.print(f"[green]Social {spec}: {len(posts)} post(s).[/green]")
+            except Exception as exc:  # noqa: BLE001 - one source failing isn't fatal
+                console.print(f"[red]Social {spec} failed: {exc}[/red]")
+        try:
+            write_documents_snapshot(docs, cache)
+        except Exception:  # noqa: BLE001 - cache is a nicety
+            pass
+        return docs
 
     def _gather_crawl(self, crawl_seeds: tuple[str, ...], for_extract: bool) -> list[Document]:
         """Expand seed URLs into subpage Documents via the crawler. On extract,
@@ -445,10 +521,25 @@ class Pipeline:
                              meta={"filename": u, "source_type": "url"}) for u in urls]
 
         from core.crawler import Crawler
+        # Optional JS rendering: a headless-Chromium fetcher injected into the same
+        # crawler (scope/robots/rate-limit/caps unchanged). One browser for the run,
+        # closed in finally. Falls back to plain GET if Playwright isn't installed.
+        fetcher = None
+        if getattr(cc, "render_js", False):
+            from core.crawler import PlaywrightFetcher
+            from core.preprocessor import _USER_AGENT
+            fetcher = PlaywrightFetcher(user_agent=cc.user_agent or _USER_AGENT,
+                                        timeout=cc.timeout or self.config.io.request_timeout,
+                                        max_bytes=cc.max_bytes)
         console.print(f"[cyan]Crawling {len(seeds)} seed(s) "
                       f"(max_pages={cc.max_pages}, depth={cc.max_depth}, "
-                      f"robots={'on' if cc.respect_robots else 'OFF'})...[/cyan]")
-        docs = Crawler(self._crawl_opts()).crawl(seeds)
+                      f"robots={'on' if cc.respect_robots else 'OFF'}, "
+                      f"js={'on' if fetcher else 'off'})...[/cyan]")
+        try:
+            docs = Crawler(self._crawl_opts(), fetch=fetcher).crawl(seeds)
+        finally:
+            if fetcher is not None:
+                fetcher.close()
         console.print(f"[green]Crawl: {len(docs)} page(s) fetched.[/green]")
         try:
             cache.write_text("\n".join(d.source_path for d in docs), encoding="utf-8")
@@ -769,8 +860,13 @@ class Pipeline:
         # transitions across the corpus timeline. Opt-in; fail-soft.
         if getattr(self.config.export, "narrative_network", False) and agg.timeline:
             try:
-                from postprocess.narrative import _ELEMENT_RULES, write_narrative
-                rules = self.domain.narrative_rules() or _ELEMENT_RULES
+                from postprocess.narrative import (ELEMENT_SCHEMES, _ELEMENT_RULES,
+                                                    write_narrative)
+                # Domain-supplied rules win; else the config scheme picks a built-in
+                # ("fiction" for novels/scripts), defaulting to life_course.
+                scheme = getattr(self.config.export, "narrative_scheme", "auto")
+                rules = (self.domain.narrative_rules()
+                         or ELEMENT_SCHEMES.get(scheme) or _ELEMENT_RULES)
                 written.update(write_narrative(self.run_dir, agg.timeline, rules=rules))
             except Exception as exc:  # noqa: BLE001
                 console.print(f"[yellow]Narrative network skipped: {exc}[/yellow]")
@@ -906,6 +1002,19 @@ class Pipeline:
             crawl_seeds: tuple[str, ...] = (), import_json: tuple[str, ...] | str = "",
             submit: bool = False) -> None:
         self._write_run_meta(stage, resume, limit)
+
+        # fetch: crawl/preprocess only, freeze the corpus to documents.jsonl, stop.
+        # No models, no GPU - run it on a laptop, then ship the snapshot and extract
+        # in any --mode elsewhere (--ingest-from). Skips the whole extract machinery.
+        if stage == "fetch":
+            documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds,
+                                     for_extract=True)
+            snap = self.run_dir / "documents.jsonl"
+            console.print(f"[green]Fetch: froze {len(documents)} documents to {snap}.\n"
+                          f"Re-run extraction anywhere with: --ingest-from {snap} "
+                          f"--mode <ollama|api|...>[/green]")
+            return
+
         ckpt = CheckpointManager(
             self.run_dir / "checkpoints",
             self.config.run_name,
@@ -965,8 +1074,15 @@ class Pipeline:
 @click.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True),
               help="Path to the YAML config file.")
-@click.option("--stage", type=click.Choice(["all", "ingest", "extract", "analyze"]),
-              default="all", show_default=True, help="Which stage(s) to run.")
+@click.option("--stage", type=click.Choice(["all", "fetch", "ingest", "extract", "analyze"]),
+              default="all", show_default=True,
+              help="Which stage(s) to run. 'fetch' = crawl/preprocess only, write the "
+                   "portable documents.jsonl snapshot and stop (no models loaded).")
+@click.option("--ingest-from", "ingest_from", default="",
+              help="Load the corpus from a documents.jsonl snapshot (override "
+                   "io.documents_file) - no crawl/fetch/file walk. Pair with --stage "
+                   "fetch on one machine to scrape, then run extraction in any --mode "
+                   "(e.g. on a remote ollama box) from the shipped snapshot.")
 @click.option("--resume", is_flag=True, default=False,
               help="Resume from existing checkpoint, skipping completed documents.")
 @click.option("--mode", type=click.Choice(["api", "python_only", "ollama", "langextract", "gemini_batch"]), default=None,
@@ -1010,6 +1126,9 @@ class Pipeline:
 @click.option("--recall-pass", "recall_pass", is_flag=True, default=False,
               help="Turn on intelligence.recall_pass: re-prompt over the whole doc for "
                    "cross-chunk relations the first pass missed (chunked LLM modes).")
+@click.option("--parse-scripts", "parse_scripts", is_flag=True, default=False,
+              help="Turn on intelligence.parse_scripts: add scene co-presence edges for "
+                   "documents that parse as a screenplay/TV script (character network).")
 @click.option("--link-authors", "link_authors", is_flag=True, default=False,
               help="Turn on inference.link_known_authors: fold a lone surname uniquely "
                    "naming one author into that author node (cross-document edges).")
@@ -1034,6 +1153,20 @@ class Pipeline:
               help="Override io.crawl.max_pages (page cap for --crawl).")
 @click.option("--crawl-max-depth", "crawl_max_depth", type=int, default=None,
               help="Override io.crawl.max_depth (link hops for --crawl).")
+@click.option("--render-js", "render_js", is_flag=True, default=False,
+              help="Render JavaScript with headless Chromium during crawl (io.crawl."
+                   "render_js). For SPA/JS sites that return an empty shell to a plain "
+                   "GET. Needs: pip install playwright && playwright install chromium.")
+@click.option("--social", "social", multiple=True,
+              help="Social-media source 'platform:target' (repeatable): reddit:datascience, "
+                   "hackernews:top, mastodon:mastodon.social/tag/ai, twitter:from:nasa. "
+                   "Pulls posts + the reply/mention/posted_in graph. Twitter needs "
+                   "$TWITTER_BEARER_TOKEN; facebook is not supported (Meta ToS).")
+@click.option("--social-limit", "social_limit", type=int, default=None,
+              help="Posts/items per --social source (override io.social_limit).")
+@click.option("--social-depth", "social_depth", type=int, default=None,
+              help="0 = top-level posts only; 1 = also pull comment/reply trees "
+                   "(override io.social_depth).")
 @click.option("--text", "direct_text", default="",
               help="Analyze a raw text string directly (e.g. pasted input).")
 @click.option("--min-entity-confidence", "min_entity_confidence", type=float, default=None,
@@ -1048,13 +1181,15 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         import_json: tuple[str, ...], batch_budget: Optional[int], batch_docs: Optional[int],
         submit: bool, batch_model: str, batch_thinking: Optional[int],
         batch_rpm: Optional[int], reconcile_ner: bool,
-        verify_relations: bool, recall_pass: bool, link_authors: bool,
+        verify_relations: bool, recall_pass: bool, parse_scripts: bool, link_authors: bool,
         batch_post_llm: bool, structured_output: bool,
         limit: int, urls: tuple[str, ...], urls_file: str,
         crawl_seeds: tuple[str, ...], crawl_max_pages: Optional[int],
-        crawl_max_depth: Optional[int], direct_text: str,
+        crawl_max_depth: Optional[int], render_js: bool,
+        social: tuple[str, ...], social_limit: Optional[int], social_depth: Optional[int],
+        direct_text: str,
         min_entity_confidence: Optional[float], ollama_model: str, metadata_file: str,
-        run_name: str, verbose: bool) -> None:
+        ingest_from: str, run_name: str, verbose: bool) -> None:
     """Run the NER + SNA extraction pipeline."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -1081,6 +1216,8 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.quality.verify_relations = True
     if recall_pass:
         config.intelligence.recall_pass = True
+    if parse_scripts:
+        config.intelligence.parse_scripts = True
     if link_authors:
         config.inference.link_known_authors = True
     if batch_post_llm:
@@ -1103,6 +1240,9 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.intelligence.reconcile_ner = True
     if metadata_file:
         config.io.metadata_file = metadata_file
+    if ingest_from:
+        config.io.documents_file = ingest_from
+        console.print(f"[cyan]Override: io.documents_file = {ingest_from}[/cyan]")
     if run_name:
         config.run_name = run_name
         console.print(f"[cyan]Override: run_name = {run_name}[/cyan]")
@@ -1112,6 +1252,14 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.io.crawl.max_pages = crawl_max_pages
     if crawl_max_depth is not None:
         config.io.crawl.max_depth = crawl_max_depth
+    if render_js:
+        config.io.crawl.render_js = True
+    if social:
+        config.io.social = list(config.io.social) + list(social)
+    if social_limit is not None:
+        config.io.social_limit = social_limit
+    if social_depth is not None:
+        config.io.social_depth = social_depth
 
     console.rule(f"[bold]NER + SNA Pipeline - run '{config.run_name}' (mode={config.mode})")
     pipeline = Pipeline(config)

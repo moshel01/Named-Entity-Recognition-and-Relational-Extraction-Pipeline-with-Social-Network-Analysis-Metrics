@@ -194,7 +194,22 @@ def submit_to_gemini(prompt: str, api_key: str, model: str = "gemini-2.5-flash",
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     backoff = 5.0
     for attempt in range(max_retries):
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            # Read timeout / dropped connection = the server stalled before sending a
+            # byte, not us. The POST blocks waiting on the response; nothing is parsed
+            # until it returns (line below), so this is never our ingest speed - it is
+            # the model taking >timeout to generate. The free gemma endpoint does this
+            # under load; retry like a 5xx instead of failing the batch. Last attempt
+            # re-raises so the caller skips it and --resume re-queues it later.
+            if attempt < max_retries - 1:
+                logger.warning("Gemini network error (attempt %d/%d): %s; waiting %.0fs",
+                               attempt + 1, max_retries, type(exc).__name__, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+                continue
+            raise
         if resp.status_code in (429, 500, 503) and attempt < max_retries - 1:
             server = _retry_after_seconds(resp)
             # Server hint wins (capped so a day-quota delay fails fast -> --resume

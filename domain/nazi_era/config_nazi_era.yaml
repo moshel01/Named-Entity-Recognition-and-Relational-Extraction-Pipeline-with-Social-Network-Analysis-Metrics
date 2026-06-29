@@ -65,13 +65,17 @@ intelligence:
     request_timeout: 120
     aws_region: "us-east-1"
   ollama:
-    host: "http://localhost:11434"
-    # qwen3.5:9b: current best fit for 8 GB, beats qwen3:8b on relations.
-    # Override per machine, e.g. --ollama-model gemma4:26b / qwen3.6:27b.
-    model: "qwen3.5:9b"
+    # Remote ollama on the friend's workstation (RTX 5090) over Tailscale. Local
+    # GLiNER + coref still run on this machine; only the LLM calls (relations,
+    # recall pass, verify, dedup, enrich) go to the 5090. No API meter, no rate limit.
+    host: "http://100.69.145.24:11434"
+    # gemma4:31b: non-reasoning, pairs cleanly with structured_output. qwen3.6:27b is
+    # the A/B alt (reasoning model, slower). Override with --ollama-model. Match the
+    # exact tag from `curl http://100.69.145.24:11434/api/tags`.
+    model: "gemma4:31b"
     temperature: 0.0
-    request_timeout: 600     # large models (26B/27B) are slower; avoid timeouts
-    num_ctx: 8192
+    request_timeout: 600     # large models (27B/31B) are slower; avoid timeouts
+    num_ctx: 16384           # 5090 has the VRAM; headroom for the whole-doc recall_pass
   python_only:
     embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     cooccurrence_window: "sentence"
@@ -81,6 +85,15 @@ intelligence:
   # person->org) so the model stops pointing employed_by/located_in at a town. The
   # pre-emptive half of the post-hoc type_violation gate; pilot ran 86 violations.
   type_hints: true
+  # Grammar-constrained JSON for the extraction call (ollama format=schema). Load-
+  # bearing for a local model - stops reasoning/prose leaking into the JSON and
+  # losing a whole document. anthropic/bedrock ignore it.
+  structured_output: true
+  # After chunk-by-chunk extraction, re-prompt the WHOLE doc for ties whose endpoints
+  # fell in different chunks - the cross-chunk recall lever ollama otherwise can't
+  # reach. One extra LLM call per doc; cheap on the 5090, no API meter. Docs longer
+  # than recall_max_chars (24000) are skipped.
+  recall_pass: true
 
 dedup:
   fuzzy_thresholds:
@@ -105,15 +118,25 @@ quality:
   min_entity_mentions: 1
   min_edge_weight: 1
   llm_review: "auto"
+  # Re-check each LLM edge against its evidence on the 5090 and tag supported/
+  # unsupported (filterable in Gephi). Extra calls per edge, free on his machine.
+  verify_relations: true
+  # ...but DON'T let a local verifier prune the metric graph. Even a 27-31B self-
+  # verifier over-rejects; trust_verification stays off, so unsupported edges are
+  # tagged in the export but dropped from brokerage/balance NOWHERE. The export is
+  # identical either way - flip on only after an A/B shows the verifier earns it.
+  trust_verification: false
 
 inference:
   enable_cooccurrence_edges: true
   cooccurrence_min_shared_docs: 2
   # Disparity-filter backbone (Serrano 2009) over the co-occurrence layer. 0 = off
-  # (just stamp disparity_alpha for manual filtering). The Abel letters aren't
-  # entity-dense like a web crawl, so the default is off; raise to ~0.1 to keep
-  # only statistically significant co-mentions.
-  cooccurrence_backbone_alpha: 0.0
+  # (just stamp disparity_alpha for manual filtering). With GLiNER NER (ollama mode)
+  # the corpus IS entity-dense: a 10-doc pilot threw 2051 co-occurrence edges off 359
+  # entities (258 single-mention), swamping the 206 real ties and dropping asserted%
+  # to 10%. 0.1 keeps only statistically significant co-mentions; substantive
+  # (SOCIAL/STRUCTURAL) ties are untouched. (Was 0.0 for the sparser flash NER path.)
+  cooccurrence_backbone_alpha: 0.1
   # Turn on evidence-based membership + structural edges for this corpus.
   enable_canonical_inference: true
   # Mandatory NSDAP membership assumption (documents are NSDAP autobiographies):

@@ -473,7 +473,7 @@ Configured under `coreference:`.
 - **`pronoun_resolution: true`** (optional, needs `fastcoref`) - resolves
   third-person pronouns ("he", "er") to named entities. English-oriented;
   silently no-ops if `fastcoref` isn't installed.
-- **`service_url`** (optional) - run fastcoref out-of-process. It needs
+- **`service_url`** (optional) - run fastcoref out-of-process. It needs2
   `transformers <5`, which conflicts with the main env's GLiNER2; the microservice
   keeps it isolated and light. In a separate venv:
   `pip install -r services/requirements-coref.txt` then

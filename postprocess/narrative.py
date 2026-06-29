@@ -43,6 +43,45 @@ _ELEMENT_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+# Dramatic / plot-beat scheme for fiction and scripts (novels, TV/film). Same
+# Bearman-Stovel sequence machinery, but the elements are story beats (conflict ->
+# revelation -> resolution) instead of life-course stages. Select it with
+# export.narrative_scheme: fiction, or ship a domain narrative_rules.py. First match
+# wins, so order specific before generic. English keywords (most fiction corpora).
+FICTION_ELEMENT_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("death", ("death", "died", "killed", "murder", "slain", "funeral", "grave", "corpse")),
+    ("violence_conflict", ("fight", "battle", "attack", "duel", "ambush", "struggle",
+                           "blood", "wound", "war")),
+    ("romance", ("love", "kiss", "embrace", "wedding", "married", "affair", "courtship",
+                 "lover", "betrothed")),
+    ("betrayal", ("betray", "treachery", "deceive", "trick", "double-cross", "traitor",
+                  "backstab")),
+    ("revelation", ("discover", "reveal", "realize", "uncover", "secret", "confess",
+                    "truth", "prophecy")),
+    ("journey", ("journey", "travel", "set out", "depart", "arrive", "voyage", "quest",
+                 "road", "sail")),
+    ("threat_danger", ("danger", "threat", "trap", "pursue", "chase", "escape", "flee",
+                       "hunt", "captured")),
+    ("crime", ("steal", "theft", "robbery", "kidnap", "ransom", "heist", "burglary",
+               "smuggle")),
+    ("power_politics", ("throne", "crown", "king", "queen", "rule", "power", "election",
+                        "conspiracy", "coup", "council")),
+    ("celebration", ("feast", "party", "celebration", "festival", "banquet", "triumph",
+                     "victory", "toast")),
+    ("loss_grief", ("loss", "grief", "mourning", "exile", "ruin", "despair", "abandon",
+                    "orphan")),
+    ("reconciliation", ("forgive", "reunite", "reconcile", "peace", "redemption",
+                        "homecoming", "restored")),
+]
+
+# Named schemes selectable from config (export.narrative_scheme). A domain's
+# narrative_rules() still wins over either.
+ELEMENT_SCHEMES: dict[str, list] = {
+    "life_course": _ELEMENT_RULES,
+    "fiction": FICTION_ELEMENT_RULES,
+}
+
+
 def categorize(text: str, rules=_ELEMENT_RULES) -> str:
     """Bucket an event description into a narrative element category."""
     t = (text or "").lower()

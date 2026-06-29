@@ -195,6 +195,14 @@ class GenericDomain(BaseDomain):
             guide = _safe_attr(self.package, "relation_config", "RELATION_GUIDE", {})
         return {str(k): str(v) for k, v in (guide or {}).items() if v}
 
+    def narrative_rules(self):
+        # A domain may ship narrative_rules.py exposing RULES (or NARRATIVE_RULES) -
+        # its own Bearman-Stovel element scheme. None -> the config/default picks one.
+        rules = _safe_attr(self.package, "narrative_rules", "RULES", None)
+        if rules is None:
+            rules = _safe_attr(self.package, "narrative_rules", "NARRATIVE_RULES", None)
+        return rules or None
+
     def narrator_name(self, filename: str, doc_id: str) -> Optional[str]:
         fn = _safe_attr(self.package, "german_nlp", "author_from_filename", None)
         return fn(filename) if callable(fn) else None

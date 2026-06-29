@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Iterator, Optional
@@ -322,6 +323,41 @@ def document_from_text(text: str, name: str = "direct_input") -> Document:
         text=text,
         meta={"filename": name, "source_type": "text", "n_chars": len(text)},
     )
+
+
+def write_documents_snapshot(documents: list[Document], path: str | Path) -> int:
+    """Write the gathered corpus to a portable JSONL snapshot (one Document/line).
+
+    This is the ingestion checkpoint: crawl + fetch + RTF/mojibake repair +
+    main-content extraction done once, frozen to a single file. Ship it to another
+    machine (the 5090) or re-run extraction in any --mode without re-scraping. The
+    doc_ids are preserved, so a snapshot run and a live run produce the same nodes.
+    Returns the count written."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for d in documents:
+            fh.write(json.dumps(d.to_dict(), ensure_ascii=False) + "\n")
+    return len(documents)
+
+
+def read_documents_snapshot(path: str | Path) -> list[Document]:
+    """Load a corpus JSONL written by write_documents_snapshot. The portable,
+    mode-independent input - no crawl, no fetch, no file walk. Bad lines are
+    skipped, not raised, so a partially-copied file still loads what it can."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Documents snapshot not found: {path}")
+    out: list[Document] = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(Document.from_dict(json.loads(ln)))
+        except (ValueError, TypeError) as exc:  # malformed/truncated line
+            logger.warning("Skipping bad snapshot line: %s", exc)
+    return out
 
 
 def read_urls_file(path: str | Path) -> list[str]:

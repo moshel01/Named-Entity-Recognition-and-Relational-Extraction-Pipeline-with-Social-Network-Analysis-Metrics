@@ -14,6 +14,10 @@ from __future__ import annotations
 
 # Relation type -> tie class (canonical relation vocabulary).
 _REL_CLASS: dict[str, str] = {
+    # social-media structure (core/social): a reply/mention IS the interaction; posting
+    # in a community is an affiliation (feeds the two-mode projection so co-posters link).
+    "replied_to": "interaction", "mentions": "interaction", "quoted": "interaction",
+    "follows": "interaction", "posted_in": "affiliation",
     # interaction (person<->person)
     "met_with": "interaction", "visited": "interaction", "recruited": "interaction",
     "subordinate_to": "interaction", "commanded": "interaction",
@@ -68,12 +72,16 @@ _REL_CLASS: dict[str, str] = {
     "prevented": "causal", "led_to": "causal", "resulted_in": "causal",
     # not ties
     "co_occurs_with": "cooccurrence", "alias_of": "other",
+    # scene co-presence (scripts): two characters share a scene. A co-presence, like
+    # co-occurrence, not an asserted interaction - kept in the weakest layer.
+    "co_present_in_scene": "cooccurrence",
 }
 
 # Reciprocal ties -> undirected; everything else is directed.
 SYMMETRIC: set[str] = {
     "met_with", "family_of", "married_to", "friend_of", "sibling_of", "related_to",
     "knew", "served_with", "allied_with", "co_occurs_with", "co_affiliated",
+    "co_present_in_scene",
 }
 
 # Fallback by target entity type when the relation type is unknown.

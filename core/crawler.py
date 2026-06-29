@@ -386,48 +386,7 @@ class Crawler:
         return res
 
     def _http_fetch(self, url):
-        import requests
-        try:
-            resp = requests.get(url, headers={"User-Agent": self.opts.user_agent},
-                                timeout=self.opts.timeout, stream=True, allow_redirects=True)
-        except Exception as exc:  # noqa: BLE001 - network failure -> fail soft
-            logger.debug("Crawler fetch failed %s: %s", url, exc)
-            return None
-        try:
-            status = resp.status_code
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            final = resp.url or url
-            buf = bytearray()
-            for chunk in resp.iter_content(8192):
-                if chunk:
-                    buf.extend(chunk)
-                    if len(buf) > self.opts.max_bytes:
-                        break
-            body = bytes(buf)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Crawler read failed %s: %s", url, exc)
-            return None
-        finally:
-            resp.close()
-        if status >= 400:
-            return None
-        if "pdf" in ctype or final.split("?")[0].lower().endswith(".pdf"):
-            return FetchResult(url=final, status=status, content_type=ctype,
-                               content=body, ok=True)
-        text = self._decode(body, ctype)
-        return FetchResult(url=final, status=status, content_type=ctype,
-                           text=text, content=body, ok=True)
-
-    @staticmethod
-    def _decode(body: bytes, ctype: str) -> str:
-        m = re.search(r"charset=([\w\-]+)", ctype or "")
-        if m:
-            try:
-                return body.decode(m.group(1), errors="replace")
-            except (LookupError, TypeError):
-                pass
-        from .preprocessor import _decode  # chardet sniff, header had no charset
-        return _decode(body, "auto")
+        return http_get(url, self.opts.user_agent, self.opts.timeout, self.opts.max_bytes)
 
     @staticmethod
     def _pdf_text(content: bytes) -> str:
@@ -440,6 +399,133 @@ class Crawler:
             return "\n".join(parts)
         except Exception:  # noqa: BLE001 - corrupt/empty pdf
             return ""
+
+
+def _decode_body(body: bytes, ctype: str) -> str:
+    """Decode page bytes: honor the header charset, else chardet-sniff."""
+    m = re.search(r"charset=([\w\-]+)", ctype or "")
+    if m:
+        try:
+            return body.decode(m.group(1), errors="replace")
+        except (LookupError, TypeError):
+            pass
+    from .preprocessor import _decode  # chardet sniff, header had no charset
+    return _decode(body, "auto")
+
+
+def http_get(url: str, user_agent: str = _DEFAULT_UA, timeout: int = 30,
+             max_bytes: int = 5_000_000):
+    """Plain streaming GET -> FetchResult (or None on failure). Module-level so the
+    headless fetcher can reuse it for robots/sitemaps/PDFs without a browser."""
+    import requests
+    try:
+        resp = requests.get(url, headers={"User-Agent": user_agent},
+                            timeout=timeout, stream=True, allow_redirects=True)
+    except Exception as exc:  # noqa: BLE001 - network failure -> fail soft
+        logger.debug("Crawler fetch failed %s: %s", url, exc)
+        return None
+    try:
+        status = resp.status_code
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        final = resp.url or url
+        buf = bytearray()
+        for chunk in resp.iter_content(8192):
+            if chunk:
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    break
+        body = bytes(buf)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Crawler read failed %s: %s", url, exc)
+        return None
+    finally:
+        resp.close()
+    if status >= 400:
+        return None
+    if "pdf" in ctype or final.split("?")[0].lower().endswith(".pdf"):
+        return FetchResult(url=final, status=status, content_type=ctype,
+                           content=body, ok=True)
+    text = _decode_body(body, ctype)
+    return FetchResult(url=final, status=status, content_type=ctype,
+                       text=text, content=body, ok=True)
+
+
+class PlaywrightFetcher:
+    """Headless-Chromium fetcher for the crawler's fetch= hook: renders JS so SPA /
+    client-rendered pages yield real content instead of an empty shell. Optional -
+    `pip install playwright` then `playwright install chromium`. Reuses one browser
+    across the whole crawl; call close() when done. robots.txt / sitemaps / PDFs
+    bypass the browser (plain GET) so their bytes aren't wrapped in a text viewer.
+    If Playwright isn't installed it logs once and falls back to a plain GET, so a
+    crawl never hard-fails for lack of a browser."""
+
+    def __init__(self, user_agent: str = _DEFAULT_UA, timeout: int = 30,
+                 max_bytes: int = 5_000_000, wait_until: str = "domcontentloaded") -> None:
+        self.user_agent = user_agent
+        self.timeout_s = timeout
+        self.timeout_ms = max(1, timeout) * 1000
+        self.max_bytes = max_bytes
+        self.wait_until = wait_until
+        self._pw = None
+        self._browser = None
+        self._page = None
+        self._ok: "bool | None" = None  # None=untried, True=up, False=unavailable
+
+    def _ensure(self) -> bool:
+        if self._ok is not None:
+            return self._ok
+        try:
+            from playwright.sync_api import sync_playwright
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(headless=True)
+            self._page = self._browser.new_page(user_agent=self.user_agent)
+            self._ok = True
+        except Exception as exc:  # noqa: BLE001 - not installed / no chromium binary
+            logger.warning("Playwright unavailable (%s); crawl falls back to plain GET "
+                           "(no JS rendering). Install: pip install playwright && "
+                           "playwright install chromium", exc)
+            self._ok = False
+        return self._ok
+
+    def __call__(self, url: str):
+        low = url.split("?", 1)[0].lower()
+        # Raw resources: never render (chromium wraps text/xml in a <pre> viewer,
+        # which would break the robots/sitemap parsers).
+        if low.endswith(("robots.txt", ".xml", ".pdf")):
+            return http_get(url, self.user_agent, self.timeout_s, self.max_bytes)
+        if not self._ensure():
+            return http_get(url, self.user_agent, self.timeout_s, self.max_bytes)
+        try:
+            resp = self._page.goto(url, timeout=self.timeout_ms, wait_until=self.wait_until)
+            html = self._page.content()
+            final = self._page.url or url
+            status = resp.status if resp is not None else 200
+            ctype = "text/html"
+            if resp is not None:
+                try:
+                    ctype = resp.header_value("content-type") or "text/html"
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - nav timeout / crash -> fail soft
+            logger.debug("Playwright fetch failed %s: %s", url, exc)
+            return None
+        if status >= 400:
+            return None
+        body = html.encode("utf-8", "replace")
+        if len(body) > self.max_bytes:
+            body = body[:self.max_bytes]
+            html = body.decode("utf-8", "replace")
+        return FetchResult(url=final, status=status, content_type=ctype,
+                           text=html, content=body, ok=True)
+
+    def close(self) -> None:
+        for obj, meth in ((self._browser, "close"), (self._pw, "stop")):
+            try:
+                if obj is not None:
+                    getattr(obj, meth)()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+        self._page = self._browser = self._pw = None
 
 
 def crawl_documents(seeds: list[str], opts: CrawlOptions | None = None,

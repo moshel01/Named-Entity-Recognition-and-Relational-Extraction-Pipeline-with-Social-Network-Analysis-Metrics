@@ -1,0 +1,83 @@
+# Social-media network config. Users are PERSON actors, communities (subreddits/
+# instances/threads) are ORG groups. The explicit reply/mention/posted_in structure is
+# pulled by the connectors (core/social) as asserted social_graph edges; the NER/LLM
+# pass still mines entities/relations stated inside the post text.
+#
+#   # set sources here or pass --social on the CLI
+#   python main.py --config domain/social/config_social.yaml \
+#       --social reddit:datascience --social hackernews:top --mode ollama
+#
+# Ethics: Reddit/HN/Mastodon use public read APIs; Twitter uses the official API v2
+# ($TWITTER_BEARER_TOKEN). Facebook scraping is not supported (Meta ToS) - ingest a
+# "Download Your Information" export via --ingest-from instead.
+
+run_name: "social"
+mode: "python_only"          # python_only is enough for the structural network; switch
+                             # to ollama/api to also extract in-post relations
+
+io:
+  input_path: ""
+  output_dir: "./output"
+  # Fill these or pass --social. Examples:
+  social: []                 # ["reddit:datascience", "hackernews:top"]
+  social_limit: 100
+  social_depth: 1            # 1 = pull comment/reply trees (the conversation network)
+
+foundation:
+  spacy_model: "en_core_web_sm"
+  gliner_model: "fastino/gliner2-multi-v1"
+  gliner_threshold: 0.45
+  gliner_labels: ["person", "organization", "location", "event"]
+  label_map:
+    person: "PERSON"
+    organization: "ORG"
+    location: "LOCATION"
+    event: "EVENT"
+
+coreference:
+  enabled: true
+  narrator_resolution: false   # social posts aren't first-person life narratives
+  pronoun_resolution: false
+
+chunking:
+  max_chars: 4000              # posts are short; keep chunks small
+  overlap_chars: 200
+  respect_sentences: true
+
+inference:
+  enable_cooccurrence_edges: true
+  cooccurrence_min_shared_docs: 2
+  # Posts are entity-dense and short; thin the co-mention layer to the significant ties.
+  cooccurrence_backbone_alpha: 0.1
+  enable_canonical_inference: true
+  mandatory_membership: "off"
+  # The headline: users who post in the same community/thread get a co_affiliated edge
+  # (Breiger two-mode -> one-mode over posted_in). min_shared 2 = share >=2 communities.
+  enable_affiliation_projection: true
+  affiliation_min_shared: 2
+
+ontology:
+  enabled: true
+  fuzzy_threshold: 0.82
+  drop_unmapped: false
+  relations: null
+
+linking:
+  enabled: false
+
+domain:
+  name: "social"
+
+export:
+  formats: ["csv", "json", "gexf", "jsonl"]
+  gephi: true
+  graph_metrics: true
+  codebook_note: >-
+    Social-media network. Edges tagged social_graph are platform-stated structure
+    (replied_to / mentions / posted_in) - asserted tier. co_affiliated edges are
+    co-posting projections, not direct contact. Account != person: an ORG/bot account
+    is one PERSON node. Read as a descriptive snapshot of the pulled sample, not the
+    whole platform.
+
+checkpoint:
+  enabled: true

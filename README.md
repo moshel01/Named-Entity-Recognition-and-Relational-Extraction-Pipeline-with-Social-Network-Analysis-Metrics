@@ -94,12 +94,15 @@ The pipeline ingests, in any combination:
 | Books / documents | `.pdf` (PyMuPDF), `.docx`, `.rtf` |
 | Saved web pages | `.html` / `.htm` (boilerplate stripped) |
 | **Live web pages / PDFs** | `--url https://...` (repeatable), or `io.urls` / `io.urls_file` |
-| **A whole site (subpages)** | `--crawl https://...` (bounded, polite); or `io.crawl` |
+| **A whole site (subpages)** | `--crawl https://...` (bounded, polite); or `io.crawl`. Add `--render-js` for SPA/JS sites (needs Playwright) |
+| **Social media** | `--social platform:target` (repeatable); or `io.social` |
+| **A portable corpus snapshot** | `--ingest-from documents.jsonl` (scrape once with `--stage fetch`, extract anywhere) |
 | **Direct / pasted text** | `--text "..."` |
 
 ```bash
 python main.py --config config.yaml --url https://en.wikipedia.org/wiki/Weimar_Republic
 python main.py --config config.yaml --crawl https://example.org/topic/ --crawl-max-pages 40
+python main.py --config domain/social/config_social.yaml --social reddit:datascience --social bluesky:climate
 python main.py --config config.yaml --text "Hitler met Goebbels in Munich in 1926."
 ```
 
@@ -108,6 +111,31 @@ seed(s) into one merged network - bounded (page/depth/size caps) and polite
 (robots.txt, per-host rate limit, sitemap-aware) by default; tune in `io.crawl`.
 **Limit:** PDFs must contain a real text layer (scanned/image-only PDFs need OCR
 first, which is not bundled).
+
+### Social-media networks
+
+`--social platform:target` pulls posts **and the explicit social graph** (who replied
+to / mentioned whom, who posted where) as asserted edges, then runs NER/relations over
+the text. Users become PERSON nodes, communities ORG nodes, so co-posters project
+together (`co_affiliated`). Fetched once, cached to `social_docs.jsonl`.
+
+| Platform | `target` | Access |
+|----------|----------|--------|
+| `reddit` | `datascience` | public `.json` API |
+| `hackernews` / `hn` | `top` \| `new` \| story id | official Firebase API |
+| `lemmy` | `lemmy.world/technology` | open `/api/v3` |
+| `mastodon` | `instance` \| `instance/tag/x` | open public timelines |
+| `bluesky` / `bsky` | `from:alice.bsky.social` \| `climate` | AT-protocol public AppView |
+| `truthsocial` / `truth` | *(blank)* \| `tag/news` | its own Mastodon API (gated; fails soft) |
+| `twitter` / `x` | `from:nasa` \| `climate policy` | **official API v2**, `$TWITTER_BEARER_TOKEN` |
+
+> **Only sanctioned access.** Connectors use documented/public/official endpoints only -
+> no login-wall or anti-bot circumvention, no proxy/fingerprint/CAPTCHA evasion, no
+> private-app impersonation. **Facebook** group/post scraping is **not supported** (it
+> needs a credentialed session against Meta ToS): use the Graph API for public Pages,
+> Meta's **Content Library** (academic research API), or a *Download Your Information*
+> export ingested via `--ingest-from`. **Twitter/X** beyond the free API tier means the
+> paid X API tiers - the connector won't scrape the login-walled UI.
 
 ---
 

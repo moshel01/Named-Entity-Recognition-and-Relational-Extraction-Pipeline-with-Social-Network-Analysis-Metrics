@@ -5,8 +5,9 @@
 # half of the L3X generate-then-scrutinize loop (verification is the precision half).
 # Duck-types backend._complete; reuses the same _map_extraction + ontology/qualifier
 # schema as the first pass, so new edges are indistinguishable downstream except for
-# a recall_pass tag. Size-guarded: a doc past the budget is skipped (won't fit
-# context). gemini_batch already sees whole docs, so this mainly lifts api/ollama.
+# a recall_pass tag. A doc that fits the budget is one pass; a longer one (a book, a
+# long transcript) is split into overlapping windows so length no longer forfeits
+# recall. gemini_batch already sees whole docs, so this mainly lifts api/ollama.
 
 from __future__ import annotations
 
@@ -52,12 +53,56 @@ def recall_relations(
     doc_id: str,
     date_vocab=({}, {}, None),
     max_chars: int = 24000,
+    overlap: int = 2000,
+    max_windows: int = 60,
 ) -> list[Relationship]:
     """Re-prompt for missed relations among the doc's entities. Returns the NEW ones
     (tagged recall_pass), endpoints constrained to the known entity set, deduped
-    against ``existing``. Empty if the doc is too long for the model context."""
-    if not doc_text or len(doc_text) > max_chars:
+    against ``existing``. A doc that fits ``max_chars`` is a single pass; a longer one
+    (a book, a long transcript) is split into overlapping windows, each prompted with
+    its window-local entities - so length no longer means no recall (the old behavior
+    was to skip). Cross-window ties beyond ``overlap`` are still out of reach, but
+    those are rare in real text; the within-window cross-chunk ties are the recall."""
+    if not doc_text:
         return []
+    have: set = {(_norm(r.source), _norm(r.target), (r.rel_type or "").lower())
+                 for r in existing}
+
+    if len(doc_text) <= max_chars:
+        windows = [(0, len(doc_text))]
+    else:
+        step = max(1, max_chars - max(0, overlap))
+        starts = range(0, len(doc_text), step)
+        windows = [(s, min(s + max_chars, len(doc_text))) for s in starts][:max_windows]
+
+    out: list[Relationship] = []
+    months, seasons, pivot = date_vocab
+    for ws, we in windows:
+        wtext = doc_text[ws:we]
+        # Window-local entities by doc-absolute offset (whole-doc set when single pass).
+        if len(windows) == 1:
+            wmentions = mentions
+        else:
+            wmentions = [m for m in mentions
+                         if ws <= getattr(m, "start_char", 0) < we]
+        out.extend(_recall_window(
+            wtext, wmentions, existing, complete, have,
+            label_types=label_types, relation_types=relation_types,
+            relation_guide=relation_guide, edge_qualifiers=edge_qualifiers,
+            type_signatures=type_signatures, doc_id=doc_id,
+            date_vocab=(months, seasons, pivot)))
+    if out:
+        logger.info("Recall pass: +%d missed relation(s) in %s (%d window(s)).",
+                    len(out), doc_id, len(windows))
+    return out
+
+
+def _recall_window(
+    doc_text, mentions, existing, complete, have, *,
+    label_types, relation_types, relation_guide, edge_qualifiers,
+    type_signatures, doc_id, date_vocab,
+) -> list[Relationship]:
+    """One recall prompt over one text window. Mutates ``have`` to dedup across windows."""
     names: dict[str, str] = {}   # normalized -> display, the closed entity set
     for m in mentions:
         nm = (m.text or "").strip()
@@ -65,10 +110,6 @@ def recall_relations(
             names.setdefault(_norm(nm), nm)
     if len(names) < 2:
         return []
-
-    have = set()
-    for r in existing:
-        have.add((_norm(r.source), _norm(r.target), (r.rel_type or "").lower()))
 
     ent_list = ", ".join(f"{d} [{lbl}]" for d, lbl in
                          ((names[k], _label_of(k, mentions)) for k in names))
@@ -100,13 +141,12 @@ def recall_relations(
         ks, kt = _norm(r.source), _norm(r.target)
         if ks not in names or kt not in names:
             continue  # endpoint isn't a known entity - a hallucinated node
-        if (ks, kt, (r.rel_type or "").lower()) in have:
-            continue  # already had it
-        have.add((ks, kt, (r.rel_type or "").lower()))
+        key = (ks, kt, (r.rel_type or "").lower())
+        if key in have:
+            continue  # already had it (this doc or an earlier window)
+        have.add(key)
         r.attributes["recall_pass"] = True
         out.append(r)
-    if out:
-        logger.info("Recall pass: +%d missed relation(s) in %s.", len(out), doc_id)
     return out
 
 

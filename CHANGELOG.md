@@ -4,6 +4,112 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## social reach: bluesky, lemmy, truth social - and the line on access-control evasion
+
+More legitimately-open networks, and an explicit non-goal.
+
+- bluesky: AT Protocol public AppView (public.api.bsky.app) - searchPosts / getAuthorFeed,
+  no auth. Reply graph from record.reply.parent, thread root as community, dot-aware handle
+  mentions (@alice.bsky.social).
+- lemmy: open /api/v3 (fediverse Reddit) - community post list + threaded comments; the
+  comment `path` gives the reply parent, !community makes co-commenters co-affiliate.
+- truthsocial: Truth Social is a Mastodon fork, so the connector points the Mastodon
+  client at truthsocial.com (its own API). Gated/CDN'd - fails soft; NO anti-bot bypass.
+- Registry now: reddit, hackernews, mastodon, bluesky, lemmy, truthsocial, twitter/x.
+
+NON-GOAL (declined by design): subverting Facebook/Twitter blockers. No anti-bot or
+fingerprint/CAPTCHA evasion, no residential-proxy or sock-puppet rotation, no private-app
+impersonation. Defeating an auth wall is unauthorized access against a non-consenting
+party (the conduct Meta/X litigate), bans the accounts/IPs, and breaks on every defense.
+The connectors only use documented/public/official endpoints. For Twitter/FB at depth the
+sanctioned routes are the official X API tiers, Meta's Content Library (academic research
+API) / Graph API for public Pages, and "Download Your Information" exports via --ingest-from.
+
+## social-media connectors (reddit / hackernews / mastodon / twitter)
+
+`core/social/` pulls posts AND the EXPLICIT social graph - who replied to / mentioned
+whom, who posted in which community - which is the point of social data (the network is
+stated, not inferred). Connectors return SocialPost records; base.py turns them into
+Documents (text still runs through NER/relations) plus reply/mention/posted_in edges.
+Users -> PERSON, communities -> ORG, so the existing tie-class + affiliation projection
+apply unchanged (co-posters in a community get co_affiliated). New edge_source
+`social_graph` is ASSERTED tier (the platform states it, like the metadata sheet);
+replied_to/mentions/quoted/follows -> interaction, posted_in -> affiliation in tie_classes.
+
+- reddit: public .json endpoints (no login, descriptive UA), subreddit + comment tree.
+- hackernews: official Firebase API (open), feed + comment BFS; thread = community.
+- mastodon: open public/hashtag timelines (no auth), HTML stripped.
+- twitter/x: OFFICIAL API v2 only ($TWITTER_BEARER_TOKEN). No UI scraping. Honest: the
+  free tier is read-limited, so reads need Basic+.
+- facebook: NOT supported - group/post scraping needs a credentialed session against
+  Meta ToS. fetch_social refuses it and points to the Graph API (public Pages) or a
+  "Download Your Information" export via --ingest-from.
+
+Wiring: `io.social` ("platform:target" specs) / `--social`, `--social-limit/-depth`.
+Fetched on extract and cached to social_docs.jsonl (analyze reuses it, no re-fetch).
+Structure folded in per-post in run_extract (same seam as the script hook). New
+`domain/social/` (config + USER/COMMUNITY-aware ontology, affiliation projection ON).
+All connectors take an injectable fetch= for offline tests; suite covers reddit+hn
+parsing, parent_author resolution, the three edge kinds, tie/tier registration.
+
+## multi-domain reach: ingestion checkpoint, generic ontology, scripts, JS crawl, long-doc recall
+
+Six additions to make the pipeline carry past the Abel corpus to arbitrary web/book/
+script sources. All opt-in; defaults unchanged, so an in-flight Abel run is untouched.
+
+- INGESTION CHECKPOINT. `core/preprocessor.write/read_documents_snapshot` + a portable
+  `documents.jsonl` frozen at gather time. `--stage fetch` crawls/preprocesses and
+  stops (no models, no GPU); `--ingest-from PATH` (io.documents_file) loads that
+  snapshot and skips crawl/fetch/file-walk - scrape once on a laptop, ship the file,
+  extract in any --mode on the 5090. doc_ids preserved, so snapshot and live runs
+  produce the same nodes.
+- GENERIC RELATION ONTOLOGY. `domain/generic/relationship_config.py` - 29 general
+  interpersonal/org/biographical/stance/causal relations with a guide, so a no-domain
+  run yields TYPED, aligned edges instead of free-form label soup. Canonicals match the
+  existing tie-class/polarity/symmetric maps (knew/led/mentored/allied_with).
+- SCRIPT PARSER. `core/script_parser.py` reads screenplay structure (scene slugs +
+  speaker cues) and emits Newman-weighted `co_present_in_scene` edges - the standard
+  character-network signal the proximity window only approximates. Opt-in
+  `intelligence.parse_scripts` / `--parse-scripts`; a no-op on prose. New edge source
+  `script_copresence` registered in evidence_tiers (proximity, like affiliation_projected)
+  and tie_classes (cooccurrence, symmetric).
+- JS-RENDERING CRAWL. `core/crawler.PlaywrightFetcher` injected via the existing fetch=
+  hook for SPA/JS sites that return an empty shell to a plain GET. `io.crawl.render_js`
+  / `--render-js`. Optional dep (lazy import, falls back to plain GET); robots/sitemaps/
+  PDFs bypass the browser. Refactored `_http_fetch` into module `http_get` for reuse.
+- LONG-DOC RECALL. `relation_recall` no longer SKIPS a doc past recall_max_chars - it
+  windows it (overlapping sections, window-local entities) so a book/transcript still
+  gets a recall pass. Short docs unchanged (single window = whole doc).
+- FICTION NARRATIVE SCHEME. `narrative.FICTION_ELEMENT_RULES` (plot beats) selectable via
+  `export.narrative_scheme: fiction`; GenericDomain now reflects a domain
+  `narrative_rules.py`. Default stays life_course (Abel).
+
+## gemini_batch --resume: recognize a finished gemma reply (was re-POSTing all)
+
+`_reply_complete` (the resume checkpoint predicate - the saved reply file IS the
+checkpoint) did a STRICT `json.loads`. Gemma prepends a prose preamble to the JSON,
+so its complete replies never strict-parse -> every finished gemma batch read as
+not-done -> `--resume` re-POSTed the whole run, throwing already-good batches back
+at the flaky endpoint and getting nothing new. Now it strips the preamble with
+`_outermost_span` then strict-parses the body. Deliberately NOT `repair_json`: that
+balances unclosed braces and would pass a TRUNCATED reply, which must be re-POSTed
+with a smaller `--batch-docs`, not silently kept. (Prompt files are always rewritten
+on extract regardless of resume - resume gates the POST, not the prompt write.)
+
+## gemini submit: retry read timeouts / dropped connections, don't fail the batch
+
+`submit_to_gemini` only retried HTTP status codes (429/500/503). A
+`requests.Timeout` or `ConnectionError` raised straight out of `requests.post`
+and killed the whole batch - the free gemma-4-31b endpoint stalls under load and
+threw read timeouts (600s) and 500s, dropping a batch that `--resume` then had to
+redo from scratch. The POST now sits in a try/except: a network exception backs
+off (5/10/20...s) and retries like a 5xx; the last attempt re-raises so the caller
+skips it and `--resume` re-queues it (the reply file is the checkpoint, written
+only on success). Note this timeout is the model taking >`batch_request_timeout`
+to generate - the POST blocks waiting for the first byte, nothing is parsed until
+it returns, so it is never our ingest speed. Raise `intelligence.batch_request_timeout`
+(default 600) if a slow model keeps tripping it.
+
 ## run_meta provenance fix (analyze no longer clobbers the extract model)
 
 Two bugs in `run_meta.json`: (1) the top-level `model` field read `<mode>.model`,

@@ -1492,11 +1492,31 @@ def test_recall_pass() -> None:
     check("duplicate not re-added", ("Alice", "Acme", "works_at") not in rts, str(rts))
     check("unknown-entity relation dropped", all(r.target != "Zorg" for r in out), str(rts))
     check("recall edges tagged", out and all(r.attributes.get("recall_pass") for r in out), "")
-    # Oversized doc is skipped (won't fit model context).
+    # Oversized doc is now WINDOWED (sectioned recall), not skipped: it still recovers
+    # relations among entities whose mentions fall inside a window.
     big = recall_relations("x" * 30000, mentions, existing, lambda s, u: reply,
-                           label_types=["PERSON"], relation_types=[], relation_guide={},
-                           edge_qualifiers=[], type_signatures={}, doc_id="d", max_chars=24000)
-    check("oversized doc skipped", big == [], str(big))
+                           label_types=["PERSON", "ORG"], relation_types=["met_with", "works_at"],
+                           relation_guide={}, edge_qualifiers=[], type_signatures={},
+                           doc_id="d", max_chars=24000)
+    big_rts = [(r.source, r.target, r.rel_type) for r in big]
+    check("oversized doc windowed, not skipped", ("Alice", "Bob", "met_with") in big_rts, str(big_rts))
+
+    # Window-local entity gating: a doc split into windows only prompts windows that
+    # hold >=2 entities, and entities are filtered by doc-absolute offset.
+    def Mo(name, label, start):
+        return EntityMention(text=name, label=label, start_char=start, end_char=start + len(name),
+                             chunk_id="c", doc_id="d")
+    win_doc = "z" * 8000
+    win_ments = [Mo("Alice", "PERSON", 10), Mo("Acme", "ORG", 60),
+                 Mo("Bob", "PERSON", 5000), Mo("Globex", "ORG", 5050)]
+    seen_windows = []
+    recall_relations(win_doc, win_ments, [],
+                     lambda s, u: seen_windows.append("A" if "Alice" in u else "B") or "{}",
+                     label_types=["PERSON", "ORG"], relation_types=["knew"], relation_guide={},
+                     edge_qualifiers=[], type_signatures={}, doc_id="d",
+                     max_chars=2000, overlap=500)
+    check("long doc prompts both entity regions", "A" in seen_windows and "B" in seen_windows,
+          str(seen_windows))
 
 
 def test_expansion_schema_load() -> None:
@@ -1989,14 +2009,23 @@ def test_gemini_batch_resume() -> None:
     from pathlib import Path
     from main import Pipeline
     print("-- gemini_batch --resume checkpoint predicate")
-    # The saved reply file IS the checkpoint: a complete (strict-parsing) reply is
-    # done and skipped on resume; a truncated/empty/missing one gets re-submitted.
+    # The saved reply file IS the checkpoint: a reply that RECOVERS (same repair ladder
+    # as import) is done and skipped on resume; a truncated/empty/missing one gets
+    # re-submitted. Must NOT use a strict parse - gemma prepends a prose preamble, so a
+    # strict check re-POSTed every finished gemma batch into the flaky endpoint.
     with tempfile.TemporaryDirectory() as d:
         dd = Path(d)
         good = dd / "r1.json"; good.write_text('{"doc_a": {"entities": []}}', encoding="utf-8")
         trunc = dd / "r2.json"; trunc.write_text('{"doc_a": {"entities": [{"name":"X"', encoding="utf-8")
         empty = dd / "r3.json"; empty.write_text("", encoding="utf-8")
+        # gemma's real shape: prose paraphrase (with stray brackets) then the JSON.
+        preamble = dd / "r4.json"
+        preamble.write_text("Here is the extraction. confidence float [0, 1].\n"
+                            '{"doc_b": {"entities": [{"name": "Ude"}], "relationships": []}}',
+                            encoding="utf-8")
         check("complete reply -> skip", Pipeline._reply_complete(good) is True, "")
+        check("prose-preamble reply -> skip (not re-POSTed)",
+              Pipeline._reply_complete(preamble) is True, "")
         check("truncated reply -> redo", Pipeline._reply_complete(trunc) is False, "")
         check("empty reply -> redo", Pipeline._reply_complete(empty) is False, "")
         check("missing reply -> redo", Pipeline._reply_complete(dd / "nope.json") is False, "")
@@ -2115,6 +2144,39 @@ def test_gemini_submit() -> None:
         submit_to_gemini("P", "KEY", max_retries=3)
     check("429 waits the server-stated 9s", waited.get("s") == 9.0, str(waited))
 
+    # A read timeout / dropped connection is the server stalling, not our ingest. The
+    # POST raises before any reply exists, so retry it like a 5xx instead of killing
+    # the batch. (Regression: gemma free endpoint timed out and lost the whole batch.)
+    import requests as _rq
+    calls["n"] = 0
+
+    def timeout_then_ok(url, json=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _rq.exceptions.ReadTimeout("read timed out")
+        m = MagicMock(); m.status_code = 200; m.raise_for_status = lambda: None
+        m.json = lambda: {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        return m
+    with patch("requests.post", timeout_then_ok), patch("time.sleep", lambda *a: None):
+        out3 = submit_to_gemini("P", "KEY", max_retries=3)
+    check("read timeout retried, not fatal", out3 == "ok" and calls["n"] == 2, str(calls))
+
+    # Persistent timeout re-raises after the retries so --resume re-queues the batch
+    # (the reply file is never written, so resume sees it as undone).
+    calls["n"] = 0
+
+    def always_timeout(url, json=None, headers=None, timeout=None):
+        calls["n"] += 1
+        raise _rq.exceptions.ConnectionError("connection reset")
+    raised = False
+    try:
+        with patch("requests.post", always_timeout), patch("time.sleep", lambda *a: None):
+            submit_to_gemini("P", "KEY", max_retries=3)
+    except _rq.exceptions.ConnectionError:
+        raised = True
+    check("persistent network failure re-raises after retries", raised and calls["n"] == 3,
+          str(calls))
+
 
 def test_gexf_parallel_edges() -> None:
     import tempfile
@@ -2148,6 +2210,222 @@ def test_gexf_parallel_edges() -> None:
         rt = G["a"]["b"].get("rel_type", "")
         check("both rel_types retained",
               "met_with" in rt and "supported" in rt, f"rel_type={rt}")
+
+
+def test_documents_snapshot() -> None:
+    import tempfile
+    from pathlib import Path
+    from core.preprocessor import read_documents_snapshot, write_documents_snapshot
+    from core.schema import Document
+    print("-- ingestion checkpoint (documents.jsonl snapshot)")
+    docs = [Document(doc_id="url_a", source_path="http://x/y",
+                     text="Müller joined the NSDAP.", meta={"source_type": "url", "n_chars": 5}),
+            Document(doc_id="url_b", source_path="http://x/z", text="", meta={})]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "documents.jsonl"
+        n = write_documents_snapshot(docs, p)
+        back = read_documents_snapshot(p)
+        check("snapshot count", n == 2 and len(back) == 2, str(n))
+        check("doc_id preserved", back[0].doc_id == "url_a", back[0].doc_id)
+        check("unicode text preserved", back[0].text == "Müller joined the NSDAP.", back[0].text)
+        check("meta preserved", back[0].meta.get("source_type") == "url", str(back[0].meta))
+        # bad line is skipped, not raised
+        p.write_text('{"doc_id":"ok","source_path":"s","text":"t","meta":{}}\nNOT JSON\n',
+                     encoding="utf-8")
+        rec = read_documents_snapshot(p)
+        check("bad line skipped", len(rec) == 1 and rec[0].doc_id == "ok", str(rec))
+
+
+def test_script_parser() -> None:
+    from core.script_parser import looks_like_script, parse_scenes, script_copresence
+    from postprocess.evidence_tiers import tier_allows
+    from postprocess.tie_classes import classify, is_symmetric
+    print("-- script parser (scene co-presence)")
+    script = ("FADE IN:\nINT. TAVERN - NIGHT\nGANDALF\nYou shall not pass.\nBILBO\n"
+              "I never could refuse you.\nTHORIN (CONT'D)\nEnough talk.\n"
+              "EXT. MOUNTAIN - DAY\nTHORIN\nWe march.\nBILBO\nMust we?\n"
+              "CUT TO:\nINT. CAVE - NIGHT\nGOLLUM\nMy precious.\nBILBO\nWho are you?\n")
+    check("looks_like_script true", looks_like_script(script) is True, "")
+    check("prose not a script", looks_like_script("Just a normal paragraph. Nothing here.") is False, "")
+    scenes = parse_scenes(script)
+    check("speaker cues parsed", scenes and ["Gandalf", "Bilbo", "Thorin"] == scenes[0], str(scenes))
+    edges = script_copresence(script, "d")
+    pairs = {(e.source, e.target): e.attributes["scene_weight"] for e in edges}
+    check("Newman weight sums across scenes", pairs.get(("Bilbo", "Thorin")) == 1.5, str(pairs))
+    check("all edges co_present_in_scene", all(e.rel_type == "co_present_in_scene" for e in edges), "")
+    check("script edge symmetric", is_symmetric("co_present_in_scene") is True, "")
+    check("co-presence classed cooccurrence",
+          classify("co_present_in_scene", "PERSON", "PERSON") == "cooccurrence", "")
+    check("script_copresence is proximity tier",
+          (not tier_allows("script_copresence", "conservative"))
+          and tier_allows("script_copresence", "full"), "")
+    check("non-script -> no edges", script_copresence("plain prose, no scenes", "d") == [], "")
+
+
+def test_generic_relation_ontology() -> None:
+    from domain.base_domain import load_domain
+    from postprocess.tie_classes import classify, polarity
+    print("-- generic default relation ontology")
+    d = load_domain("generic")
+    onto = d.relation_ontology()
+    check("generic ontology nonempty", len(onto) >= 20, str(len(onto)))
+    check("canonical names align with tie maps",
+          classify("led", "PERSON", "ORG") == "affiliation"
+          and polarity("supported") == "positive"
+          and classify("born_in", "PERSON", "LOCATION") == "biographical", "")
+
+
+def test_fiction_narrative_scheme() -> None:
+    from postprocess.narrative import ELEMENT_SCHEMES, FICTION_ELEMENT_RULES, categorize
+    print("-- fiction narrative scheme")
+    check("schemes registered", set(ELEMENT_SCHEMES) >= {"life_course", "fiction"}, str(list(ELEMENT_SCHEMES)))
+    check("fiction beats categorize",
+          categorize("they kissed at the wedding", FICTION_ELEMENT_RULES) == "romance"
+          and categorize("he set out on a long journey", FICTION_ELEMENT_RULES) == "journey", "")
+
+
+def test_playwright_routing() -> None:
+    from unittest.mock import MagicMock, patch
+    import core.crawler as cr
+    print("-- playwright fetcher raw-resource routing")
+    f = cr.PlaywrightFetcher(timeout=5)
+    seen = {}
+
+    def fake_get(url, *a, **k):
+        seen["url"] = url
+        m = MagicMock(); m.ok = True; m.text = "User-agent: *"
+        return m
+    with patch.object(cr, "http_get", fake_get):
+        f("https://example.com/robots.txt")
+        f("https://example.com/sitemap.xml")
+    check("raw resource bypasses browser", seen.get("url") is not None and f._ok is None, str(seen))
+
+
+def test_social_connectors() -> None:
+    import json as _json
+    from core.social import fetch_social, parse_spec, posts_to_documents, social_structure
+    from core.social import reddit as _reddit
+    from core.social import hackernews as _hn
+    from core.social.base import extract_mentions
+    from postprocess.evidence_tiers import tier_allows
+    from postprocess.tie_classes import classify
+    print("-- social connectors (reddit/hn structure)")
+
+    # spec parsing + facebook is refused with the sanctioned alternative.
+    check("spec parsed", parse_spec("reddit:datascience") == ("reddit", "datascience"), "")
+    fb_refused = False
+    try:
+        fetch_social("facebook:somegroup")
+    except ValueError as e:
+        fb_refused = "ToS" in str(e) or "not supported" in str(e)
+    check("facebook scraping refused", fb_refused, "")
+    check("mention extraction", extract_mentions("hi @carol and u/bob!") == ["carol", "bob"],
+          str(extract_mentions("hi @carol and u/bob!")))
+
+    # Reddit via injected fetch (no network): one submission + two comments.
+    listing = _json.dumps({"data": {"children": [
+        {"kind": "t3", "data": {"id": "p1", "author": "alice", "title": "Hello",
+                                "selftext": "hey u/bob", "subreddit": "test",
+                                "permalink": "/r/test/p1", "score": 5, "num_comments": 2}}]}})
+    comments = _json.dumps([
+        {"data": {"children": []}},
+        {"data": {"children": [
+            {"kind": "t1", "data": {"id": "c1", "author": "bob", "body": "hi @carol",
+                                    "parent_id": "t3_p1", "subreddit": "test"}},
+            {"kind": "t1", "data": {"id": "c2", "author": "carol", "body": "ok",
+                                    "parent_id": "t1_c1", "subreddit": "test"}}]}}])
+
+    def rfetch(url):
+        return comments if "/comments/" in url else listing
+
+    posts = _reddit.fetch("test", fetch=rfetch, delay=0)
+    check("reddit posts parsed", len(posts) == 3, str(len(posts)))
+    docs = posts_to_documents(posts)
+    by_author = {p.author: p for p in posts}
+    check("parent_author resolved", by_author["bob"].parent_author == "alice"
+          and by_author["carol"].parent_author == "bob", "")
+    # structure of bob's comment: replied_to alice, mentions carol, posted_in r/test
+    bob_doc = next(d for d in docs if d.meta.get("author") == "bob")
+    ments, edges = social_structure(bob_doc)
+    et = {(e.source, e.target, e.rel_type) for e in edges}
+    check("replied_to edge", ("bob", "alice", "replied_to") in et, str(et))
+    check("mentions edge", ("bob", "carol", "mentions") in et, str(et))
+    check("posted_in edge", ("bob", "r/test", "posted_in") in et, str(et))
+    check("social edges are social_graph",
+          all(e.attributes.get("edge_source") == "social_graph" for e in edges), "")
+    check("user node is PERSON", any(m.label == "PERSON" and m.text == "bob" for m in ments), "")
+    check("community node is ORG", any(m.label == "ORG" and m.text == "r/test" for m in ments), "")
+
+    # tie-class + tier registration
+    check("replied_to -> interaction", classify("replied_to", "PERSON", "PERSON") == "interaction", "")
+    check("posted_in -> affiliation", classify("posted_in", "PERSON", "ORG") == "affiliation", "")
+    check("social_graph is asserted tier",
+          tier_allows("social_graph", "conservative") and tier_allows("social_graph", "full"), "")
+
+    # Hacker News via injected fetch: a story + one comment.
+    hn = {"https://hacker-news.firebaseio.com/v0/topstories.json": "[10]",
+          "https://hacker-news.firebaseio.com/v0/item/10.json":
+              _json.dumps({"id": 10, "type": "story", "by": "ann", "title": "T",
+                           "kids": [11], "score": 9}),
+          "https://hacker-news.firebaseio.com/v0/item/11.json":
+              _json.dumps({"id": 11, "type": "comment", "by": "ben", "parent": 10,
+                           "text": "nice"})}
+    hposts = _hn.fetch("top", fetch=lambda u: hn[u])
+    check("hn story+comment parsed", len(hposts) == 2 and hposts[0].author == "ann", str(hposts))
+    check("hn comment shares story community",
+          hposts[1].community == hposts[0].community and hposts[0].community.startswith("HN:"), "")
+
+
+def test_social_fediverse() -> None:
+    import json as _json
+    from core.social import posts_to_documents, social_structure, supported_platforms
+    from core.social import bluesky as _bsky
+    from core.social import lemmy as _lemmy
+    print("-- social: bluesky + lemmy + truthsocial")
+    for p in ("bluesky", "bsky", "lemmy", "truthsocial", "truth"):
+        check(f"{p} registered", p in supported_platforms(), str(supported_platforms()))
+
+    # Bluesky search via public AppView (injected).
+    bsky_resp = _json.dumps({"posts": [
+        {"uri": "at://x/1", "author": {"handle": "alice.bsky.social"},
+         "record": {"text": "hello @bob.bsky.social"}, "likeCount": 3},
+        {"uri": "at://x/2", "author": {"handle": "bob.bsky.social"},
+         "record": {"text": "hi", "reply": {"parent": {"uri": "at://x/1"},
+                                            "root": {"uri": "at://x/1"}}}}]})
+    bposts = _bsky.fetch("climate", fetch=lambda u: bsky_resp)
+    check("bluesky posts parsed", len(bposts) == 2 and bposts[0].author == "alice.bsky.social",
+          str(bposts))
+    bdocs = posts_to_documents(bposts)
+    reply_doc = next(d for d in bdocs if d.meta.get("author") == "bob.bsky.social")
+    check("bluesky reply parent resolved", reply_doc.meta.get("parent_author") == "alice.bsky.social",
+          str(reply_doc.meta))
+    a_doc = next(d for d in bdocs if d.meta.get("author") == "alice.bsky.social")
+    _, a_edges = social_structure(a_doc)
+    check("bluesky dotted-handle mention",
+          ("alice.bsky.social", "bob.bsky.social", "mentions") in
+          {(e.source, e.target, e.rel_type) for e in a_edges}, str(a_edges))
+
+    # Lemmy community + threaded comments (injected).
+    plist = _json.dumps({"posts": [{"post": {"id": 1, "name": "T", "body": "hi @u@lemmy.world",
+                                             "ap_id": "u1"}, "creator": {"name": "alice"},
+                                    "community": {"name": "tech"}, "counts": {"score": 5}}]})
+    clist = _json.dumps({"comments": [
+        {"comment": {"id": 11, "content": "reply", "path": "0.11", "post_id": 1},
+         "creator": {"name": "bob"}},
+        {"comment": {"id": 12, "content": "nested", "path": "0.11.12", "post_id": 1},
+         "creator": {"name": "carol"}}]})
+    lposts = _lemmy.fetch("lemmy.world/tech",
+                          fetch=lambda u: clist if "/comment/" in u else plist, delay=0)
+    check("lemmy submission+comments", len(lposts) == 3, str(len(lposts)))
+    ldocs = posts_to_documents(lposts)
+    by_author = {d.meta.get("author"): d for d in ldocs}
+    check("lemmy nested reply resolved",
+          by_author["carol"].meta.get("parent_author") == "bob"
+          and by_author["bob"].meta.get("parent_author") == "alice", "")
+    _, bob_edges = social_structure(by_author["bob"])
+    check("lemmy replied_to + posted_in",
+          {("bob", "alice", "replied_to"), ("bob", "!tech", "posted_in")}
+          <= {(e.source, e.target, e.rel_type) for e in bob_edges}, str(bob_edges))
 
 
 def main() -> int:
@@ -2210,6 +2488,13 @@ def main() -> int:
     test_crawl_url_norm()
     test_crawler()
     test_coref_service_warmup()
+    test_documents_snapshot()
+    test_script_parser()
+    test_generic_relation_ontology()
+    test_fiction_narrative_scheme()
+    test_playwright_routing()
+    test_social_connectors()
+    test_social_fediverse()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES: {FAILURES}")

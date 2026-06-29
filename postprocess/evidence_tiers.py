@@ -20,16 +20,21 @@
 #   langextract_extracted  intelligence/langextract_backend
 #   rule_extracted         intelligence/relationship_patterns
 #   metadata               domain/*/metadata + main.py metadata spec
+#   social_graph           core/social (platform-stated reply/mention/posted_in)
 #   canonical_inferred     domain/nazi_era canonical inference (signal detected)
 #   pipeline_inferred      domain/nazi_era mandatory-membership assumption
 #   rule_cooccurrence      postprocess/canonical_inference + python_only backend
 #   affiliation_projected  postprocess/bipartite (two-mode -> one-mode projection)
+#   script_copresence      core/script_parser (two characters share a scene)
 #   sna_inferred           legacy co-occurrence tag (pre-2026-06 runs) -> proximity
 
 from __future__ import annotations
 
+# social_graph: the platform STATES the structure (X replied to / mentioned / posted
+# in Y) - a verified record like the metadata sheet, so the high-precision tier.
 ASSERTED = frozenset({
     "llm_extracted", "langextract_extracted", "rule_extracted", "metadata",
+    "social_graph",
 })
 INFERRED = frozenset({"canonical_inferred"})
 ASSUMPTION = frozenset({"pipeline_inferred"})
@@ -38,9 +43,11 @@ ASSUMPTION = frozenset({"pipeline_inferred"})
 # the human-readable docs (current runs never emit it).
 _LEGACY = frozenset({"sna_inferred"})
 # affiliation_projected: a two-mode -> one-mode projection (A and B both in org X).
-# Co-presence in a shared group, not a direct asserted tie - so the weakest tier,
-# same epistemic class as co-occurrence (just over affiliations, not documents).
-PROXIMITY = frozenset({"rule_cooccurrence", "affiliation_projected"}) | _LEGACY
+# script_copresence: two characters share a scene (script_parser). Both are co-presence
+# in a shared context, not a direct asserted tie - so the weakest tier, same epistemic
+# class as co-occurrence (just over affiliations/scenes, not documents).
+PROXIMITY = frozenset({"rule_cooccurrence", "affiliation_projected",
+                       "script_copresence"}) | _LEGACY
 
 # Filterable tiers (cumulative). 'full'/'all' are deliberately absent: they
 # admit *everything*, including unknown or future sources, and are handled as a

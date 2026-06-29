@@ -703,6 +703,99 @@ def test_crawler() -> None:
     check("doc_id scheme matches url ingestion",
           docs[0].doc_id == stable_id("https://s.org/", prefix="url_", length=10))
 
+    # L. enqueue-time dedup: a fully cross-linked site (every page links to every other)
+    # must not balloon the frontier - each url is queued once, fetched once.
+    from collections import Counter
+    nodes = ["https://s.org/", "https://s.org/a", "https://s.org/b", "https://s.org/c"]
+    links = "".join(f"<a href='{u}'>l</a>" for u in nodes)
+    mesh = {u: ("text/html", f"<p>{u}</p>{links}") for u in nodes}
+    base = _fake_site(mesh)
+    hits: Counter = Counter()
+
+    def counting(url):
+        r = base(url)
+        if r is not None and r.url in mesh:
+            hits[r.url] += 1
+        return r
+    c = Crawler(CrawlOptions(delay=0, max_depth=5), fetch=counting)
+    docs = c.crawl(["https://s.org/"])
+    check("cross-linked: all pages reached", len(docs) == 4, urls(docs))
+    check("cross-linked: each page fetched once", all(v == 1 for v in hits.values()), str(dict(hits)))
+    check("cross-linked: frontier deduped (queued == uniques)", len(c._queued) == 4, str(len(c._queued)))
+
+
+def test_crawl_checkpoint() -> None:
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from core.crawler import Crawler, CrawlOptions
+    print("-- crawler checkpoint + progress")
+
+    site = {
+        "https://s.org/": ("text/html", "<a href='/a'>a</a><a href='/b'>b</a>"),
+        "https://s.org/a": ("text/html", "<p>Alice.</p><a href='/c'>c</a>"),
+        "https://s.org/b": ("text/html", "<p>Bob.</p><a href='/d'>d</a>"),
+        "https://s.org/c": ("text/html", "<p>Carol.</p>"),
+        "https://s.org/d": ("text/html", "<p>Dave.</p>"),
+    }
+
+    def counting_site():
+        from collections import Counter
+        base = _fake_site(site)
+        hits: Counter = Counter()
+
+        def fetch(url):
+            res = base(url)
+            if res is not None and res.url in site:
+                hits[res.url] += 1
+            return res
+        return fetch, hits
+
+    cpdir = Path(tempfile.mkdtemp(prefix="crawlckpt_"))
+    try:
+        # Run 1: cap at 2 pages, checkpoint every page. Frontier left non-empty.
+        events1: list[dict] = []
+        f1, hits1 = counting_site()
+        c1 = Crawler(CrawlOptions(delay=0, max_pages=2, checkpoint_every=1),
+                     fetch=f1, on_progress=events1.append,
+                     checkpoint_dir=str(cpdir), resume=False)
+        docs1 = c1.crawl(["https://s.org/"])
+        check("capped run stops at max_pages", len(docs1) == 2, str(len(docs1)))
+        check("capped run is not complete", c1.complete is False, "")
+        check("checkpoint files written",
+              (cpdir / "state.json").exists() and (cpdir / "pages.jsonl").exists(), "")
+        check("progress page events fired",
+              any(e.get("event") == "page" for e in events1), str(events1[:2]))
+
+        # Run 2: resume with a higher cap; must NOT refetch run-1 pages and must finish.
+        events2: list[dict] = []
+        f2, hits2 = counting_site()
+        c2 = Crawler(CrawlOptions(delay=0, max_pages=10, checkpoint_every=1),
+                     fetch=f2, on_progress=events2.append,
+                     checkpoint_dir=str(cpdir), resume=True)
+        docs2 = c2.crawl(["https://s.org/"])
+        got = sorted(d.source_path for d in docs2)
+        check("resume reaches all pages", len(docs2) == 5, got)
+        check("resume marks complete", c2.complete is True, "")
+        check("resume did not refetch run-1 pages",
+              hits2["https://s.org/"] == 0 and hits2["https://s.org/a"] == 0, str(dict(hits2)))
+        check("resume only fetched the remainder",
+              hits2["https://s.org/b"] == 1 and hits2["https://s.org/c"] == 1
+              and hits2["https://s.org/d"] == 1, str(dict(hits2)))
+        check("resume start event flagged",
+              any(e.get("event") == "start" and e.get("resumed") for e in events2), "")
+        check("done event reports complete",
+              any(e.get("event") == "done" and e.get("complete") for e in events2), "")
+
+        # Fingerprint guard: different seeds/scope must ignore the checkpoint.
+        c3 = Crawler(CrawlOptions(delay=0, max_pages=10, deny=("/x",)),
+                     fetch=counting_site()[0], checkpoint_dir=str(cpdir), resume=True)
+        c3._fingerprint = c3._make_fingerprint(["https://s.org/"])
+        check("changed scope -> different fingerprint",
+              c3._fingerprint != c2._fingerprint, "")
+    finally:
+        shutil.rmtree(cpdir, ignore_errors=True)
+
 
 def test_coref_service_warmup() -> None:
     import json
@@ -2428,6 +2521,124 @@ def test_social_fediverse() -> None:
           <= {(e.source, e.target, e.rel_type) for e in bob_edges}, str(bob_edges))
 
 
+def test_social_telegram() -> None:
+    from core.social import posts_to_documents, social_structure, supported_platforms
+    from core.social import telegram as _tg
+    from postprocess.evidence_tiers import tier_allows
+    from postprocess.tie_classes import classify
+    print("-- social: telegram (channel preview, forwards)")
+    for p in ("telegram", "tg"):
+        check(f"{p} registered", p in supported_platforms(), str(supported_platforms()))
+
+    # Minimal t.me/s/ preview: msg 100 is a forward from @telegram; msg 101 mentions
+    # @bob and links t.me/alice. Owner/date hrefs and the permalink must NOT leak in.
+    page = (
+        '<div class="tgme_widget_message" data-post="durov/100">'
+        '<a class="tgme_widget_message_owner_name" href="https://t.me/durov"><span>Durov</span></a>'
+        '<a class="tgme_widget_message_forwarded_from_name" href="https://t.me/telegram">Telegram</a>'
+        '<div class="tgme_widget_message_text js-message_text">big news</div>'
+        '<a class="tgme_widget_message_date" href="https://t.me/durov/100">'
+        '<time datetime="2024-01-01T00:00:00+00:00"></time></a>'
+        '<span class="tgme_widget_message_views">1.2K</span></div>'
+        '<div class="tgme_widget_message" data-post="durov/101">'
+        '<a class="tgme_widget_message_owner_name" href="https://t.me/durov"><span>Durov</span></a>'
+        '<div class="tgme_widget_message_text js-message_text">hi @bob see '
+        '<a href="https://t.me/alice">alice</a></div>'
+        '<a class="tgme_widget_message_date" href="https://t.me/durov/101">'
+        '<time datetime="2024-01-02T00:00:00+00:00"></time></a></div>')
+
+    posts = _tg.fetch("@durov", fetch=lambda u: page, delay=0)
+    check("telegram messages parsed", len(posts) == 2 and posts[0].author == "durov", str(posts))
+    check("telegram forward captured", posts[0].forwarded_from == "telegram", str(posts[0]))
+    check("telegram mentions, no permalink/owner leak",
+          set(posts[1].mentions) == {"alice", "bob"}, str(posts[1].mentions))
+
+    docs = posts_to_documents(posts)
+    by_pid = {d.meta.get("filename"): d for d in docs}
+    fwd_doc = next(d for d in docs if d.meta.get("forwarded_from") == "telegram")
+    _, fwd_edges = social_structure(fwd_doc)
+    et = {(e.source, e.target, e.rel_type) for e in fwd_edges}
+    check("telegram forwarded_from edge", ("durov", "telegram", "forwarded_from") in et, str(et))
+    check("forwarded_from is social_graph asserted",
+          all(e.attributes.get("edge_source") == "social_graph" for e in fwd_edges)
+          and tier_allows("social_graph", "conservative"), "")
+    check("forwarded_from -> interaction",
+          classify("forwarded_from", "PERSON", "PERSON") == "interaction", "")
+
+    mention_doc = next(d for d in docs if d.meta.get("author") == "durov"
+                       and not d.meta.get("forwarded_from"))
+    _, m_edges = social_structure(mention_doc)
+    met = {(e.source, e.target, e.rel_type) for e in m_edges}
+    check("telegram mention edges",
+          {("durov", "alice", "mentions"), ("durov", "bob", "mentions")} <= met, str(met))
+
+
+def test_input_adapters() -> None:
+    import io as _io
+    import tempfile
+    import zipfile
+    from pathlib import Path
+    from core.preprocessor import strip_boilerplate, extract_text
+    print("-- input adapters: boilerplate strip + epub")
+
+    # Boilerplate strip: a nav fragment removed, real text kept, spacing collapsed.
+    nav = "Or browse groups, people, or influence networks."
+    txt = f"{nav} Jane Roe is on the board of the Acme Fund."
+    out = strip_boilerplate(txt, [r"Or browse groups, people, or influence networks\.\s*"])
+    check("boilerplate fragment stripped", nav not in out and "Jane Roe" in out, out)
+    check("boilerplate no-op without patterns", strip_boilerplate(txt, []) == txt, "")
+
+    # EPUB: a minimal zip of XHTML chapters; nav/toc entries skipped, prose extracted.
+    d = Path(tempfile.mkdtemp(prefix="epub_"))
+    epub = d / "book.epub"
+    with zipfile.ZipFile(epub, "w") as zf:
+        zf.writestr("ch1.xhtml", "<html><body><p>Frodo met Gandalf in the Shire.</p></body></html>")
+        zf.writestr("ch2.xhtml", "<html><body><p>Aragorn fought Sauron at the gate.</p></body></html>")
+        zf.writestr("nav.xhtml", "<html><body><p>Table of contents listing here.</p></body></html>")
+    text = extract_text(epub)
+    check("epub prose extracted", "Frodo met Gandalf" in text and "Aragorn fought Sauron" in text, text[:120])
+    check("epub nav entry skipped", "Table of contents" not in text, text[:120])
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_wiki_connector() -> None:
+    import json as _json
+    from core.wiki import fetch_wiki, parse_spec
+    print("-- wiki: mediawiki connector")
+    check("wiki spec parsed",
+          parse_spec("en.wikipedia.org:Category:Physicists") == ("en.wikipedia.org", "Category:Physicists"), "")
+
+    members = _json.dumps({"query": {"categorymembers": [
+        {"title": "Ada Lovelace"}, {"title": "Charles Babbage"}]}})
+    ada = _json.dumps({"query": {"pages": {"1": {"title": "Ada Lovelace",
+        "extract": "Ada Lovelace worked with Charles Babbage on the Analytical Engine.\n\n== References ==\nCited works here."}}}})
+    bab = _json.dumps({"query": {"pages": {"2": {"title": "Charles Babbage",
+        "extract": "Charles Babbage designed the Difference Engine."}}}})
+
+    def wfetch(url):
+        if "list=categorymembers" in url:
+            return members
+        if "Ada%20Lovelace" in url or "Ada_Lovelace" in url or "Ada Lovelace" in url:
+            return ada
+        return bab
+
+    docs = fetch_wiki("en.wikipedia.org:Category:Computing pioneers", limit=10, fetch=wfetch)
+    check("wiki category resolved to pages", len(docs) == 2, str(len(docs)))
+    by = {d.meta.get("title"): d for d in docs}
+    check("wiki page text extracted", "Analytical Engine" in by["Ada Lovelace"].text, "")
+    check("wiki reference tail stripped",
+          "Cited works here" not in by["Ada Lovelace"].text, by["Ada Lovelace"].text[-60:])
+    check("wiki source_type tagged",
+          all(d.meta.get("source_type") == "wiki" for d in docs), "")
+    check("wiki doc_id stable + url source",
+          docs[0].source_path.startswith("https://en.wikipedia.org/wiki/"), docs[0].source_path)
+
+    # explicit pipe-separated titles (no category)
+    docs2 = fetch_wiki("en.wikipedia.org:Ada Lovelace|Charles Babbage", limit=10, fetch=wfetch)
+    check("wiki explicit titles fetched", len(docs2) == 2, str(len(docs2)))
+
+
 def main() -> int:
     test_json_repair()
     test_checkpoint_scoring()
@@ -2487,6 +2698,7 @@ def main() -> int:
     test_html_extraction()
     test_crawl_url_norm()
     test_crawler()
+    test_crawl_checkpoint()
     test_coref_service_warmup()
     test_documents_snapshot()
     test_script_parser()
@@ -2495,6 +2707,9 @@ def main() -> int:
     test_playwright_routing()
     test_social_connectors()
     test_social_fediverse()
+    test_social_telegram()
+    test_input_adapters()
+    test_wiki_connector()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURES: {FAILURES}")

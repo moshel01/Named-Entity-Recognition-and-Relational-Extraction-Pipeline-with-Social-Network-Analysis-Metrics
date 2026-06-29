@@ -40,6 +40,7 @@ class SocialPost:
     created_utc: float = 0.0
     parent_id: str = ""            # platform id of the post this replies to
     parent_author: str = ""        # resolved author of the parent (the reply edge target)
+    forwarded_from: str = ""       # source account a forward/repost originated in
     community: str = ""            # subreddit / instance / hashtag / list
     mentions: list[str] = field(default_factory=list)
     url: str = ""
@@ -63,6 +64,7 @@ class SocialPost:
                 "platform": self.platform,
                 "author": self.author,
                 "parent_author": self.parent_author,
+                "forwarded_from": self.forwarded_from,
                 "community": self.community,
                 "mentions": list(self.mentions),
                 "created_utc": self.created_utc,
@@ -106,9 +108,10 @@ def social_structure(doc: Document) -> tuple[list[EntityMention], list[Relations
     """Read a social Document's meta -> (USER/COMMUNITY mentions, explicit edges).
 
     Edges (all asserted by the platform, edge_source=social_graph):
-      replied_to  author -> parent_author   (directed interaction)
-      mentions    author -> @handle         (directed interaction)
-      posted_in   author -> community        (affiliation; feeds projection)
+      replied_to    author -> parent_author   (directed interaction)
+      forwarded_from author -> source account  (directed propagation; Telegram forwards)
+      mentions      author -> @handle          (directed interaction)
+      posted_in     author -> community        (affiliation; feeds projection)
     The structure hook in run_extract appends these to the doc's extraction."""
     meta = doc.meta or {}
     if meta.get("source_type") != "social":
@@ -133,6 +136,13 @@ def social_structure(doc: Document) -> tuple[list[EntityMention], list[Relations
             mentions.append(_user_mention(parent, did)); seen_users.add(parent.lower())
         edges.append(_edge(author, parent, "replied_to", did, True,
                            f"replied to {parent}"))
+
+    fwd = (meta.get("forwarded_from") or "").strip().lstrip("@")
+    if fwd and fwd.lower() != author.lower():
+        if fwd.lower() not in seen_users:
+            mentions.append(_user_mention(fwd, did)); seen_users.add(fwd.lower())
+        edges.append(_edge(author, fwd, "forwarded_from", did, True,
+                           f"forwarded from {fwd}"))
 
     for h in (meta.get("mentions") or []):
         h = (h or "").strip().lstrip("@")

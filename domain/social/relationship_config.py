@@ -14,6 +14,7 @@ _STRUCTURAL: dict[str, list[str]] = {
     "mentions": ["mentioned", "tagged", "at-mentioned"],
     "quoted": ["quoted", "quote tweeted", "quote-posted"],
     "retweeted": ["retweeted", "reposted", "boosted", "shared"],
+    "forwarded_from": ["forwarded from", "forwarded", "reposted from"],
     "follows": ["follows", "is following", "subscribed to"],
     "posted_in": ["posted in", "submitted to", "commented in"],
 }
@@ -26,6 +27,7 @@ RELATION_GUIDE: dict[str, str] = {
     "mentions": "Author @-mentioned/tagged another user in the post text.",
     "quoted": "Author quoted/quote-posted another user's post.",
     "retweeted": "Author reposted/boosted another user's post verbatim.",
+    "forwarded_from": "Author's post is a forward/repost that originated in another account (Telegram-style propagation; a directed information-flow tie).",
     "follows": "Author follows the target account (a subscription tie, if available).",
     "posted_in": "Author posted/commented in this community (subreddit/instance/thread). Feeds the co-affiliation projection so co-posters link.",
 }

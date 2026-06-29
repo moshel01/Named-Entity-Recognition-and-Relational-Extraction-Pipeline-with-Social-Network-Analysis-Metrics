@@ -17,6 +17,7 @@ _REL_CLASS: dict[str, str] = {
     # social-media structure (core/social): a reply/mention IS the interaction; posting
     # in a community is an affiliation (feeds the two-mode projection so co-posters link).
     "replied_to": "interaction", "mentions": "interaction", "quoted": "interaction",
+    "retweeted": "interaction", "forwarded_from": "interaction",
     "follows": "interaction", "posted_in": "affiliation",
     # interaction (person<->person)
     "met_with": "interaction", "visited": "interaction", "recruited": "interaction",

@@ -12,7 +12,7 @@ from .schema import Document, stable_id
 logger = logging.getLogger(__name__)
 
 # Extensions handled by dedicated extractors; everything else -> plaintext read.
-_BINARY_LIKE = {".pdf", ".docx", ".rtf", ".html", ".htm"}
+_BINARY_LIKE = {".pdf", ".docx", ".rtf", ".html", ".htm", ".epub"}
 _SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".zip", ".gz", ".exe",
                   ".bin", ".mp3", ".mp4", ".mov", ".xlsx", ".pptx"}
 
@@ -116,6 +116,56 @@ def _extract_html(path: Path, encoding: str) -> str:
     return _clean_html(raw)
 
 
+def _extract_epub(path: Path) -> str:
+    """EPUB -> readable prose. EPUB is a zip of XHTML chapters; read them in spine
+    order and strip markup with the same HTML cleaner the crawler uses. Prefer
+    ebooklib (correct spine + manifest); fall back to a stdlib zip walk in filename
+    order (chapter files are normally zero-padded sequential). Fail-soft -> ''."""
+    try:
+        from ebooklib import ITEM_DOCUMENT, epub
+        book = epub.read_epub(str(path))
+        parts = [_clean_html(it.get_content().decode("utf-8", "replace"))
+                 for it in book.get_items_of_type(ITEM_DOCUMENT)]
+        joined = "\n\n".join(p for p in parts if p.strip())
+        if joined.strip():
+            return joined
+    except Exception:  # noqa: BLE001 - not installed / malformed -> stdlib fallback
+        pass
+    import zipfile
+    _skip = ("nav", "toc", "cover", "copyright", "title")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = sorted(n for n in zf.namelist()
+                           if n.lower().endswith((".xhtml", ".html", ".htm")))
+            parts = []
+            for n in names:
+                if any(s in n.lower() for s in _skip):
+                    continue
+                t = _clean_html(zf.read(n).decode("utf-8", "replace"))
+                if t.strip():
+                    parts.append(t)
+            return "\n\n".join(parts)
+    except Exception:  # noqa: BLE001 - not a valid zip/epub
+        return ""
+
+
+def strip_boilerplate(text: str, patterns) -> str:
+    """Drop configured nav/boilerplate fragments (regex) from extracted page text.
+    A per-source knob for scraped sites where trafilatura leaves a breadcrumb in the
+    short pages (e.g. a stub profile prefixed with the site's "browse" nav). Each
+    pattern is removed wherever it matches; horizontal whitespace is re-collapsed,
+    newlines kept."""
+    if not patterns or not text:
+        return text
+    import re as _re
+    for pat in patterns:
+        try:
+            text = _re.sub(pat, " ", text)
+        except _re.error:  # a bad pattern shouldn't break ingestion
+            continue
+    return _re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 # Optional Docling structure-aware ingestion (layout + tables + OCR -> markdown).
 # Heavy (torch models) and opt-in; everything fail-soft so a missing package or a
 # failed conversion falls back to the lightweight extractors above.
@@ -191,6 +241,8 @@ def extract_text(path: Path, encoding: str = "auto", use_docling: bool = False) 
         text = _extract_rtf(path, encoding)
     elif suffix in {".html", ".htm"}:
         text = _extract_html(path, encoding)
+    elif suffix == ".epub":
+        text = _extract_epub(path)
     else:
         text = _decode(_read_bytes(path), encoding)
     return normalize_text(text)

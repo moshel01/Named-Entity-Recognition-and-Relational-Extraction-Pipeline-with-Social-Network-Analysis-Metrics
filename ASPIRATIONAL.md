@@ -135,6 +135,35 @@ Format per item: **Now** (what we do) / **Unlimited** (what we'd do) / **Why def
   ships a static Gephi/GEXF deliverable. Revisit only if a queryable, question-
   answering KG becomes a requirement (then pair with the Neo4j backend item above).
 
+## Ingestion & sources
+
+### Structured wiki ingestion (beyond prose)  [partially shipped]
+- **Now.** `core/wiki.py` pulls clean article PROSE via the MediaWiki API
+  (`prop=extracts&explaintext`) — the relation extractor reads it like any document.
+  Infoboxes, the wikilink graph, and categories are dropped (prose only).
+- **Unlimited.** Parse the infobox into structured edges directly (spouse / party /
+  employer / founded → typed relations with no LLM call), treat categories as
+  affiliation groups (the two-mode projection already exists), and read the curated
+  wikilink graph as a weak co-occurrence layer. For Wikipedia specifically, pull the
+  matching Wikidata statements (qualified facts) and fold them in as `metadata`-tier
+  edges. A near-complete actor network from the structured wiki alone, the prose only
+  filling gaps.
+- **Why deferred.** Infobox/template parsing is per-wiki brittle (every template differs);
+  raw wikilinks are too dense to be ties without heavy filtering. Marginal SNA gain over
+  prose-extraction for most corpora; revisit for a wiki-centric project (a Fandom
+  character network, a Wikipedia-derived domain graph).
+
+### Chat / correspondence exports (mbox, Discord/Slack, subtitles)
+- **Now.** Social connectors cover live platforms (reddit/hn/lemmy/mastodon/bluesky/
+  telegram/truthsocial/twitter); plain `.txt` ingests anything dumped to text.
+- **Unlimited.** First-class readers for email mbox (a correspondence network from the
+  From/To/In-Reply-To headers — the structure is explicit, like the social graph),
+  Discord/Slack export JSON, and subtitle/`.srt` tracks (a per-scene speaker network to
+  complement the screenplay co-presence parser).
+- **Why deferred.** Each is a small adapter, not a research bet — built on demand when a
+  corpus of that shape appears. The pattern is set (return Documents + any explicit
+  structure as asserted edges); only the parser differs.
+
 ## Infrastructure
 
 ### Bigger models, longer context, parallel calls

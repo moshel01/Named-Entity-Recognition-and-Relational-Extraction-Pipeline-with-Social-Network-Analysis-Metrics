@@ -129,7 +129,7 @@ class Pipeline:
         """Run foundation + intelligence over all documents with checkpointing."""
         from tqdm import tqdm
 
-        documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds)
+        documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds, resume=resume)
         if not documents:
             console.print("[yellow]No documents found.[/yellow]")
             return []
@@ -418,7 +418,7 @@ class Pipeline:
     # Document gathering (shared by extract + analyze)
     def _gather(self, limit: int = 0, extra_urls: tuple[str, ...] = (),
                 urls_file: str = "", text: str = "", crawl_seeds: tuple[str, ...] = (),
-                for_extract: bool = True):
+                for_extract: bool = True, resume: bool = False):
         """Collect the current run's documents (files + URLs + crawl + text),
         honoring --limit. Dedups by doc_id so the same URL from two sources is one
         node."""
@@ -445,8 +445,9 @@ class Pipeline:
             timeout=io.request_timeout,
             use_docling=io.use_docling,
         )
-        documents.extend(self._gather_crawl(crawl_seeds, for_extract))
+        documents.extend(self._gather_crawl(crawl_seeds, for_extract, resume=resume))
         documents.extend(self._gather_social(for_extract))
+        documents.extend(self._gather_wiki(for_extract))
 
         # Dedup by doc_id (a crawled url may also be in io.urls / a file mirror).
         seen: set[str] = set()
@@ -503,10 +504,45 @@ class Pipeline:
             pass
         return docs
 
-    def _gather_crawl(self, crawl_seeds: tuple[str, ...], for_extract: bool) -> list[Document]:
+    def _gather_wiki(self, for_extract: bool) -> list[Document]:
+        """Fetch MediaWiki sources (io.wiki: 'host:Target' specs) as clean article
+        Documents via the API. On extract, fetch + cache to wiki_docs.jsonl; on
+        analyze, reuse the cache so re-analysis never re-hits the API."""
+        specs = list(self.config.io.wiki)
+        if not specs:
+            return []
+        from core.preprocessor import read_documents_snapshot, write_documents_snapshot
+        cache = self.run_dir / "wiki_docs.jsonl"
+        if not for_extract:
+            if cache.exists():
+                docs = read_documents_snapshot(cache)
+                console.print(f"[cyan]Wiki: reusing {len(docs)} cached pages "
+                              "(no re-fetch).[/cyan]")
+                return docs
+            return []
+        from core.wiki import fetch_wiki
+        limit = self.config.io.wiki_limit
+        docs: list[Document] = []
+        for spec in specs:
+            try:
+                wd = fetch_wiki(spec, limit=limit)
+                docs.extend(wd)
+                console.print(f"[green]Wiki {spec}: {len(wd)} page(s).[/green]")
+            except Exception as exc:  # noqa: BLE001 - one source failing isn't fatal
+                console.print(f"[red]Wiki {spec} failed: {exc}[/red]")
+        try:
+            write_documents_snapshot(docs, cache)
+        except Exception:  # noqa: BLE001 - cache is a nicety
+            pass
+        return docs
+
+    def _gather_crawl(self, crawl_seeds: tuple[str, ...], for_extract: bool,
+                      resume: bool = False) -> list[Document]:
         """Expand seed URLs into subpage Documents via the crawler. On extract,
         crawl and cache the discovered URL list; on analyze, rebuild lightweight
-        id-only stubs from that cache so re-analysis never re-crawls."""
+        id-only stubs from that cache so re-analysis never re-crawls. Shows a live
+        progress bar and checkpoints the frontier so a long crawl can be stopped
+        (Ctrl-C) and continued with --stage fetch --resume."""
         cc = self.config.io.crawl
         seeds = list(cc.seeds) + list(crawl_seeds)
         if not seeds or not (cc.enabled or crawl_seeds):
@@ -534,13 +570,47 @@ class Pipeline:
         console.print(f"[cyan]Crawling {len(seeds)} seed(s) "
                       f"(max_pages={cc.max_pages}, depth={cc.max_depth}, "
                       f"robots={'on' if cc.respect_robots else 'OFF'}, "
-                      f"js={'on' if fetcher else 'off'})...[/cyan]")
+                      f"js={'on' if fetcher else 'off'}, "
+                      f"resume={'on' if resume else 'off'})...[/cyan]")
+        crawler = None
         try:
-            docs = Crawler(self._crawl_opts(), fetch=fetcher).crawl(seeds)
+            from rich.progress import (BarColumn, MofNCompleteColumn, Progress,
+                                       TaskProgressColumn, TextColumn, TimeElapsedColumn)
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(),
+                          MofNCompleteColumn(), TaskProgressColumn(),
+                          TimeElapsedColumn(), console=console, transient=False) as prog:
+                task = prog.add_task("starting", total=max(cc.max_pages, 1))
+
+                def on_progress(ev: dict) -> None:
+                    e = ev.get("event")
+                    if e == "start" and ev.get("resumed"):
+                        prog.update(task, completed=ev["docs"],
+                                    description=f"resumed: {ev['docs']} done, {ev['frontier']} queued")
+                    elif e == "page":
+                        u = ev["url"].split("://", 1)[-1]
+                        u = u[:54] + "..." if len(u) > 57 else u
+                        prog.update(task, completed=ev["docs"],
+                                    description=f"queue {ev['frontier']:>5} · fetched {ev['fetched']:>5} · {u}")
+                    elif e in ("done", "interrupted"):
+                        prog.update(task, completed=ev["docs"])
+
+                crawler = Crawler(self._crawl_opts(), fetch=fetcher,
+                                  on_progress=on_progress,
+                                  checkpoint_dir=str(self.run_dir / "crawl_state"),
+                                  resume=resume)
+                docs = crawler.crawl(seeds)
         finally:
             if fetcher is not None:
                 fetcher.close()
-        console.print(f"[green]Crawl: {len(docs)} page(s) fetched.[/green]")
+
+        if crawler is not None and crawler.interrupted:
+            console.print(f"[yellow]Crawl interrupted: {len(docs)} page(s) so far. "
+                          f"Continue with the same command + --resume.[/yellow]")
+        elif crawler is not None and crawler.complete:
+            console.print(f"[green]Crawl complete: {len(docs)} page(s) (whole scope drained).[/green]")
+        else:
+            console.print(f"[green]Crawl: {len(docs)} page(s) (hit max_pages={cc.max_pages}). "
+                          f"Raise the cap and --resume to fetch more.[/green]")
         try:
             cache.write_text("\n".join(d.source_path for d in docs), encoding="utf-8")
         except Exception:  # noqa: BLE001 - cache is a nicety, not load-bearing
@@ -559,6 +629,8 @@ class Pipeline:
             user_agent=cc.user_agent or _USER_AGENT,
             timeout=cc.timeout or self.config.io.request_timeout,
             max_bytes=cc.max_bytes,
+            checkpoint_every=getattr(cc, "checkpoint_every", 25),
+            strip_patterns=tuple(getattr(cc, "boilerplate", ()) or ()),
         )
 
     # Stage: analyze
@@ -1008,7 +1080,7 @@ class Pipeline:
         # in any --mode elsewhere (--ingest-from). Skips the whole extract machinery.
         if stage == "fetch":
             documents = self._gather(limit, extra_urls, urls_file, text, crawl_seeds,
-                                     for_extract=True)
+                                     for_extract=True, resume=resume)
             snap = self.run_dir / "documents.jsonl"
             console.print(f"[green]Fetch: froze {len(documents)} documents to {snap}.\n"
                           f"Re-run extraction anywhere with: --ingest-from {snap} "
@@ -1167,6 +1239,13 @@ class Pipeline:
 @click.option("--social-depth", "social_depth", type=int, default=None,
               help="0 = top-level posts only; 1 = also pull comment/reply trees "
                    "(override io.social_depth).")
+@click.option("--wiki", "wiki", multiple=True,
+              help="MediaWiki source 'host:Target' (repeatable): "
+                   "en.wikipedia.org:Ada Lovelace, en.wikipedia.org:Category:Physicists, "
+                   "harrypotter.fandom.com:Category:Death Eaters. Pulls clean article "
+                   "prose via the API (not the page HTML).")
+@click.option("--wiki-limit", "wiki_limit", type=int, default=None,
+              help="Pages per --wiki source / category cap (override io.wiki_limit).")
 @click.option("--text", "direct_text", default="",
               help="Analyze a raw text string directly (e.g. pasted input).")
 @click.option("--min-entity-confidence", "min_entity_confidence", type=float, default=None,
@@ -1187,6 +1266,7 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         crawl_seeds: tuple[str, ...], crawl_max_pages: Optional[int],
         crawl_max_depth: Optional[int], render_js: bool,
         social: tuple[str, ...], social_limit: Optional[int], social_depth: Optional[int],
+        wiki: tuple[str, ...], wiki_limit: Optional[int],
         direct_text: str,
         min_entity_confidence: Optional[float], ollama_model: str, metadata_file: str,
         ingest_from: str, run_name: str, verbose: bool) -> None:
@@ -1260,6 +1340,10 @@ def cli(config_path: str, stage: str, resume: bool, mode: Optional[str],
         config.io.social_limit = social_limit
     if social_depth is not None:
         config.io.social_depth = social_depth
+    if wiki:
+        config.io.wiki = list(config.io.wiki) + list(wiki)
+    if wiki_limit is not None:
+        config.io.wiki_limit = wiki_limit
 
     console.rule(f"[bold]NER + SNA Pipeline - run '{config.run_name}' (mode={config.mode})")
     pipeline = Pipeline(config)

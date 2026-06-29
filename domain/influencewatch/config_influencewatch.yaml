@@ -15,14 +15,29 @@ io:
   input_glob: "**/*"
   output_dir: "./output"
   encoding: "auto"
-  # Whole-site crawl of a profile DB (off by default; fill seeds + flip enabled).
+  # Whole-site crawl of the influencewatch.org profile DB. Server-rendered WordPress
+  # (no JS render needed). robots.txt allows everything but /wp-json/; sitemap_index.xml
+  # seeds the profile URLs. allow/deny keep the page budget on profiles, not chrome.
   crawl:
-    enabled: false
-    seeds: []
-    max_pages: 200
+    enabled: true
+    seeds: ["https://www.influencewatch.org/"]
+    max_pages: 16000             # covers the full site (15,477 profiles, counted from
+                                 # the sitemaps: 2,427 person + 13,050 group); headroom
+                                 # for the seed. Ctrl-C anytime, --resume continues.
+    max_depth: 4
     stay_on_host: true
     respect_robots: true
-    delay: 1.0
+    use_sitemap: true
+    delay: 1.5                   # polite; site has a per-host crawl budget
+    checkpoint_every: 25         # flush frontier+pages every 25 kept; --resume to finish
+    boilerplate:                 # nav fragment trafilatura leaves on stub profiles
+      - "Or browse groups, people, or influence networks\\.\\s*"
+    allow:
+      - "influencewatch\\.org/(non-profit|for-profit|person|organization|political-party|government-agency|labor-union|foundation|political-action-committee|trade-association|movement)/[^/]+/?$"
+    deny:
+      - "/wp-json/"
+      - "/\\?"                  # query-string chrome (search, pagination, rest_route)
+      - "/(tag|category|author|feed|page)/"
 
 chunking:
   max_chars: 6000
@@ -51,11 +66,11 @@ coreference:
 
 intelligence:
   ollama:
-    host: "http://localhost:11434"
-    model: "qwen3.5:9b"
+    host: "http://100.69.145.24:11434"   # friend's 5090 over tailscale; localhost for the 3070
+    model: "gemma4:31b"                   # qwen3.6:27b also loaded on that box
     temperature: 0.0
     request_timeout: 600
-    num_ctx: 8192
+    num_ctx: 16384
   python_only:
     embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
     cooccurrence_window: "sentence"
@@ -66,6 +81,10 @@ intelligence:
   # Surface relation argument types in the prompt to cut type-violating edges.
   # A/B against quality_pillars.consistency.type_violations_by_relation.
   type_hints: true
+  # Grammar-constrain the JSON so the local model can't leak prose (ollama format=schema).
+  structured_output: true
+  # Re-prompt the whole doc for cross-chunk ties the chunked pass missed.
+  recall_pass: true
 
 dedup:
   fuzzy_thresholds:
@@ -84,11 +103,17 @@ quality:
   min_entity_mentions: 1
   min_edge_weight: 1
   llm_review: "auto"
+  # Re-check each LLM edge against its evidence. Tag only - a local verifier over-rejects,
+  # so trust_verification stays off (flagged edges are NOT pruned from the metric graph).
+  verify_relations: true
+  trust_verification: false
 
 inference:
   enable_cooccurrence_edges: true
   cooccurrence_min_shared_docs: 2
-  cooccurrence_backbone_alpha: 0.0
+  # GLiNER over-extracts on dense profile prose; the disparity filter (Serrano 2009)
+  # thins the co-occurrence layer so it stops drowning the asserted ties.
+  cooccurrence_backbone_alpha: 0.1
   enable_canonical_inference: true
   mandatory_membership: "off"      # not a membership corpus
   # The headline for this domain: actors on the same board/PAC get a co_affiliated

@@ -14,10 +14,18 @@ State of play is in CHANGELOG.md (newest first); operating rules in AGENTS.md.
 runs:
 
 1. **Ingest / preprocess** (`core/preprocessor.py`) — RTF + mojibake repair,
-   encoding detection. Books optionally via Docling (`io.use_docling`); web via
-   URL fetch + trafilatura main-content extraction, or a bounded whole-site crawl
-   (`core/crawler.py`, `io.crawl` / `--crawl`). Author/narrator detection in
-   `core/foundation.py`.
+   encoding detection. Files: `.txt .md .rtf .pdf .docx .html .epub` (EPUB = spine of
+   XHTML through the HTML cleaner); PDF/DOCX/PPTX/images optionally via Docling
+   (`io.use_docling`, layout+OCR). Web: URL fetch + trafilatura main-content
+   extraction, or a bounded whole-site crawl (`core/crawler.py`, `io.crawl` / `--crawl`)
+   — sitemap+scoped-BFS, robots, rate-limit, caps, fetch-once, enqueue-dedup, a live
+   progress bar and a frontier/page-log checkpoint so a big crawl Ctrl-C's and resumes
+   (`--resume`); optional `io.crawl.boilerplate` strips site nav fragments, `render_js`
+   renders SPA pages. Structured sources return ready Documents: social connectors
+   (`core/social/`, `io.social` / `--social`) and the MediaWiki API (`core/wiki.py`,
+   `io.wiki` / `--wiki` — clean article prose, not page HTML). Any gather can freeze to a
+   portable `documents.jsonl` (`--stage fetch`) and re-run elsewhere (`--ingest-from`).
+   Author/narrator detection in `core/foundation.py`.
 2. **Chunk** (`core/chunker.py`) — sentence-aligned, with a hard char split for
    boundary-less text. `max_chars` ~5-6k, `overlap_chars` 400-600 (~7-12%); the
    overlap is what lets a typed relation survive a chunk boundary.
@@ -70,9 +78,12 @@ runs:
   signed structural balance, disparity-filter backbone, Newman projection weights).
 - **Ingestion:** static fetch (`requests`) + trafilatura main-content extraction
   (drops nav/ads/sidebars/boilerplate), BeautifulSoup fallback; Docling
-  (books/PDF layout+OCR, optional). Whole-site crawl in `core/crawler.py`
-  (sitemap+scoped-BFS, robots.txt, per-host rate limit, page/depth/size caps,
-  fetch-once). Not ScrapeGraphAI/Crawl4AI (see grounding).
+  (books/PDF layout+OCR, optional); EPUB (ebooklib/stdlib zip). Whole-site crawl in
+  `core/crawler.py` (sitemap+scoped-BFS, robots.txt, per-host rate limit,
+  page/depth/size caps, fetch-once, enqueue-dedup, resumable checkpoint + progress).
+  Structured sources: social connectors (`core/social/`, public/official APIs) and the
+  MediaWiki API (`core/wiki.py`, prose extracts). Not ScrapeGraphAI/Crawl4AI (see
+  grounding) — the LLM budget stays on relation extraction.
 
 ## The fastcoref microservice
 fastcoref needs `transformers <5`; the main env runs `transformers 5.x` for
@@ -129,8 +140,12 @@ in-process fastcoref, then the heuristic resolver. Setup:
 - **Web IE (ScrapeGraphAI-100k 2026; WebScraper-MLLM).** LLM/agent scrapers for
   dynamic, JS-rendered, interactive sites. Not adopted: heavy deps, and they'd
   spend the LLM budget on scraping. The static path uses trafilatura main-content
-  extraction instead; the LLM tier is reserved for relation extraction. Revisit
-  if JS-rendered targets become a requirement.
+  extraction instead; the LLM tier is reserved for relation extraction. Where a
+  source exposes a structured API, use it over the HTML: `core/wiki.py` reads the
+  MediaWiki API (clean prose extracts, no infobox/template cruft) and `core/social/`
+  reads the platforms' public/official APIs (posts + the explicit reply/mention graph).
+  JS rendering is available behind `io.crawl.render_js` (headless Chromium) for SPA
+  pages that return an empty shell to a plain GET.
 - **KG construction (Choi & Jung 2025; Zavarella 2026).** Extraction ->
   canonicalization -> evaluation, with hallucination handling — the spine this
   pipeline already follows; the evaluation harness reports P/R/F1 by tier.

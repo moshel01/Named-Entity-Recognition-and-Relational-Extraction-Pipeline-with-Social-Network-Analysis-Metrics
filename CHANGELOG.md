@@ -4,6 +4,65 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## input reach: epub, mediawiki API, and a boilerplate strip
+
+Closing the gaps for "books, wikis, any input" - all opt-in.
+
+- EPUB: `.epub` now extracts (spine of XHTML chapters -> the same HTML cleaner the
+  crawler uses; ebooklib if present, else a stdlib zip walk skipping nav/toc/cover).
+  Books no longer need a PDF/txt export first.
+- MediaWiki connector (`core/wiki.py`, `io.wiki` / `--wiki`): pulls CLEAN article prose
+  via the API (action=query&prop=extracts&explaintext), not the rendered page HTML, so
+  infobox/template/nav/citation cruft never enters. spec = "host:Target": explicit
+  "Ada Lovelace|Charles Babbage", or "Category:Physicists" (resolves members then
+  extracts). Any MediaWiki host (Wikipedia, Fandom, self-hosted). Reference tail cut;
+  source_type=wiki; cached to wiki_docs.jsonl like social. Crawling wiki HTML still
+  works, but the API is the right path.
+- Crawl boilerplate strip (`io.crawl.boilerplate`, regex list): removes site nav/breadcrumb
+  fragments trafilatura leaves in short pages. InfluenceWatch sets the one phrase that
+  leaked onto ~4% of stub profiles ("Or browse groups, people, or influence networks.").
+- Crawl frontier now dedups at ENQUEUE, not just at pop: on a densely interlinked site the
+  same url was being appended thousands of times (the queue counter ran past 22k on ~15k
+  uniques). Frontier holds uniques now; resume collapses a dup-laden checkpoint on load.
+- Generic-domain coverage assessment: the generic relation ontology + narrative schemes
+  (life_course/fiction) + script co-presence already cover the SEMANTICS of books / scripts
+  / articles / wikis. What's per-source is INGESTION (EPUB, MediaWiki, social connectors)
+  and a thin config preset that flips the levers (parse_scripts, narrative_scheme, pronoun
+  coref) - not a new full domain per medium.
+
+## resumable crawl: live progress + frontier checkpoint
+
+For uncapped whole-site crawls (e.g. influencewatch.org, ~11k profiles).
+
+- Live progress bar (rich) during `--stage fetch`: pages kept / max_pages, queue depth,
+  fetched count, elapsed, and the URL in flight. UI-agnostic: the crawler takes an
+  `on_progress(event)` callback (start/page/checkpoint/done/interrupted), main.py owns the bar.
+- Crawl checkpoint under `<run>/crawl_state/`: append-only `pages.jsonl` (the page log) +
+  atomic `state.json` (frontier + visited + fetched + fingerprint), flushed every
+  `crawl.checkpoint_every` kept pages (default 25). Ctrl-C saves state and exits clean;
+  re-run the same command with `--resume` to continue from the frontier - no re-fetch.
+- `max_pages` is deliberately OUT of the resume fingerprint: start at 60 to validate, then
+  raise the cap and `--resume` to keep going. Changing seeds/scope changes the fingerprint,
+  so a stale checkpoint is ignored and the crawl starts fresh instead of resuming wrong.
+- A completed crawl (frontier drained) marks `complete`; re-running just reloads the page
+  log. An interrupted/capped crawl still freezes a usable partial `documents.jsonl`.
+
+## telegram channels
+
+- telegram: public broadcast channels via the open `t.me/s/<channel>` web preview (no
+  login, channels only - public groups have no /s/ view). Pages back with `?before=`.
+  The channel IS the author (broadcast), so the signal is FORWARDS: a repost that
+  originated in another channel becomes a directed `forwarded_from` edge (A->B), mapping
+  how content propagates across the channel ecosystem. @handle / t.me/<handle> links in
+  the text become mentions; no community node (a channel only posts in itself). Aliases
+  `telegram` / `tg`.
+- New asserted edge `forwarded_from` (social_graph tier, interaction tie-class) threaded
+  through base.SocialPost + social_structure + the social-domain ontology. `retweeted`
+  also added to the tie-class map (was in the ontology, missing from classify()).
+- HONEST LIMIT: web preview only, no search; groups/full-history/non-public channels need
+  the official MTProto client (Telethon, api_id/api_hash) or Bot API (bot as channel
+  admin) - sanctioned official paths, an extension. No bypass; fails soft.
+
 ## social reach: bluesky, lemmy, truth social - and the line on access-control evasion
 
 More legitimately-open networks, and an explicit non-goal.

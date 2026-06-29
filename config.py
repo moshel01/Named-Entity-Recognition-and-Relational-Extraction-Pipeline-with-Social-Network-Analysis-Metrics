@@ -33,6 +33,12 @@ class CrawlConfig(BaseModel):
     # no-op cost for server-rendered sites. Optional dep: `pip install playwright`
     # then `playwright install chromium`. robots.txt/sitemaps/PDFs bypass the browser.
     render_js: bool = False                   # CLI: --render-js
+    # Flush crawl state (frontier + page log) every N kept pages so a long crawl can be
+    # stopped (Ctrl-C) and resumed with --stage fetch --resume. 0 disables checkpointing.
+    checkpoint_every: int = 25
+    # Regex fragments stripped from each crawled page's text (site nav/breadcrumb that
+    # trafilatura leaves in short pages). Per-site; default none.
+    boilerplate: list[str] = Field(default_factory=list)
 
 
 class IOConfig(BaseModel):
@@ -56,6 +62,11 @@ class IOConfig(BaseModel):
     social: list[str] = Field(default_factory=list)
     social_limit: int = 100                   # posts/items per source
     social_depth: int = 1                      # 1 = also pull comment/reply trees
+    # MediaWiki sources: each entry is "host:Target" (en.wikipedia.org:Ada Lovelace,
+    # en.wikipedia.org:Category:Physicists, harrypotter.fandom.com:Category:Death Eaters).
+    # core/wiki pulls clean article prose via the API (not the page HTML). CLI: --wiki.
+    wiki: list[str] = Field(default_factory=list)
+    wiki_limit: int = 50                       # pages per spec (category cap)
     request_timeout: int = 30
     metadata_file: str = ""                   # xlsx of per-doc metadata, keyed by letter_id
     use_docling: bool = False                 # structure-aware ingestion (PDF tables/OCR); fail-soft

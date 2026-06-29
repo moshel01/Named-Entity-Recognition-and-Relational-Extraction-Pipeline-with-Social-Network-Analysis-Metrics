@@ -14,12 +14,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib import robotparser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -61,6 +64,8 @@ class CrawlOptions:
     timeout: int = 30
     max_bytes: int = 5_000_000    # per-page download ceiling
     max_fetches: int = 0          # hard request cap; 0 -> derived from max_pages
+    checkpoint_every: int = 25    # flush crawl state every N kept pages; 0 -> off
+    strip_patterns: tuple[str, ...] = ()  # regex boilerplate removed from page text
 
 
 @dataclass
@@ -133,7 +138,8 @@ def normalize_url(url: str) -> str:
 
 
 class Crawler:
-    def __init__(self, opts: CrawlOptions, fetch=None) -> None:
+    def __init__(self, opts: CrawlOptions, fetch=None, on_progress=None,
+                 checkpoint_dir=None, resume: bool = False) -> None:
         self.opts = opts
         self._fetch = fetch or self._http_fetch
         self._allow = [re.compile(p) for p in opts.allow]
@@ -145,7 +151,17 @@ class Crawler:
         self._dirs: set[str] = set()              # seed dir prefixes (scope)
         self._seeds: set[str] = set()             # normalized seeds (always in scope)
         self.visited: set[str] = set()
+        self._queued: set[str] = set()            # ever enqueued -> frontier holds uniques
         self.fetched = 0
+        # Progress callback (UI-agnostic: caller owns the bar) + crawl checkpoint.
+        self._on_progress = on_progress
+        self._ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        self._resume = bool(resume)
+        self._fingerprint = ""
+        self._docs_written = 0                    # pages already on disk (append cursor)
+        self._ckpt_since = 0                       # kept pages since the last flush
+        self.complete = False                      # frontier drained -> whole scope done
+        self.interrupted = False                   # Ctrl-C -> state saved, resumable
 
     # -- public --------------------------------------------------------------
     def crawl(self, seeds: list[str]) -> list[Document]:
@@ -167,26 +183,166 @@ class Crawler:
         for s in seeds:
             self._ensure_robots(s)
 
-        frontier: deque[tuple[str, int]] = deque((s, 0) for s in seeds)
-        if self.opts.use_sitemap:
-            for u in self._sitemap_seed(seeds):
-                frontier.append((u, 0))
-
+        # Resume from a saved checkpoint (same seeds/scope) or start fresh. max_pages
+        # is NOT in the fingerprint on purpose: cap at 60, then uncap and --resume to
+        # keep going from where the frontier left off instead of re-crawling.
+        self._fingerprint = self._make_fingerprint(seeds)
         docs: list[Document] = []
-        while frontier and len(docs) < self.opts.max_pages and self.fetched < budget:
-            url, depth = frontier.popleft()
-            url = normalize_url(url)
-            if url in self.visited:
-                continue
-            self.visited.add(url)
-            try:
-                self._process(url, depth, frontier, docs)
-            except Exception as exc:  # noqa: BLE001 - one page must not kill the crawl
-                logger.debug("Crawler: skipping %s: %s", url, exc)
+        frontier: deque[tuple[str, int]] = deque()
+        resumed = False
+        if self._ckpt_dir and self._resume:
+            loaded = self._load_checkpoint()
+            if loaded is not None:
+                docs, raw_frontier = loaded
+                # Collapse the loaded frontier to uniques (a checkpoint written before
+                # enqueue-dedup can hold the same url thousands of times) and seed the
+                # dedup set, so resume starts with a clean queue and stays clean.
+                seen_f: set[str] = set()
+                frontier = deque()
+                for u, dp in raw_frontier:
+                    nu = normalize_url(u)
+                    if nu in self.visited or nu in seen_f:
+                        continue
+                    seen_f.add(nu)
+                    frontier.append((nu, dp))
+                self._queued = set(self.visited) | seen_f
+                resumed = True
+        if not resumed:
+            if self._ckpt_dir:
+                self._reset_checkpoint()      # don't append onto a stale page log
+            frontier = deque()
+            for s in seeds:
+                if s not in self._queued:
+                    frontier.append((s, 0)); self._queued.add(s)
+            if self.opts.use_sitemap:
+                for u in self._sitemap_seed(seeds):
+                    nu = normalize_url(u)
+                    if nu not in self._queued:
+                        frontier.append((nu, 0)); self._queued.add(nu)
 
+        self._emit({"event": "start", "docs": len(docs), "fetched": self.fetched,
+                    "frontier": len(frontier), "resumed": resumed})
+
+        every = self.opts.checkpoint_every
+        try:
+            while frontier and len(docs) < self.opts.max_pages and self.fetched < budget:
+                url, depth = frontier.popleft()
+                url = normalize_url(url)
+                if url in self.visited:
+                    continue
+                self.visited.add(url)
+                before = len(docs)
+                try:
+                    self._process(url, depth, frontier, docs)
+                except Exception as exc:  # noqa: BLE001 - one page must not kill the crawl
+                    logger.debug("Crawler: skipping %s: %s", url, exc)
+                kept = len(docs) > before
+                self._emit({"event": "page", "url": url, "docs": len(docs),
+                            "fetched": self.fetched, "frontier": len(frontier),
+                            "kept": kept})
+                if kept and every and self._ckpt_dir:
+                    self._ckpt_since += 1
+                    if self._ckpt_since >= every:
+                        self._save_checkpoint(frontier, docs, complete=False)
+        except KeyboardInterrupt:
+            self.interrupted = True
+            if self._ckpt_dir:
+                self._save_checkpoint(frontier, docs, complete=False)
+            self._emit({"event": "interrupted", "docs": len(docs),
+                        "frontier": len(frontier)})
+            logger.info("Crawler: interrupted at %d docs (%d queued); checkpoint saved.",
+                        len(docs), len(frontier))
+            return docs[:self.opts.max_pages]
+
+        self.complete = not frontier          # nothing queued -> whole scope crawled
+        if self._ckpt_dir:
+            self._save_checkpoint(frontier, docs, complete=self.complete)
+        self._emit({"event": "done", "docs": len(docs), "frontier": len(frontier),
+                    "complete": self.complete})
         logger.info("Crawler: %d documents from %d seeds (%d pages fetched, %d urls seen).",
                     len(docs), len(seeds), self.fetched, len(self.visited))
         return docs[:self.opts.max_pages]
+
+    # -- progress + checkpoint ----------------------------------------------
+    def _emit(self, event: dict) -> None:
+        if not self._on_progress:
+            return
+        try:
+            self._on_progress(event)
+        except Exception:  # noqa: BLE001 - a broken UI hook must not kill the crawl
+            pass
+
+    def _make_fingerprint(self, seeds) -> str:
+        """Hash the inputs that define WHAT gets crawled (not how far). A checkpoint
+        only resumes when these match, so changing seeds/scope starts clean."""
+        key = json.dumps({
+            "seeds": sorted(seeds), "allow": sorted(self.opts.allow),
+            "deny": sorted(self.opts.deny), "host": self.opts.stay_on_host,
+            "path": self.opts.stay_under_path, "depth": self.opts.max_depth,
+            "sitemap": self.opts.use_sitemap,
+        }, sort_keys=True)
+        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+    def _reset_checkpoint(self) -> None:
+        for name in ("pages.jsonl", "state.json", "state.json.tmp"):
+            try:
+                (self._ckpt_dir / name).unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+        self._docs_written = 0
+
+    def _save_checkpoint(self, frontier, docs, complete: bool) -> None:
+        """Append new pages to pages.jsonl, then rewrite state.json atomically. The
+        page log is append-only so a flush never rewrites the whole corpus."""
+        try:
+            self._ckpt_dir.mkdir(parents=True, exist_ok=True)
+            new = docs[self._docs_written:]
+            if new:
+                with (self._ckpt_dir / "pages.jsonl").open("a", encoding="utf-8") as fh:
+                    for d in new:
+                        fh.write(json.dumps(d.to_dict(), ensure_ascii=False) + "\n")
+                self._docs_written = len(docs)
+            state = {
+                "version": 1, "fingerprint": self._fingerprint,
+                "frontier": [[u, dp] for (u, dp) in frontier],
+                "visited": list(self.visited), "fetched": self.fetched,
+                "docs": len(docs), "complete": complete,
+            }
+            tmp = self._ckpt_dir / "state.json.tmp"
+            tmp.write_text(json.dumps(state), encoding="utf-8")
+            tmp.replace(self._ckpt_dir / "state.json")
+            self._ckpt_since = 0
+        except Exception as exc:  # noqa: BLE001 - checkpoint is best-effort, never fatal
+            logger.warning("Crawler: checkpoint save failed: %s", exc)
+
+    def _load_checkpoint(self):
+        """Return (docs, frontier) from a matching checkpoint, or None to start fresh."""
+        sf = self._ckpt_dir / "state.json"
+        if not sf.exists():
+            return None
+        try:
+            state = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - corrupt state -> start fresh
+            return None
+        if state.get("fingerprint") != self._fingerprint:
+            logger.warning("Crawler: checkpoint seeds/scope differ from this run; "
+                           "ignoring it and starting fresh.")
+            return None
+        docs: list[Document] = []
+        pf = self._ckpt_dir / "pages.jsonl"
+        if pf.exists():
+            from .preprocessor import read_documents_snapshot
+            try:
+                docs = read_documents_snapshot(pf)
+            except Exception:  # noqa: BLE001
+                docs = []
+        self.visited = set(state.get("visited") or [])
+        self.fetched = int(state.get("fetched") or 0)
+        self._docs_written = len(docs)
+        frontier = deque((u, int(dp)) for u, dp in (state.get("frontier") or []))
+        return docs, frontier
 
     # -- per-url work --------------------------------------------------------
     def _process(self, url, depth, frontier, docs) -> None:
@@ -228,12 +384,20 @@ class Crawler:
         if depth < self.opts.max_depth:
             for link in self._links(res.text, final):
                 nl = normalize_url(link)
-                if nl not in self.visited and self._in_scope(nl):
+                # Dedup at enqueue, not just at pop: on a densely interlinked site the
+                # same url is reachable from thousands of pages; without this the frontier
+                # balloons with duplicates (the queue counter ran past 22k on ~15k uniques).
+                if nl in self.visited or nl in self._queued:
+                    continue
+                if self._in_scope(nl):
                     frontier.append((nl, depth + 1))
+                    self._queued.add(nl)
 
     def _doc(self, url, text) -> Document:
-        from .preprocessor import normalize_text
+        from .preprocessor import normalize_text, strip_boilerplate
         text = normalize_text(text)
+        if self.opts.strip_patterns:
+            text = strip_boilerplate(text, self.opts.strip_patterns)
         # Same id scheme as documents_from_urls so a URL also listed in io.urls
         # dedups by doc_id instead of producing a twin node.
         return Document(

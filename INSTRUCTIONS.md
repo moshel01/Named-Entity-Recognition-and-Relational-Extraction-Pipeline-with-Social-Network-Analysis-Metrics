@@ -295,7 +295,7 @@ python main.py --config domain/nazi_era/config_nazi_era.yaml
 ```
 
 Point it at your corpus by editing `io.input_path` in that file (default
-`./data/abel_papers`). Supported file types: `.txt .md .rtf .pdf .docx .html`.
+`./data/abel_papers`). Supported file types: `.txt .md .rtf .pdf .docx .html .epub`.
 
 What the domain does automatically:
 - merges `München`↔`Munich`, `SA`↔`Sturmabteilung`, `der Führer`↔`Adolf Hitler`, ...
@@ -714,12 +714,15 @@ entity types you care about (they are plain English phrases; GLiNER is zero-shot
 
 | You have... | Do this |
 |-----------|---------|
-| A folder of files (`.txt .md .pdf .docx .rtf .html`) | `io.input_path: "./mycorpus"` |
+| A folder of files (`.txt .md .pdf .docx .rtf .html .epub`) | `io.input_path: "./mycorpus"` |
 | One file | `io.input_path: "./book.pdf"` |
-| A book as PDF/EPUB-export/txt | drop it in the folder; it's chunked automatically |
+| A book (`.epub` native, or `.pdf`/`.txt`) | drop it in the folder; it's chunked automatically |
+| A TV/movie/play script | drop the `.pdf`/`.txt` in the folder; add `--parse-scripts` for scene co-presence edges |
 | A web page or online PDF | `--url https://...` (repeatable) or `io.urls: ["https://..."]` |
 | Many URLs | put them (one per line) in a file -> `--urls-file urls.txt` or `io.urls_file` |
-| A whole site + its subpages | `--crawl https://site/section/` or `io.crawl.{enabled,seeds}` |
+| A whole site + its subpages | `--crawl https://site/section/` or `io.crawl.{enabled,seeds}` (resumable; see below) |
+| A wiki (Wikipedia / Fandom / any MediaWiki) | `--wiki "host:Page Title"` or `--wiki "host:Category:X"` or `io.wiki` |
+| A subreddit / Mastodon / Bluesky / Telegram / etc. | `--social platform:target` or `io.social` (see README's social table) |
 | A raw string / pasted text | `--text "Hitler met Goebbels in 1926."` |
 
 ```powershell
@@ -745,6 +748,30 @@ Caveats: `--url` fetches exactly the page(s) you give. To pull a **whole site**,
 use `--crawl` (below). PDFs need a real text layer; **scanned/image PDFs require
 OCR first** (e.g. `ocrmypdf` -> then feed the OCR'd PDF). Very large books work
 but take proportionally longer; use `--limit` while tuning.
+
+#### Books, scripts, wikis: one generic domain, not a domain per medium
+
+The generic domain's **semantics** already cover these — the relation ontology
+(`domain/generic/relationship_config.py`) carries the interpersonal / organizational /
+biographical / spatial / stance / causal ties any narrative or article states, the
+narrative-sequence net has a `fiction` element scheme, and the script parser adds scene
+co-presence. So you do **not** make a new "book domain" or "wiki domain". What differs by
+medium is two things: **ingestion** (how the bytes become clean text — handled by the file
+extractors and the wiki/social connectors above) and a **thin config preset** that flips
+the right levers. Make a domain only when you have real domain *knowledge* to inject
+(aliases, special labels, inference rules), the way `nazi_era` / `influencewatch` do.
+
+| Medium | Ingestion | Levers to set (in a config preset) |
+|--------|-----------|-----------|
+| **Novel / book** | `.epub` native, or `.pdf`/`.txt` | `export.narrative_scheme: fiction`; `coreference.pronoun_resolution: true` (third-person "he/she" → names — the recall ceiling for fiction; needs the fastcoref service, §8). `--mode ollama`/`api` for alias merging (Bilbo/Mr. Baggins). |
+| **TV / movie / play script** | `.pdf`/`.txt` | `intelligence.parse_scripts: true` (`--parse-scripts`): scene co-presence edges. Dialogue lines still feed the LLM for who-speaks-to / interacts-with. |
+| **Wiki (Wikipedia / Fandom)** | `--wiki host:Category:X` (API prose, clean) | nothing special; the generic ontology + dedup handle it. Crawl the HTML only if a wiki has no API. |
+| **Scraped article site** | `--crawl` / `--url` | `io.crawl.boilerplate` to strip site nav leak; `inference.enable_affiliation_projection` if it's affiliation-dense (boards/orgs). |
+| **Social platform** | `--social platform:target` | the connector emits the reply/mention/forwarded/posted_in graph as asserted edges; the post text still runs through NER/RE. |
+
+The point: **one generic domain handles the relation vocabulary for all of them.** Add an
+ingestion adapter (a connector / file reader) for a new *shape* of input, and a thin config
+preset for a new *medium* — not a full domain. A full domain is for injected knowledge.
 
 #### Crawling a whole site
 `--crawl <seed>` (repeatable) expands a seed URL into its subpages and merges them
@@ -820,18 +847,34 @@ so EntityRuler matches pass through, and add a dedup threshold for it in
 python main.py --config <path> [options]
 
   --config PATH      (required) YAML config file.
-  --stage STAGE      all | ingest | extract | analyze   (default: all)
-                     analyze reuses the checkpoint - re-tune dedup/quality/export
-                     without re-extracting.
-  --resume           Skip documents already in the checkpoint.
-  --mode MODE        api | python_only | ollama  (override config).
+  --stage STAGE      all | fetch | ingest | extract | analyze   (default: all)
+                     fetch = crawl/preprocess only, freeze to documents.jsonl, stop
+                     (no models/GPU). analyze reuses the checkpoint - re-tune
+                     dedup/quality/export without re-extracting.
+  --resume           Skip documents already in the checkpoint. With --stage fetch,
+                     continue an interrupted crawl from its frontier checkpoint.
+  --ingest-from PATH Load documents straight from a frozen documents.jsonl - no
+                     crawl/fetch/file walk. Pairs with --stage fetch (scrape once,
+                     extract anywhere / on another machine).
+  --mode MODE        api | python_only | ollama | gemini_batch  (override config).
   --limit N          Process only the first N documents (quick tests).
   --url URL          Fetch + analyze a web page / PDF URL (repeatable).
   --urls-file PATH   Newline-delimited list of URLs to fetch.
   --crawl URL        Crawl a site from this seed, analyze its subpages (repeatable;
-                     enables crawling). Tune scope/bounds in io.crawl.
+                     enables crawling). Tune scope/bounds in io.crawl. Resumable: a
+                     long crawl shows a progress bar, checkpoints its frontier, and
+                     Ctrl-C + --resume continues it.
   --crawl-max-pages N   Override io.crawl.max_pages.
   --crawl-max-depth N   Override io.crawl.max_depth.
+  --render-js        Render JS with headless Chromium during crawl (SPA sites).
+  --wiki SPEC        MediaWiki source 'host:Target' (repeatable): clean article prose
+                     via the API. 'en.wikipedia.org:Ada Lovelace' or
+                     'en.wikipedia.org:Category:Physicists'.
+  --wiki-limit N     Pages per --wiki source / category cap (override io.wiki_limit).
+  --social SPEC      Social source 'platform:target' (repeatable): reddit:datascience,
+                     bluesky:climate, telegram:durov, ... Pulls posts + the explicit
+                     reply/mention/forwarded/posted_in graph.
+  --parse-scripts    Add scene co-presence edges for screenplay/TV-script documents.
   --text "..."       Analyze a raw text string directly.
   -v, --verbose      DEBUG logging.
 

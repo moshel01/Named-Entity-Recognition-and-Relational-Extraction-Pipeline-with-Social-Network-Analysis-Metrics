@@ -24,7 +24,10 @@ io:
   # (no JS render needed). robots.txt allows everything but /wp-json/; sitemap_index.xml
   # seeds the profile URLs. allow/deny keep the page budget on profiles, not chrome.
   crawl:
-    enabled: true
+    # OFF: the scrape is frozen to documents.jsonl - feed it back with --ingest-from.
+    # A run without --ingest-from must NOT silently re-crawl (and clobber) the snapshot.
+    # Set true only for a deliberate --stage fetch that (re)builds the snapshot.
+    enabled: false
     seeds: ["https://www.influencewatch.org/"]
     max_pages: 16000             # covers the full site (15,477 profiles, counted from
                                  # the sitemaps: 2,427 person + 13,050 group); headroom
@@ -33,7 +36,10 @@ io:
     stay_on_host: true
     respect_robots: true
     use_sitemap: true
-    delay: 1.5                   # polite; site has a per-host crawl budget
+    delay: 0.0                   # no pause; robots.txt verified to set no Crawl-delay.
+                                 # crawler is sequential, so rate is latency-bound (~2-5 req/s).
+                                 # back off if the log shows 429/503 - rate-limited pages come
+                                 # back empty and would pollute the scrape.
     checkpoint_every: 25         # flush frontier+pages every 25 kept; --resume to finish
     boilerplate:                 # nav fragment trafilatura leaves on stub profiles
       - "Or browse groups, people, or influence networks\\.\\s*"
@@ -45,7 +51,10 @@ io:
       - "/(tag|category|author|feed|page)/"
 
 chunking:
-  max_chars: 6000
+  # 8000 (up from 6000): a 27B at num_ctx 16384 swallows it, and it cuts the per-chunk LLM
+  # call count ~13% while pushing ~86% of docs to a single chunk - so the multichunk-gated
+  # recall pass fires on far fewer. Bump to 10000 if recall holds on the dense hub profiles.
+  max_chars: 8000
   overlap_chars: 400
   respect_sentences: true
 
@@ -72,7 +81,10 @@ coreference:
 intelligence:
   ollama:
     host: "http://100.69.145.24:11434"   # friend's 5090 over tailscale; localhost for the 3070
-    model: "gemma4:31b"                   # qwen3.6:27b also loaded on that box
+    # qwen3.6:27b: ~1.5-2x faster than gemma4:31b on this box and competitive on relations.
+    # think:false is forced in the ollama backend, so no <think> traces pollute the JSON.
+    # gemma4:31b is the slower-but-strong alt (--ollama-model gemma4:31b to swap back).
+    model: "qwen3.6:27b"
     temperature: 0.0
     request_timeout: 600
     num_ctx: 16384
@@ -88,8 +100,14 @@ intelligence:
   type_hints: true
   # Grammar-constrain the JSON so the local model can't leak prose (ollama format=schema).
   structured_output: true
-  # Re-prompt the whole doc for cross-chunk ties the chunked pass missed.
+  # Re-prompt the whole doc for cross-chunk ties the chunked pass missed...
   recall_pass: true
+  # ...but only on multi-chunk docs. 86% of these profiles are a single chunk, where the
+  # recall pass has no cross-chunk tie to find and just re-reads the same text at full cost.
+  recall_multichunk_only: true
+  # Skip the LLM relation call on chunks too sparse to hold a tie (entities still kept).
+  # Saves calls on thin stubs / boilerplate; dense profile prose mostly still runs.
+  skip_sparse_chunks: true
 
 dedup:
   fuzzy_thresholds:
@@ -108,9 +126,10 @@ quality:
   min_entity_mentions: 1
   min_edge_weight: 1
   llm_review: "auto"
-  # Re-check each LLM edge against its evidence. Tag only - a local verifier over-rejects,
-  # so trust_verification stays off (flagged edges are NOT pruned from the metric graph).
-  verify_relations: true
+  # Re-check each LLM edge against its evidence. OFF for the full run: it's tag-only here
+  # (trust_verification off) and a local verifier over-rejects, so it is one batched call per
+  # 20 edges of pure cost for advisory flags. Flip on for a final QA-only --stage analyze pass.
+  verify_relations: false
   trust_verification: false
 
 inference:

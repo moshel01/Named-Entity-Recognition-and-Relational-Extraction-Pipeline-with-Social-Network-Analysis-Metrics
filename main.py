@@ -474,6 +474,21 @@ class Pipeline:
             try:
                 from core.preprocessor import write_documents_snapshot
                 snap = self.run_dir / "documents.jsonl"
+                # Guard: never let a small/partial gather clobber a much larger existing
+                # snapshot (an interrupted re-crawl over a finished scrape). Write a .new
+                # sidecar and KEEP the old file; the user reconciles deliberately. A scrape
+                # is expensive and unrecoverable, so the snapshot is treated as precious.
+                if snap.exists():
+                    existing = sum(1 for _ in snap.open("r", encoding="utf-8"))
+                    if existing > max(20, 2 * len(documents)):
+                        alt = self.run_dir / "documents.jsonl.new"
+                        write_documents_snapshot(documents, alt)
+                        console.print(
+                            f"[red]Refusing to overwrite {snap} ({existing} docs) with only "
+                            f"{len(documents)} - wrote {alt} instead. The existing scrape is "
+                            f"kept. Delete/rename it yourself if the smaller gather is intended."
+                            f"[/red]")
+                        return documents
                 write_documents_snapshot(documents, snap)
             except Exception:  # noqa: BLE001 - snapshot is a convenience, not load-bearing
                 pass

@@ -301,7 +301,13 @@ class IntelligenceBackend(ABC):
 
         # Recall pass: re-prompt over the assembled doc for cross-chunk relations the
         # per-chunk pass couldn't see. LLM modes only (needs _complete); guarded.
-        if ic.recall_pass and callable(getattr(self, "_complete", None)):
+        # recall_multichunk_only skips it on single-chunk docs - there is no cross-chunk
+        # tie to recover, so the whole-doc re-prompt just re-reads text the first pass
+        # already saw. On a 74%-single-chunk corpus that is most of the recall cost.
+        # Off by default so narrative corpora keep the single-chunk second-look recall.
+        multichunk_ok = (not ic.recall_multichunk_only) or len(foundation_results) > 1
+        if (ic.recall_pass and multichunk_ok
+                and callable(getattr(self, "_complete", None))):
             from .relation_recall import recall_relations
             doc_text = _reassemble_doc(foundation_results)
             extra = recall_relations(

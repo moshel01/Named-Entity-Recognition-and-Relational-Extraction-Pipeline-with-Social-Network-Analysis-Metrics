@@ -62,6 +62,12 @@ def _load_names(path: str) -> set[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Import the LittleSis bulk dump as a pipeline snapshot.")
     ap.add_argument("relationships", help="Path to relationships.json.gz (or .json).")
+    ap.add_argument("--entities", default="", help="Path to entities.json(.gz) - enriches each "
+                    "node with blurb/types/website/aliases (the 'add the entities' part).")
+    ap.add_argument("--induced", action="store_true", help="Keep only edges where BOTH endpoints "
+                    "match --names-from/--ids (induced subgraph). Default keeps either (1-hop).")
+    ap.add_argument("--include-isolated", action="store_true", help="With --entities, also emit "
+                    "entities that have no kept edge (only sensible for the whole-dump variant).")
     ap.add_argument("--out", default="littlesis_bulk.jsonl", help="Snapshot to write.")
     ap.add_argument("--append", default="", help="Append to this existing snapshot instead of --out "
                     "(e.g. your crawl's documents.jsonl, to merge in one corpus).")
@@ -84,8 +90,10 @@ def main() -> int:
         print("WARNING: no filter set - importing the ENTIRE LittleSis graph "
               "(millions of edges). Ctrl-C and add --names-from/--categories to slice it.")
 
-    docs = load_bulk(args.relationships, ids=ids, names=names, categories=cats,
-                     min_amount=args.min_amount, max_edges=args.max_edges)
+    docs = load_bulk(args.relationships, entities_path=(args.entities or None),
+                     ids=ids, names=names, categories=cats, min_amount=args.min_amount,
+                     max_edges=args.max_edges, both_endpoints=args.induced,
+                     include_isolated=args.include_isolated)
     n_edges = sum(len((d.meta or {}).get("ls_edges") or []) for d in docs)
 
     if args.append:

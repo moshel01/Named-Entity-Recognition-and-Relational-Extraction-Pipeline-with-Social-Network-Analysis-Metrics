@@ -782,25 +782,32 @@ directly (they land as asserted `edge_source=littlesis` ties; donations carry
 
 - **Targeted (API).** `--littlesis "search:Koch Industries"` or `--littlesis id:28220` pulls
   an ego-network around those seeds. Cheap; good for specific actors.
-- **Bulk (full dump).** Download `relationships.json.gz` from
-  [littlesis.org/bulk_data](https://littlesis.org/bulk_data) (the edges are self-contained —
-  you don't need the entities file), then convert with a filter so you import the slice you
-  want out of the ~1.5M-edge graph:
+- **Bulk (full dump).** Download `relationships.json.gz` + `entities.json.gz` from
+  [littlesis.org/bulk_data](https://littlesis.org/bulk_data) (relationships carry the edges +
+  endpoint names; entities adds blurb/types/website per node). `scripts/littlesis_bulk.py`
+  streams them (GB-scale, no full load) and writes a snapshot. Three scope variants out of the
+  ~1.7M-edge graph — `--entities` adds node attributes in every case:
   ```powershell
-  # enrich exactly the entities already in your scraped network:
-  python -m scripts.littlesis_bulk relationships.json.gz `
-    --names-from output/influencewatch/entities.json `
-    --append output/influencewatch/documents.jsonl
-  # ...or a category/amount slice of the whole graph (1=position 5=donation 10=ownership):
-  python -m scripts.littlesis_bulk relationships.json.gz --categories 1,5,10 --min-amount 100000 `
-    --out littlesis_bulk.jsonl
-  # then extract; dedup folds LittleSis nodes into your scraped nodes by name:
-  python main.py --config domain/influencewatch/config_influencewatch.yaml `
-    --ingest-from output/influencewatch/documents.jsonl --mode python_only
+  # 1. CONNECTED to your scrape (1-hop): every LittleSis edge touching one of your entities.
+  python -m scripts.littlesis_bulk data/littlesis/relationships.json --entities data/littlesis/entities.json `
+    --names-from output/influencewatch_llm/entities.json --out output/ls_connected.jsonl
+  # 2. INDUCED subgraph: only edges where BOTH endpoints are your entities.
+  python -m scripts.littlesis_bulk data/littlesis/relationships.json --entities data/littlesis/entities.json `
+    --names-from output/influencewatch_llm/entities.json --induced --out output/ls_induced.jsonl
+  # 3. WHOLE dump: everything, incl. edge-less entities (heavy - the SNA metrics may not finish).
+  python -m scripts.littlesis_bulk data/littlesis/relationships.json --entities data/littlesis/entities.json `
+    --include-isolated --out output/ls_full.jsonl
   ```
-  `--names-from <run>/entities.json` is the merge lever: it keeps only LittleSis edges that
-  touch an entity you already have, so the curated ties attach to your scraped network
-  instead of swamping it. **LittleSis is CC BY-SA 4.0 — attribute it in any published network.**
+  Then merge by combining the snapshot with your scrape and ingesting (dedup folds by name):
+  ```powershell
+  Get-Content output/influencewatch_llm/documents.jsonl, output/ls_connected.jsonl |
+    Set-Content output/iw_ls_connected/documents.jsonl
+  python main.py --config domain/influencewatch/config_influencewatch.yaml `
+    --ingest-from output/iw_ls_connected/documents.jsonl --run-name iw_ls_connected --mode ollama --resume
+  ```
+  `--names-from <run>/entities.json` is the merge lever (keeps only LittleSis edges touching an
+  entity you already have). In Gephi, filter edges by `edge_source=littlesis` and nodes by
+  `attr_littlesis` to toggle the LittleSis layer on/off. **CC BY-SA 4.0 — attribute it.**
 
 #### Crawling a whole site
 `--crawl <seed>` (repeatable) expands a seed URL into its subpages and merges them

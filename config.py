@@ -238,6 +238,11 @@ class IntelligenceConfig(BaseModel):
     # (won't fit context); raise it for big-context models.
     recall_pass: bool = False
     recall_max_chars: int = 24000
+    # Gate the recall pass to multi-chunk docs only. A single-chunk doc has no cross-chunk
+    # tie to recover, so its recall pass just re-reads text the first pass already saw - on a
+    # mostly-single-chunk corpus that is most of the recall cost for little gain. Off by
+    # default (narrative corpora keep the single-chunk second-look); on for big web corpora.
+    recall_multichunk_only: bool = False
     # Script/screenplay co-presence: when a document parses as a script (scene slugs +
     # speaker cues), add Newman-weighted co_present_in_scene edges between characters
     # who share a scene (core/script_parser). The standard character-network signal the

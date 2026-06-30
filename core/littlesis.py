@@ -147,16 +147,31 @@ def _relationships(eid: str, get, max_pages: int, delay: float) -> list[dict]:
 
 
 def _entity_document(ent: dict, edges: list[dict]) -> Document:
-    text = f"{ent['name']}. {ent['blurb']} {ent['summary']}".strip()
-    url = f"https://littlesis.org/{(ent['ext'] or 'entity').lower()}/{ent['id']}"
+    blurb, summary = ent.get("blurb", "") or "", ent.get("summary", "") or ""
+    text = f"{ent['name']}. {blurb} {summary}".strip()
+    ext = ent.get("ext", "") or ""
+    url = f"https://littlesis.org/{(ext or 'entity').lower()}/{ent['id']}"
+    # Node attributes surfaced as Gephi attr_* columns (filterable). ls_blurb/ls_types/
+    # ls_website come from entities.json enrichment; absent on the API/edge-only path.
+    ls_attrs = {}
+    if blurb:
+        ls_attrs["ls_blurb"] = blurb
+    if ent.get("types"):
+        ls_attrs["ls_types"] = ent["types"]
+    if ent.get("website"):
+        ls_attrs["ls_website"] = ent["website"]
+    if ext:
+        ls_attrs["ls_ext"] = ext
+    meta = {"filename": url, "source_type": "littlesis", "platform": "littlesis",
+            "littlesis_id": ent["id"], "name": ent["name"],
+            "primary_ext": ext, "label": _ext_label(ext),
+            "license": _LICENSE, "attribution": _ATTRIBUTION,
+            "ls_edges": edges, "ls_attrs": ls_attrs, "n_chars": len(text)}
+    if ent.get("aliases"):
+        meta["ls_aliases"] = ent["aliases"]
     return Document(
         doc_id=stable_id(f"littlesis:{ent['id']}", prefix="ls_", length=10),
-        source_path=url, text=text,
-        meta={"filename": url, "source_type": "littlesis", "platform": "littlesis",
-              "littlesis_id": ent["id"], "name": ent["name"],
-              "primary_ext": ent["ext"], "label": _ext_label(ent["ext"]),
-              "license": _LICENSE, "attribution": _ATTRIBUTION,
-              "ls_edges": edges, "n_chars": len(text)})
+        source_path=url, text=text, meta=meta)
 
 
 def fetch_littlesis(spec: str, *, limit: int = 10, depth: int = 1, fetch=None,
@@ -234,25 +249,47 @@ def _norm_name(name: str) -> str:
     return n.strip()
 
 
-def load_bulk(relationships_path, *, ids=None, names=None, categories=None,
-              min_amount=None, max_edges: int = 0) -> list[Document]:
-    """Import the LittleSis bulk relationships dump (.json.gz) as entity Documents
-    carrying their edges (same shape as the API connector, so the structure hook and
-    dedup/merge are unchanged). Filters keep the slice you want out of the full graph:
-      ids        - keep an edge if either endpoint's LittleSis id is in this set
-      names      - keep an edge if either endpoint name matches (normalized) - pass the
-                   entity names already in your scraped network to enrich exactly those
-      categories - LittleSis category_ids to keep (e.g. {1,5,10} = positions/donations/owners)
-      min_amount - keep only money edges at/above this amount
-      max_edges  - hard cap (0 = unlimited; the full graph is millions of edges)."""
+def _bulk_open(path):
     import gzip
+    return (gzip.open if str(path).endswith(".gz") else open)(path, "rt", encoding="utf-8")
+
+
+def load_bulk(relationships_path, *, entities_path=None, ids=None, names=None,
+              categories=None, min_amount=None, max_edges: int = 0,
+              both_endpoints: bool = False, include_isolated: bool = False) -> list[Document]:
+    """Import the LittleSis bulk dump as entity Documents carrying their edges (same shape
+    as the API connector, so the structure hook + dedup/merge are unchanged). Two passes:
+    relationships.json builds the edges, entities.json (optional) enriches each node with
+    blurb/types/website/aliases. Filters carve the slice out of the ~1.7M-edge full graph:
+      ids/names      - keep an edge if an endpoint matches (pass your scraped entity names);
+                       both_endpoints=True keeps only edges where BOTH match (induced subgraph)
+      categories     - LittleSis category_ids (e.g. {1,5,10} = positions/donations/ownership)
+      min_amount     - keep only money edges at/above this amount
+      max_edges      - hard cap (0 = unlimited)
+      include_isolated - with entities_path, also emit entities that have no kept edge
+                         (only meaningful for the whole-dump variant)."""
     id_set = {str(i) for i in ids} if ids else None
     name_set = {_norm_name(n) for n in names} if names else None
     cat_set = set(categories) if categories else None
-    opener = gzip.open if str(relationships_path).endswith(".gz") else open
-    by_src: dict[str, dict] = {}
+    has_filter = bool(id_set or name_set)
+    nodes: dict[str, dict] = {}
+
+    def _ensure(eid, name, label):
+        n = nodes.get(eid)
+        if n is None:
+            n = nodes[eid] = {"id": eid, "name": name,
+                              "ext": "person" if label == "PERSON" else "org",
+                              "blurb": "", "summary": "", "types": "", "website": "",
+                              "aliases": [], "edges": []}
+        return n
+
+    def _match(eid, name):
+        return (id_set is not None and eid in id_set) or \
+               (name_set is not None and _norm_name(name) in name_set)
+
+    # Pass 1: relationships -> edges (grouped on the source entity) + the involved node set.
     kept = 0
-    with opener(relationships_path, "rt", encoding="utf-8") as fh:
+    with _bulk_open(relationships_path) as fh:
         for rec in _iter_json_array(fh):
             a = rec.get("attributes") or {}
             if cat_set and a.get("category_id") not in cat_set:
@@ -261,19 +298,17 @@ def load_bulk(relationships_path, *, ids=None, names=None, categories=None,
             t_label, t_id, t_name = _endpoint(rec.get("related", ""))
             if not s_name or not t_name:
                 continue
-            if id_set and s_id not in id_set and t_id not in id_set:
-                continue
-            if name_set and _norm_name(s_name) not in name_set and _norm_name(t_name) not in name_set:
-                continue
+            if has_filter:
+                s_ok, t_ok = _match(s_id, s_name), _match(t_id, t_name)
+                keep = (s_ok and t_ok) if both_endpoints else (s_ok or t_ok)
+                if not keep:
+                    continue
             amt = a.get("amount")
             if min_amount is not None and not (amt is not None and amt >= min_amount):
                 continue
-            ent = by_src.get(s_id)
-            if ent is None:
-                ent = by_src[s_id] = {"id": s_id, "name": s_name,
-                                      "ext": "person" if s_label == "PERSON" else "org",
-                                      "blurb": "", "summary": "", "edges": []}
-            ent["edges"].append({
+            src = _ensure(s_id, s_name, s_label)
+            _ensure(t_id, t_name, t_label)        # target is a node too (enriched in pass 2)
+            src["edges"].append({
                 "src": s_name, "src_label": s_label, "src_id": s_id,
                 "tgt": t_name, "tgt_label": t_label, "tgt_id": t_id,
                 "rel": _map_relation(a),
@@ -284,16 +319,47 @@ def load_bulk(relationships_path, *, ids=None, names=None, categories=None,
             kept += 1
             if max_edges and kept >= max_edges:
                 break
-    docs = [_entity_document(e, e["edges"]) for e in by_src.values() if e["edges"]]
-    logger.info("littlesis bulk: %d edges -> %d source entities.", kept, len(docs))
+
+    # Pass 2: entities.json -> node attributes (and isolated nodes if asked).
+    if entities_path:
+        with _bulk_open(entities_path) as fh:
+            for rec in _iter_json_array(fh):
+                a = rec.get("attributes") or {}
+                eid = str(a.get("id") or rec.get("id") or "")
+                if not eid:
+                    continue
+                n = nodes.get(eid)
+                if n is None:
+                    if not include_isolated:
+                        continue
+                    n = _ensure(eid, a.get("name", ""),
+                                "PERSON" if (a.get("primary_ext") or "").lower() == "person" else "ORG")
+                n["name"] = n["name"] or a.get("name", "")
+                if a.get("primary_ext"):
+                    n["ext"] = a["primary_ext"].lower()
+                n["blurb"] = (a.get("blurb") or "")[:200]
+                n["summary"] = (a.get("summary") or "")[:300]
+                n["website"] = a.get("website") or ""
+                t = a.get("types") or []
+                n["types"] = ";".join(t) if isinstance(t, list) else str(t)
+                n["aliases"] = a.get("aliases") or []
+
+    # Emit a Document per node when enriching (so target/isolated nodes carry attributes);
+    # edge-only mode keeps it lean (source entities only - targets ride in via edge mentions).
+    emit_all = bool(entities_path) or include_isolated
+    docs = [_entity_document(n, n["edges"]) for n in nodes.values() if n["edges"] or emit_all]
+    logger.info("littlesis bulk: %d edges, %d nodes -> %d documents%s.",
+                kept, len(nodes), len(docs), " (enriched)" if entities_path else "")
     return docs
 
 
-def _mention(name: str, label: str, ls_id: str, doc_id: str) -> EntityMention:
+def _mention(name: str, label: str, ls_id: str, doc_id: str, extra: dict | None = None) -> EntityMention:
+    attrs = {"littlesis": True, "littlesis_id": ls_id}
+    if extra:
+        attrs.update(extra)
     return EntityMention(
         text=name, label=label, start_char=0, end_char=0, chunk_id=doc_id,
-        doc_id=doc_id, confidence=1.0, sources=["littlesis"],
-        attributes={"littlesis": True, "littlesis_id": ls_id})
+        doc_id=doc_id, confidence=1.0, sources=["littlesis"], attributes=attrs)
 
 
 def littlesis_structure(doc: Document) -> tuple[list[EntityMention], list[Relationship]]:
@@ -308,10 +374,13 @@ def littlesis_structure(doc: Document) -> tuple[list[EntityMention], list[Relati
     edges: list[Relationship] = []
     seen: set[tuple[str, str]] = set()
 
-    # The anchor entity always exists as a node, even with no relationships.
+    # The anchor entity always exists as a node, even with no relationships. It carries
+    # the entities.json enrichment (ls_blurb/ls_types/ls_website) so the node gets attr_*
+    # columns; edge-endpoint mentions stay minimal and fold into their own anchor by name.
     anchor, alabel = (meta.get("name") or "").strip(), meta.get("label") or "ORG"
     if anchor:
-        mentions.append(_mention(anchor, alabel, str(meta.get("littlesis_id") or ""), did))
+        mentions.append(_mention(anchor, alabel, str(meta.get("littlesis_id") or ""), did,
+                                 extra=dict(meta.get("ls_attrs") or {})))
         seen.add((anchor.lower(), alabel))
 
     for e in (meta.get("ls_edges") or []):

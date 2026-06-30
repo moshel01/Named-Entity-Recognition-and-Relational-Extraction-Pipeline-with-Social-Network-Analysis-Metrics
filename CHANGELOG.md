@@ -4,6 +4,21 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## extraction cost: recall pass gated to multi-chunk docs
+
+The recall pass (whole-doc re-prompt for cross-chunk ties) was firing on every doc, including
+single-chunk ones where there is no cross-chunk tie to recover - on a web corpus that is most
+of the recall cost for almost no gain.
+
+- `intelligence.recall_multichunk_only` (default off, so narrative corpora keep the single-chunk
+  second-look) skips the recall pass on single-chunk docs. Gated in `intelligence/base.py`.
+- InfluenceWatch tuned for the 15,570-doc full run on qwen3.6:27b (faster than gemma4:31b,
+  think:false forced so no reasoning traces): `recall_multichunk_only` + `skip_sparse_chunks`
+  on, `verify_relations` off (it's tag-only with a local verifier that over-rejects - run it as
+  a final analyze-only QA pass instead), `chunking.max_chars` 6000->8000 (a 27B handles it; cuts
+  chunk count ~13% and pushes ~86% of docs to a single chunk). Net: ~37.7k LLM calls -> ~19k,
+  roughly halving the run before the model speedup.
+
 ## littlesis: import the curated influence graph directly
 
 LittleSis (Public Accountability Initiative) is a sourced graph of who-funds/controls/sits-
@@ -31,6 +46,14 @@ relationships. So we IMPORT the edges, not crawl prose and re-extract.
   `--categories`/`--min-amount`/`--ids`. Writes a documents.jsonl snapshot (or `--append`s
   to your crawl snapshot) -> `--ingest-from` merges it; dedup folds LittleSis nodes into the
   scraped nodes by name. Validated against the live dump (14k edges parsed from one partial).
+- ENTITIES too, not just edges: `--entities entities.json` runs a second streaming pass that
+  enriches each node with blurb/types/website/aliases (surfaced as Gephi `attr_ls_*` columns).
+  `--induced` keeps only edges where BOTH endpoints are in your set (induced subgraph) vs the
+  default 1-hop (either endpoint); `--include-isolated` (with `--entities`) also emits edge-less
+  entities - the three scope variants: connected / induced / whole-dump.
+- SEPARABLE in Gephi: every LittleSis edge carries `edge_source=littlesis` (filter edges
+  on/off) and every LittleSis node carries `attr_littlesis=true` (+ `attr_ls_types` etc.), so a
+  merged network can be viewed as scrape-only or scrape+LittleSis without a second run.
 - LICENSE: CC BY-SA 4.0 - attribution + share-alike REQUIRED. The license/attribution
   ride on each source Document's meta and a run prints the attribution line; surface it in
   any published network.

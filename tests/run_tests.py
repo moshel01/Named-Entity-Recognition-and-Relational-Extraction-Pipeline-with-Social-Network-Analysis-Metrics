@@ -2752,6 +2752,40 @@ def test_littlesis_bulk() -> None:
         # id filter
         pac = load_bulk(gz, ids={"999"})
         check("bulk id filter", sum(len(x.meta["ls_edges"]) for x in pac) == 1, "")
+
+        # induced: keep only edges where BOTH endpoints match (Walmart->Some PAC).
+        ind = load_bulk(gz, names={"Walmart Inc.", "Some PAC"}, both_endpoints=True)
+        ie = [e for doc in ind for e in doc.meta["ls_edges"]]
+        check("bulk induced (both endpoints)",
+              len(ie) == 1 and ie[0]["rel"] == "donated_to", str(ie))
+
+        # entities.json enrichment: node carries blurb/types as attr_*; isolated node added.
+        ents = [
+            {"attributes": {"id": 1, "name": "Walmart Inc.", "primary_ext": "Org",
+                            "blurb": "Retail giant", "types": ["Organization", "Business"]}},
+            {"attributes": {"id": 999, "name": "Some PAC", "primary_ext": "Org"}},
+            {"attributes": {"id": 777, "name": "Sam's Club", "primary_ext": "Org"}},
+            {"attributes": {"id": 1006, "name": "Allen Questrom", "primary_ext": "Person"}},
+            {"attributes": {"id": 555, "name": "Lonely Corp", "primary_ext": "Org"}},  # no edges
+        ]
+        egz = d / "entities.json.gz"
+        with gzip.open(egz, "wt", encoding="utf-8") as fh:
+            fh.write(_json.dumps(ents))
+        enr = load_bulk(gz, entities_path=egz, names={"Walmart"})
+        wal_doc = next(x for x in enr if x.meta["name"] == "Walmart Inc.")
+        check("bulk enrich: node blurb/types in ls_attrs",
+              wal_doc.meta["ls_attrs"].get("ls_blurb") == "Retail giant"
+              and wal_doc.meta["ls_attrs"].get("ls_types") == "Organization;Business",
+              str(wal_doc.meta.get("ls_attrs")))
+        ments, _ = littlesis_structure(wal_doc)
+        anchor = next(m for m in ments if m.text == "Walmart Inc.")
+        check("bulk enrich: attrs ride on the node mention (-> attr_* columns)",
+              anchor.attributes.get("ls_blurb") == "Retail giant"
+              and anchor.attributes.get("littlesis") is True, str(anchor.attributes))
+        # include_isolated brings in the edge-less entity 555 as a node.
+        iso = load_bulk(gz, entities_path=egz, include_isolated=True)
+        check("bulk include_isolated adds edge-less entity",
+              any(x.meta["name"] == "Lonely Corp" for x in iso), "")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

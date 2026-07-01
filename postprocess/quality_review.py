@@ -21,6 +21,12 @@ _LLM_PROTECT_MENTIONS = 5         # protect entities mentioned at least this oft
 _LLM_PROTECT_DOCS = 3             # protect entities spanning at least this many docs
 _LLM_PROTECT_DEGREE = 3           # protect entities anchoring at least this many edges
 
+# A PERSON with propn_ratio 0 but at least this many mentions is kept + tagged
+# suspect_common_noun, not dropped. Titled historical names ("Kaiser Wilhelm II")
+# and org-words mislabeled PERSON ("Frontbann") read as common nouns to the German
+# model, so the ratio-0 hard drop deletes real, well-attested nodes.
+_POS_GATE_KEEP_MENTIONS = 20
+
 # Generic terms that are almost never useful standalone entities.
 _STOP_NAMES = {
     "the", "a", "an", "he", "she", "they", "it", "we", "i", "you",
@@ -123,10 +129,14 @@ class QualityReviewer:
                     gated.append(e)
                     continue
                 if e.label == "PERSON" and ratio == 0.0 and e.mention_count >= 2:
-                    if e.mention_count >= 20:
-                        logger.warning("POS gate dropping well-attested PERSON %r "
-                                       "(%d mentions, propn_ratio 0.0)",
-                                       e.canonical_name, e.mention_count)
+                    # A name spaCy never tags PROPN is usually a category word
+                    # ("der Vater"). But titled historical names and org-words
+                    # mislabeled PERSON read as common nouns to the German model
+                    # too - keep a well-attested one, tagged filterable, rather
+                    # than silently deleting it.
+                    if e.mention_count >= _POS_GATE_KEEP_MENTIONS:
+                        e.attributes["suspect_common_noun"] = True
+                        gated.append(e)
                     continue
                 if ratio < 0.5 and e.label in name_types and not (
                         e.label in ("ORG", "INSTITUTION")

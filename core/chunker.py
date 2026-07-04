@@ -32,6 +32,27 @@ def _spacy_sentences(text: str, nlp) -> list[tuple[int, int]]:
     return spans or [(0, len(text))]
 
 
+# Chunk boundaries only need sentence-ish split points - the foundation re-parses
+# each chunk with the full pipeline anyway. Running the transformer pipeline over
+# the whole doc just to place splits doubles foundation cost on every multi-chunk
+# doc, so boundary detection uses a blank tokenizer + rule sentencizer instead.
+_BOUNDARY_NLP: dict[str, object] = {}
+
+
+def _boundary_nlp(nlp):
+    lang = getattr(nlp, "lang", "") or "xx"
+    light = _BOUNDARY_NLP.get(lang)
+    if light is None:
+        try:
+            import spacy
+            light = spacy.blank(lang)
+            light.add_pipe("sentencizer")
+        except Exception:  # noqa: BLE001 - fall back to the full pipeline
+            light = False
+        _BOUNDARY_NLP[lang] = light
+    return light or None
+
+
 def chunk_document(
     document: Document,
     max_chars: int = 6000,
@@ -54,8 +75,10 @@ def chunk_document(
         ]
 
     if respect_sentences:
-        use_spacy = nlp is not None and len(text) < getattr(nlp, "max_length", 1_000_000)
-        sent_spans = _spacy_sentences(text, nlp) if use_spacy else _fallback_sentences(text)
+        boundary = _boundary_nlp(nlp) if nlp is not None else None
+        use = boundary or nlp
+        use_spacy = use is not None and len(text) < getattr(use, "max_length", 1_000_000)
+        sent_spans = _spacy_sentences(text, use) if use_spacy else _fallback_sentences(text)
     else:
         # Treat the whole doc as one "sentence stream" split on hard boundaries.
         sent_spans = _fallback_sentences(text)

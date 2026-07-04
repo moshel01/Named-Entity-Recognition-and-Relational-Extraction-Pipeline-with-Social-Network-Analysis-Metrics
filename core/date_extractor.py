@@ -35,7 +35,9 @@ def _build_patterns(month_words: dict[str, int], season_words: dict[str, int]) -
     if season_words:
         seasons_alt = "|".join(re.escape(w) for w in sorted(season_words, key=len, reverse=True))
         patterns.append(re.compile(rf"\b(?:{seasons_alt})\s+\d{{4}}\b", re.I))   # Herbst 1923
-    patterns.append(re.compile(r"\b(?:19|20)\d{2}\b"))                     # 2021 (least specific)
+    # 18xx included: Abel authors are born in the 1880s-90s and state it as a
+    # bare year ("Ich wurde 1889 geboren") - normalize_date already accepts 18xx.
+    patterns.append(re.compile(r"\b(?:18|19|20)\d{2}\b"))                   # 1889 (least specific)
     return patterns
 
 

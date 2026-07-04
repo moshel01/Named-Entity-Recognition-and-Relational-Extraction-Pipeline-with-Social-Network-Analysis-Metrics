@@ -111,7 +111,11 @@ class FoundationLayer:
         if domain is not None:
             self._install_entity_ruler(domain.spacy_patterns())
 
-        self.gliner = GlinerEngine(
+        # GLiNER load is deferred to first NER use: it's the hang/segfault-prone
+        # step (GPU load + duplicate OpenMP), and spaCy-only consumers (chunking,
+        # python_only's engine reuse) must not pay for it.
+        self._gliner: GlinerEngine | None = None
+        self._gliner_args = dict(
             model_name=fc.gliner_model,
             labels=labels,
             threshold=fc.gliner_threshold,
@@ -135,6 +139,12 @@ class FoundationLayer:
         self._month_words = vocab.get("months", {})
         self._season_words = vocab.get("seasons", {})
         self._pivot_max = vocab.get("pivot_max")
+
+    @property
+    def gliner(self) -> GlinerEngine:
+        if self._gliner is None:
+            self._gliner = GlinerEngine(**self._gliner_args)
+        return self._gliner
 
     def _install_entity_ruler(self, patterns: list[dict]) -> None:
         """Add a domain EntityRuler before the statistical NER component."""

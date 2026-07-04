@@ -170,6 +170,10 @@ class OllamaConfig(BaseModel):
     temperature: float = 0.0
     request_timeout: int = 180
     num_ctx: int = 8192
+    # Output-token cap per call. 0 = server default (unbounded): a model stuck in
+    # a repetition loop then burns the whole request_timeout per chunk. ~4096
+    # comfortably holds the densest chunk's JSON; raise it before lowering timeout.
+    num_predict: int = 0
 
 
 class PythonOnlyConfig(BaseModel):
@@ -198,6 +202,13 @@ class IntelligenceConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     python_only: PythonOnlyConfig = Field(default_factory=PythonOnlyConfig)
     langextract: LangExtractConfig = Field(default_factory=LangExtractConfig)
+    # Documents extracted concurrently (ollama/api modes; others ignore it).
+    # 1 = the sequential loop, unchanged. >1 runs a worker pool: each worker gets
+    # its own backend, foundation NER and checkpoint writes are serialized by
+    # locks. For ollama the server must allow it too (OLLAMA_NUM_PARALLEL, and
+    # KV memory scales with parallel * num_ctx) - else requests just queue and
+    # the gain is only the hidden network/parse latency.
+    parallel_docs: int = 1
     # Cost gate (LLM modes only): skip the relation call for a chunk too sparse to
     # contain a relation. A relation needs two entities co-occurring, so a chunk
     # with no two distinct entities inside one window can't yield one - skipping it

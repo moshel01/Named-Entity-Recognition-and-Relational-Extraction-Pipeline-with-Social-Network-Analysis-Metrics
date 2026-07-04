@@ -40,7 +40,11 @@ class OllamaBackend(IntelligenceBackend):
         super().__init__(config, domain=domain)
         self.cfg = config.intelligence.ollama
         self._endpoint = self.cfg.host.rstrip("/") + "/api/chat"
+        # One TCP connection for the whole run: tens of thousands of chunk calls,
+        # and the Tailscale-remote host pays connect+slow-start on every new one.
+        self._session = requests.Session()
         self._consecutive_failures = 0
+        self._ctx_warned = False
         self._verify_server()
 
     def _verify_server(self) -> None:
@@ -61,6 +65,24 @@ class OllamaBackend(IntelligenceBackend):
             )
 
     def _complete(self, system: str, user: str, schema: dict | None = None) -> str:
+        # Ollama silently truncates a prompt past num_ctx FROM THE TOP - the system
+        # prompt and candidate list go first, and quality craters with no error.
+        # ~3 chars/token is conservative for German; warn once per run.
+        est = (len(system) + len(user)) // 3
+        if est > self.cfg.num_ctx and not self._ctx_warned:
+            self._ctx_warned = True
+            logger.warning(
+                "Prompt ~%d tokens exceeds num_ctx=%d - ollama silently drops the "
+                "top of the prompt (system + candidates). Raise intelligence."
+                "ollama.num_ctx or lower chunking.max_chars.",
+                est, self.cfg.num_ctx,
+            )
+        options = {
+            "temperature": self.cfg.temperature,
+            "num_ctx": self.cfg.num_ctx,
+        }
+        if self.cfg.num_predict > 0:
+            options["num_predict"] = self.cfg.num_predict
         payload = {
             "model": self.cfg.model,
             "stream": False,
@@ -72,16 +94,13 @@ class OllamaBackend(IntelligenceBackend):
             # instead of <think> traces that break parsing. Ignored by models that
             # don't support it.
             "think": False,
-            "options": {
-                "temperature": self.cfg.temperature,
-                "num_ctx": self.cfg.num_ctx,
-            },
+            "options": options,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         }
-        resp = requests.post(
+        resp = self._session.post(
             self._endpoint, json=payload, timeout=self.cfg.request_timeout
         )
         resp.raise_for_status()

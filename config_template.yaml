@@ -146,9 +146,15 @@ intelligence:
   # Schema-constrained generation: pass a JSON schema to the backend (ollama
   # format=<schema>, OpenAI/Gemini json_schema) so a weak local model can't leak
   # prose into the JSON and lose the whole document. Enforces shape + the entity-type
-  # enum, not the relation vocabulary. Recommended for ollama; anthropic/bedrock
-  # ignore it; gemini_batch already forces JSON.
+  # enum, not the relation vocabulary. Recommended for ollama; anthropic constrains
+  # via the API's output_config json_schema; bedrock ignores it; gemini_batch
+  # already forces JSON.
   structured_output: false
+  # Documents extracted concurrently (ollama/api modes; 1 = the sequential loop,
+  # unchanged). Ollama also needs OLLAMA_NUM_PARALLEL on the SERVER plus VRAM for
+  # parallel*num_ctx KV - without that, requests queue and the gain is only the
+  # hidden network/parse latency.
+  parallel_docs: 1
   # Recall pass: after chunk-by-chunk extraction, re-prompt over the whole document
   # for relations the first pass missed (mainly ties whose endpoints fell in different
   # chunks). The recall half of generate-then-verify; pair with quality.verify_relations.
@@ -194,6 +200,9 @@ intelligence:
     temperature: 0.0
     request_timeout: 180
     num_ctx: 8192
+    # Output-token cap per call (0 = server default, unbounded). Bounds the damage
+    # from a repetition loop - else a stuck model burns request_timeout per chunk.
+    num_predict: 0
   # Mode 2: python_only
   python_only:
     embedding_model: "sentence-transformers/all-MiniLM-L6-v2"

@@ -20,7 +20,10 @@ from .aggregator import _repair_text
 
 logger = logging.getLogger(__name__)
 
-_YEAR_RE = re.compile(r"\b(1[89]\d{2})\b")
+# 1800-2099, same range as date_extractor's _FULL_YEAR_RE. The old 1800-1999
+# form was an Abel-era leftover: modern-domain edges (InfluenceWatch/OREM)
+# never got year/period, so first_year/last_year and the dynamic GEXF stayed empty.
+_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
 _TIE_CLASSES = ("interaction", "affiliation", "participation",
                 "biographical", "stance", "causal", "cooccurrence", "other")
 

@@ -4,6 +4,51 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## extraction throughput + guardrails
+
+- `intelligence.parallel_docs` (default 1 = the old loop, byte-identical): extract N
+  docs concurrently in ollama/api modes. One backend per worker (extract_document
+  keeps per-call state on the instance), foundation NER + checkpoint writes behind
+  locks, BackendUnavailable from any worker aborts the run; in-flight docs just
+  retry on --resume. Ollama needs OLLAMA_NUM_PARALLEL server-side + VRAM for
+  parallel*num_ctx KV or requests only queue.
+- ollama guardrails: `num_predict` cap (0 = unbounded; a repetition-looping model
+  otherwise burns request_timeout per chunk) and a once-per-run warning when the
+  prompt estimate exceeds num_ctx - ollama silently truncates FROM THE TOP, which
+  drops the system prompt + candidate list with no error.
+- anthropic structured outputs: `structured_output` now constrains the anthropic
+  provider too (output_config json_schema via extra_body; objects auto-closed with
+  additionalProperties:false). A host/model that 400s the schema degrades to plain
+  JSON + repair instead of failing the run. Api retries also stop burning the
+  backoff ladder on non-retryable 4xx (429/408 still retry).
+- chunk boundaries now come from a blank-pipeline sentencizer, not a full
+  (transformer) parse of the whole doc - the foundation re-parses each chunk anyway,
+  so the boundary parse was pure double cost on every multi-chunk doc.
+- wikidata linking caches name->QID lookups (misses included) to
+  <run>/wikidata_cache.json, so an analyze re-run doesn't re-query the API.
+- timeline: bare 18xx years now extract ("Ich wurde 1889 geboren" - Abel authors
+  are born in the 1880s-90s; normalize_date always accepted them, the bare-year
+  pattern didn't).
+
+## lazy GLiNER + modern-domain edge years + projection scaling
+
+- GLiNER2 load deferred to first NER use (`FoundationLayer.gliner` property) - it's
+  the hang/segfault-prone step, and constructing the foundation for spaCy alone
+  (chunking, python_only's engine reuse) shouldn't pay for it. `build_backend` takes
+  the foundation as a thunk; only the python_only branch forces the load, so an
+  LLM-mode `--stage analyze` never touches GLiNER (`--reconcile-ner` still loads it
+  explicitly, by design).
+- gephi_builder's edge-year regex was 1800-1999, an Abel-era leftover: on
+  InfluenceWatch/OREM corpora no edge ever got `year`/`period`, so `first_year`/
+  `last_year` and network_dynamic.gexf stayed empty. Now 1800-2099, matching
+  date_extractor.
+- Cross-doc co-occurrence projection enumerates pairs only among entities in
+  >= `cooccurrence_min_shared_docs` documents. Exact (the Newman 1/(k-1) weight
+  keeps the doc's full entity count); on a 15k-doc web corpus this stops building
+  millions of pair buckets the shared-docs gate was about to throw away.
+- Ollama backend reuses one HTTP session across a run's chunk calls instead of a
+  fresh TCP connection per request (matters over Tailscale).
+
 ## extraction cost: recall pass gated to multi-chunk docs
 
 The recall pass (whole-doc re-prompt for cross-chunk ties) was firing on every doc, including

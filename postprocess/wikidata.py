@@ -45,8 +45,32 @@ def _search(name: str, lang: str, timeout: int) -> dict | None:
     return hits[0] if hits else None
 
 
-def link_entities(entities: list[Entity], config) -> list[Entity]:
-    """Attach Wikidata ids to the highest-signal entities. Best-effort."""
+def _load_cache(path) -> dict:
+    try:
+        from pathlib import Path
+        p = Path(path)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a bad cache is just a cold cache
+        pass
+    return {}
+
+
+def _save_cache(path, cache: dict) -> None:
+    try:
+        from pathlib import Path
+        Path(path).write_text(json.dumps(cache, ensure_ascii=False),
+                              encoding="utf-8")
+    except Exception:  # noqa: BLE001 - cache is a nicety
+        pass
+
+
+def link_entities(entities: list[Entity], config, cache_path=None) -> list[Entity]:
+    """Attach Wikidata ids to the highest-signal entities. Best-effort.
+
+    ``cache_path`` persists name->hit lookups (misses included, stored as null)
+    across runs, so an analyze re-run doesn't re-query Wikidata for the same
+    corpus. A stale hit just re-links the same QID - safe to delete anytime."""
     if not getattr(config, "enabled", False):
         return entities
     types = set(config.types)
@@ -55,12 +79,14 @@ def link_entities(entities: list[Entity], config) -> list[Entity]:
     candidates.sort(key=lambda e: e.mention_count, reverse=True)
     candidates = candidates[:config.max_entities]
 
-    cache: dict[str, dict | None] = {}
-    n_linked = n_fail = 0
+    cache: dict[str, dict | None] = _load_cache(cache_path) if cache_path else {}
+    n_linked = n_fail = n_hits = 0
     for e in candidates:
         key = e.canonical_name.lower()
         try:
-            if key not in cache:
+            if key in cache:
+                n_hits += 1
+            else:
                 cache[key] = _search(e.canonical_name, config.lang, config.request_timeout)
             hit = cache[key]
         except Exception:  # noqa: BLE001 - network/parse error: skip this one
@@ -79,8 +105,10 @@ def link_entities(entities: list[Entity], config) -> list[Entity]:
         e.attributes["wikidata_url"] = hit.get("concepturi", "")
         e.attributes["wikidata_label"] = hit.get("label", "")
         n_linked += 1
-    logger.info("Wikidata linking: %d linked, %d lookups, %d failures.",
-                n_linked, len(candidates), n_fail)
+    if cache_path and cache:
+        _save_cache(cache_path, cache)
+    logger.info("Wikidata linking: %d linked, %d lookups (%d cached), %d failures.",
+                n_linked, len(candidates), n_hits, n_fail)
     return entities
 
 

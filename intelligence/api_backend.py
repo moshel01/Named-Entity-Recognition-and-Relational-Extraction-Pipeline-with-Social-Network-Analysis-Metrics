@@ -37,6 +37,9 @@ class ApiBackend(IntelligenceBackend):
         super().__init__(config, domain=domain)
         self.cfg = config.intelligence.api
         self.provider = self.cfg.provider
+        # Flipped off after a host 400s the json schema (no structured-output
+        # support there); the run then degrades to plain JSON + repair.
+        self._schema_ok = True
         self._client = self._build_client()
 
     # Client construction
@@ -66,8 +69,23 @@ class ApiBackend(IntelligenceBackend):
         last_exc: Exception | None = None
         for attempt in range(self.cfg.max_retries):
             try:
-                return self._complete_once(system, user, schema)
+                return self._complete_once(
+                    system, user, schema if self._schema_ok else None)
             except Exception as exc:  # noqa: BLE001 - provider-specific transient errors
+                status = getattr(exc, "status_code", None)
+                if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
+                    # A schema rejection (host/model without structured outputs)
+                    # must not fail the run - drop the schema and go on with
+                    # plain JSON + repair. Any other 4xx won't succeed on retry;
+                    # fail now instead of burning the backoff ladder.
+                    if status == 400 and schema is not None and self._schema_ok:
+                        self._schema_ok = False
+                        logger.warning("Host rejected the json schema (400); "
+                                       "continuing without structured outputs: %s", exc)
+                        continue
+                    raise RuntimeError(
+                        f"API completion failed ({status}, not retryable): {exc}"
+                    ) from exc
                 last_exc = exc
                 wait = min(2 ** attempt, 30)
                 logger.warning(
@@ -79,13 +97,21 @@ class ApiBackend(IntelligenceBackend):
 
     def _complete_once(self, system: str, user: str, schema: dict | None = None) -> str:
         if self.provider == "anthropic":
-            resp = self._client.messages.create(
+            kwargs: dict[str, Any] = dict(
                 model=self.cfg.model,
                 max_tokens=self.cfg.max_tokens,
                 temperature=self.cfg.temperature,
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
+            if schema is not None:
+                # Grammar-level JSON via structured outputs (output_config.format,
+                # GA on current models). Sent through extra_body so an SDK that
+                # predates the typed parameter still puts it on the wire; a model
+                # without support 400s and _complete degrades to plain JSON.
+                kwargs["extra_body"] = {"output_config": {"format": {
+                    "type": "json_schema", "schema": _closed_schema(schema)}}}
+            resp = self._client.messages.create(**kwargs)
             return "".join(
                 block.text for block in resp.content if getattr(block, "type", "") == "text"
             )
@@ -188,6 +214,28 @@ class ApiBackend(IntelligenceBackend):
             logger.warning("LLM merge suggestion failed: %s", exc)
             return []
         return _parse_merges(repair_json(raw))
+
+
+def _closed_schema(schema: dict) -> dict:
+    """Deep copy with additionalProperties:false on every object node - the
+    Anthropic structured-output validator requires closed objects. All fields
+    the pipeline emits (incl. declared qualifiers) are explicit properties, so
+    closing loses nothing."""
+    import copy
+    out = copy.deepcopy(schema)
+
+    def close(node) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                node.setdefault("additionalProperties", False)
+            for v in node.values():
+                close(v)
+        elif isinstance(node, list):
+            for v in node:
+                close(v)
+
+    close(out)
+    return out
 
 
 # Shared parse helpers (also used by ollama_backend)

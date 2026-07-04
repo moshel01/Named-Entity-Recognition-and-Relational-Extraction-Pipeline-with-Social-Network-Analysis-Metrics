@@ -17,8 +17,9 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import logging
 import sys
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import click
 from rich.console import Console
@@ -41,9 +42,6 @@ from postprocess.quality_review import QualityReviewer
 from postprocess.tagger import Tagger
 
 console = Console()
-
-# Relation types that are inherently asymmetric. Forced directed so the graph
-# builder doesn't sort endpoints (which flips display, e.g. "<org> member_of <person>").
 
 
 def _rpm_delay(last_start: float, now: float, rpm: int) -> float:
@@ -71,8 +69,13 @@ def gemini_live_config(config: Config) -> Config:
     return cfg
 
 
-def build_backend(config: Config, foundation: FoundationLayer, domain=None) -> IntelligenceBackend:
-    """Instantiate the intelligence backend for the configured mode."""
+def build_backend(config: Config, foundation: Callable[[], FoundationLayer],
+                  domain=None) -> IntelligenceBackend:
+    """Instantiate the intelligence backend for the configured mode.
+
+    ``foundation`` is a thunk: only the branch that reads it pays the model
+    load. Keeps the which-mode-needs-foundation knowledge here, not in callers.
+    """
     mode = config.mode
     if mode == "api":
         from intelligence.api_backend import ApiBackend
@@ -88,7 +91,7 @@ def build_backend(config: Config, foundation: FoundationLayer, domain=None) -> I
     if mode == "python_only":
         from intelligence.python_backend import PythonBackend
         # Reuse the foundation's loaded spaCy engine to avoid a second load.
-        return PythonBackend(config, spacy_engine=foundation.spacy, domain=domain)
+        return PythonBackend(config, spacy_engine=foundation().spacy, domain=domain)
     if mode == "langextract":
         from intelligence.langextract_backend import LangExtractBackend
         return LangExtractBackend(config, domain=domain)
@@ -106,12 +109,15 @@ class Pipeline:
         self.domain = load_domain(config.domain.name)
         self._foundation: Optional[FoundationLayer] = None
         self._backend: Optional[IntelligenceBackend] = None
+        # Serializes foundation construction + NER when parallel_docs > 1 (spaCy
+        # pipelines are not thread-safe). Uncontended in the sequential path.
+        self._foundation_lock = threading.Lock()
 
     # Lazy heavy components
     @property
     def foundation(self) -> FoundationLayer:
         if self._foundation is None:
-            console.print("[cyan]Loading foundation models (spaCy + GLiNER)...[/cyan]")
+            console.print("[cyan]Loading foundation (spaCy now; GLiNER on first NER use)...[/cyan]")
             self._foundation = FoundationLayer(self.config, domain=self.domain)
         return self._foundation
 
@@ -119,7 +125,11 @@ class Pipeline:
     def backend(self) -> IntelligenceBackend:
         if self._backend is None:
             console.print(f"[cyan]Initializing intelligence backend: {self.config.mode}[/cyan]")
-            self._backend = build_backend(self.config, self.foundation, domain=self.domain)
+            # Thunk, not the property: building an LLM backend must not force the
+            # spaCy+GLiNER load (GLiNER can hang/segfault on load, and the LLM
+            # analyze path never reads it - reconcile_ner loads it explicitly).
+            self._backend = build_backend(self.config, lambda: self.foundation,
+                                          domain=self.domain)
         return self._backend
 
     # Stage: extract
@@ -146,36 +156,24 @@ class Pipeline:
             done_ids = ckpt.completed_ids
 
         flush_every = max(1, self.config.checkpoint.flush_every)
+        parallel = max(1, self.config.intelligence.parallel_docs)
+        if parallel > 1 and self.config.mode not in ("ollama", "api"):
+            console.print(f"[yellow]parallel_docs={parallel} ignored: mode "
+                          f"'{self.config.mode}' extracts sequentially.[/yellow]")
+            parallel = 1
         processed = 0
         with ckpt:
-            for doc in tqdm(documents, desc="Extracting", unit="doc"):
-                if resume and doc.doc_id in done_ids:
-                    continue
-                foundation_results = self.foundation.process_document(doc)
-                extraction = self.backend.extract_document(
-                    doc.doc_id, doc.source_path, foundation_results
-                )
-                # Scripts: fold in scene co-presence edges (opt-in; a no-op on prose).
-                if self.config.intelligence.parse_scripts:
-                    from core.script_parser import script_copresence
-                    extraction.relationships.extend(
-                        script_copresence(doc.text, doc.doc_id))
-                # Social posts: fold in the platform-stated reply/mention/posted_in
-                # structure (asserted social_graph edges + USER/COMMUNITY nodes).
-                if (doc.meta or {}).get("source_type") == "social":
-                    from core.social import social_structure
-                    sm, se = social_structure(doc)
-                    extraction.mentions.extend(sm)
-                    extraction.relationships.extend(se)
-                # LittleSis: fold in the curated relationship graph (asserted typed edges,
-                # donations carry qual_monetary_value) + PERSON/ORG nodes.
-                if (doc.meta or {}).get("source_type") == "littlesis":
-                    from core.littlesis import littlesis_structure
-                    lm, le = littlesis_structure(doc)
-                    extraction.mentions.extend(lm)
-                    extraction.relationships.extend(le)
-                ckpt.save(extraction, flush=(processed % flush_every == 0))
-                processed += 1
+            if parallel > 1:
+                todo = [d for d in documents
+                        if not (resume and d.doc_id in done_ids)]
+                processed = self._extract_parallel(todo, ckpt, parallel)
+            else:
+                for doc in tqdm(documents, desc="Extracting", unit="doc"):
+                    if resume and doc.doc_id in done_ids:
+                        continue
+                    extraction = self._extract_one(doc, self.backend)
+                    ckpt.save(extraction, flush=(processed % flush_every == 0))
+                    processed += 1
 
         # Return only the current run's documents (respect --limit / input set),
         # not the entire accumulated checkpoint.
@@ -186,6 +184,82 @@ class Pipeline:
             f"({processed} newly processed)."
         )
         return extractions
+
+    def _extract_one(self, doc: Document, backend: IntelligenceBackend) -> DocumentExtraction:
+        """Foundation + LLM + structure fold-ins for one document. Shared by the
+        sequential loop and the parallel workers; the foundation lock also covers
+        the lazy FoundationLayer construction on first use."""
+        with self._foundation_lock:
+            foundation_results = self.foundation.process_document(doc)
+        extraction = backend.extract_document(
+            doc.doc_id, doc.source_path, foundation_results
+        )
+        # Scripts: fold in scene co-presence edges (opt-in; a no-op on prose).
+        if self.config.intelligence.parse_scripts:
+            from core.script_parser import script_copresence
+            extraction.relationships.extend(
+                script_copresence(doc.text, doc.doc_id))
+        # Social posts: fold in the platform-stated reply/mention/posted_in
+        # structure (asserted social_graph edges + USER/COMMUNITY nodes).
+        if (doc.meta or {}).get("source_type") == "social":
+            from core.social import social_structure
+            sm, se = social_structure(doc)
+            extraction.mentions.extend(sm)
+            extraction.relationships.extend(se)
+        # LittleSis: fold in the curated relationship graph (asserted typed edges,
+        # donations carry qual_monetary_value) + PERSON/ORG nodes.
+        if (doc.meta or {}).get("source_type") == "littlesis":
+            from core.littlesis import littlesis_structure
+            lm, le = littlesis_structure(doc)
+            extraction.mentions.extend(lm)
+            extraction.relationships.extend(le)
+        return extraction
+
+    def _extract_parallel(self, todo: list[Document], ckpt: CheckpointManager,
+                          parallel: int) -> int:
+        """Worker-pool extraction over documents. Each worker leases its own
+        backend from a queue (extract_document keeps per-call state like
+        _chunk_failed on the instance, so backends must not be shared), the
+        foundation and checkpoint writes sit behind locks, and only the LLM
+        calls actually overlap. BackendUnavailable from any worker aborts the
+        run; docs in flight at that moment are simply retried on --resume."""
+        import queue
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from tqdm import tqdm
+
+        if not todo:
+            return 0
+        n = min(parallel, len(todo))
+        console.print(f"[cyan]Parallel extraction: {n} workers.[/cyan]")
+        backends: queue.Queue = queue.Queue()
+        for _ in range(n):
+            backends.put(build_backend(self.config, lambda: self.foundation,
+                                       domain=self.domain))
+        save_lock = threading.Lock()
+        processed = 0
+
+        def work(doc: Document) -> DocumentExtraction:
+            backend = backends.get()
+            try:
+                return self._extract_one(doc, backend)
+            finally:
+                backends.put(backend)
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            futures = [ex.submit(work, d) for d in todo]
+            try:
+                for fut in tqdm(as_completed(futures), total=len(futures),
+                                desc="Extracting", unit="doc"):
+                    extraction = fut.result()  # re-raises BackendUnavailable
+                    with save_lock:
+                        ckpt.save(extraction, flush=True)
+                    processed += 1
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                raise
+        return processed
 
     # Mode 4: manual batch (gemini_batch). Export one self-contained prompt holding
     # whole documents, paste it into a long-context model, import the JSON reply.
@@ -909,7 +983,8 @@ class Pipeline:
         # same-QID nodes string dedup kept apart, before inference reads the ids.
         if self.config.linking.enabled:
             from postprocess.wikidata import consolidate_by_qid, link_entities
-            entities = link_entities(entities, self.config.linking)
+            entities = link_entities(entities, self.config.linking,
+                                     cache_path=self.run_dir / "wikidata_cache.json")
             if self.config.linking.consolidate_by_qid:
                 entities, relationships, _name_to_id = consolidate_by_qid(
                     entities, relationships, _name_to_id)

@@ -36,6 +36,15 @@ class InferenceEngine:
         # Newman (PNAS 2001, collaboration networks): a pair sharing a document of
         # k entities gets 1/(k-1), so a 50-entity page doesn't forge 1225 ties as
         # strong as a tete-a-tete. shared_docs still gates; strength weights.
+        #
+        # Pair enumeration is O(k^2) per doc. An entity in fewer than
+        # min_shared_docs documents can never survive the gate below, so only
+        # enumerate pairs among eligible entities. The Newman weight keeps the
+        # doc's FULL entity count k - the filter changes cost, not values. On a
+        # web corpus (mostly single-doc entities) this collapses the pair space.
+        min_shared = self.config.cooccurrence_min_shared_docs
+        eligible = {e.entity_id for e in entities if len(e.doc_ids) >= min_shared}
+
         pair_docs: dict[frozenset[str], set[str]] = defaultdict(set)
         pair_strength: dict[frozenset[str], float] = defaultdict(float)
         for doc_id, ent_ids in doc_to_entities.items():
@@ -43,14 +52,14 @@ class InferenceEngine:
             if k < 2:
                 continue
             w = 1.0 / (k - 1)
-            for a, b in itertools.combinations(sorted(ent_ids), 2):
+            for a, b in itertools.combinations(sorted(ent_ids & eligible), 2):
                 fp = frozenset((a, b))
                 pair_docs[fp].add(doc_id)
                 pair_strength[fp] += w
 
         edges: list[Relationship] = []
         for pair, docs in pair_docs.items():
-            if len(docs) < self.config.cooccurrence_min_shared_docs:
+            if len(docs) < min_shared:
                 continue
             a, b = tuple(pair)
             edges.append(

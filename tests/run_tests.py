@@ -188,6 +188,162 @@ def test_dedup_folds() -> None:
     check("person without org marker stays person", out and out[0].label == "PERSON",
           str([(e.canonical_name, e.label) for e in out]))
 
+    # Trailing-appositive artifact: a 1-mention span that swallowed a predicate
+    # noun ("... Adolf Hitler Pate war") must not rename the 2000-mention hub.
+    # The fold still happens; the better-attested SHORT name wins because the
+    # extra token extends the edge, not the middle.
+    ents = [ent("Adolf Hitler Pate", mentions=1), ent("Adolf Hitler", mentions=2000)]
+    out = d._fold_subset_persons(ents)
+    check("edge-extension artifact loses the name",
+          len(out) == 1 and out[0].canonical_name == "Adolf Hitler"
+          and "Adolf Hitler Pate" in out[0].aliases,
+          str([(e.canonical_name, e.aliases) for e in out]))
+
+    # Interior insertion (middle name) keeps the fuller form even when the short
+    # form is more frequent - the existing Theodore Abel behavior.
+    ents = [ent("Theodore Fred Abel", mentions=3), ent("Theodore Abel", mentions=7)]
+    out = d._fold_subset_persons(ents)
+    check("interior insertion keeps full name",
+          len(out) == 1 and out[0].canonical_name == "Theodore Fred Abel",
+          str([e.canonical_name for e in out]))
+
+    # Dotted-acronym spacing hits the alias map: "S. P.D." normalizes to "s pd"
+    # which misses the "spd" key without the squashed retry.
+    d2 = Deduplicator(DedupConfig(), domain_aliases={"S.P.D.": "SPD", "SPD": "SPD"})
+    ents = [ent("S. P.D.", "ORG", 300)]
+    out = d2._apply_aliases(ents)
+    check("squashed alias lookup", out[0].canonical_name == "SPD",
+          out[0].canonical_name)
+
+
+def test_alias_canon_enforcement() -> None:
+    from core.schema import Entity, Relationship
+    from postprocess.deduplicator import enforce_alias_canon
+
+    print("-- alias canon enforcement")
+
+    def ent(eid, name, label="PERSON", mentions=1, aliases=(), **attrs):
+        e = Entity(entity_id=eid, canonical_name=name, label=label)
+        e.mention_count = mentions
+        e.aliases = list(aliases)
+        e.attributes.update(attrs)
+        return e
+
+    amap = {"Hitler": "Adolf Hitler", "Adolf Hitler": "Adolf Hitler",
+            "S.P.D.": "SPD", "SPD": "SPD"}
+
+    # Canonical missed the map but an alias hits it: rename to the curated form.
+    ents = [ent("e1", "Adolf Hitler Pate", mentions=2042, aliases=["Adolf Hitler", "Hitler"])]
+    out, _ = enforce_alias_canon(ents, [], amap)
+    check("alias-carried rename", out[0].canonical_name == "Adolf Hitler"
+          and "Adolf Hitler Pate" in out[0].aliases,
+          str((out[0].canonical_name, out[0].aliases)))
+
+    # Squashed canonical match + collision fold with edge remap.
+    ents = [ent("e1", "S. P.D.", "ORG", 300), ent("e2", "SPD", "ORG", 50)]
+    rels = [Relationship(source="e2", target="x", rel_type="opposed", doc_id="d1"),
+            Relationship(source="e1", target="e2", rel_type="allied_with", doc_id="d1")]
+    out, rels2 = enforce_alias_canon(ents, rels, amap)
+    check("spacing variant renamed + folded", len(out) == 1
+          and out[0].canonical_name == "SPD", str([e.canonical_name for e in out]))
+    check("collision edges remapped, self-loop dropped",
+          len(rels2) == 1 and rels2[0].source == "e1",
+          str([(r.source, r.target) for r in rels2]))
+
+    # Aliases mapping to two different canons = bad merge; never compound it.
+    ents = [ent("e1", "Someone Odd", mentions=9, aliases=["Hitler", "SPD"])]
+    out, _ = enforce_alias_canon(ents, [], amap)
+    check("ambiguous alias hits skipped", out[0].canonical_name == "Someone Odd")
+
+    # Authors never rename or fold into figures.
+    ents = [ent("e1", "Hitler", mentions=5, is_author=True),
+            ent("e2", "Hitler", mentions=3)]
+    out, _ = enforce_alias_canon(ents, [], amap)
+    names = sorted(e.canonical_name for e in out)
+    check("author exempt from rename/fold", names == ["Adolf Hitler", "Hitler"],
+          str(names))
+
+
+def test_author_placeholders() -> None:
+    from config import DedupConfig
+    from core.schema import Entity
+    from domain.nazi_era.german_nlp import author_from_filename
+    from postprocess.deduplicator import Deduplicator
+
+    print("-- author placeholders")
+    check("real author name kept",
+          author_from_filename("August Spanku239694.rtf") == "August Spanku")
+    check("unknown filename is not a name",
+          author_from_filename("unknown100003.rtf") is None)
+    check("unbekannt too", author_from_filename("unbekannt12.rtf") is None)
+
+    def ent(name, mentions=1, **attrs):
+        e = Entity(entity_id="", canonical_name=name, label="PERSON")
+        e.mention_count = mentions
+        e.attributes.update(attrs)
+        return e
+
+    d = Deduplicator(DedupConfig())
+    # Diacritic-insensitive author fold: xlsx/filename names come ASCII-flat.
+    ents = [ent("Hans Schonherr", 40, is_author=True), ent("Hans Schönherr", 3)]
+    out = d._fold_author_mentions(ents)
+    check("diacritic variant folds into author", len(out) == 1
+          and out[0].attributes.get("is_author"), str([e.canonical_name for e in out]))
+
+    # A placeholder-named author never absorbs same-named mentions.
+    ents = [ent("unknown", 60, is_author=True), ent("unknown", 2)]
+    out = d._fold_author_mentions(ents)
+    check("placeholder author folds nothing", len(out) == 2)
+
+
+def test_verify_cache() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from core.schema import Relationship
+    from postprocess.relation_verify import verify_relations
+
+    print("-- verify cache")
+
+    class Backend:
+        def __init__(self, answer='{"1": "yes", "2": "no"}'):
+            self.calls = 0
+            self.answer = answer
+
+        def _complete(self, system, user):
+            self.calls += 1
+            return self.answer
+
+    class DeadBackend:
+        def _complete(self, system, user):
+            raise ConnectionError("host down")
+
+    def rels():
+        return [
+            Relationship(source="a", target="b", rel_type="joined", doc_id="d1",
+                         evidence="er trat der NSDAP bei",
+                         attributes={"edge_source": "llm_extracted"}),
+            Relationship(source="a", target="c", rel_type="opposed", doc_id="d1",
+                         evidence="die Fabriken schlossen",
+                         attributes={"edge_source": "llm_extracted"}),
+        ]
+
+    names = {"a": "A", "b": "B", "c": "C"}
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td) / "v.jsonl"
+        be = Backend()
+        out, flagged = verify_relations(rels(), be, names, cache_path=cache)
+        check("first pass calls model", be.calls == 1 and flagged == 1,
+              f"calls={be.calls} flagged={flagged}")
+        check("verdicts tagged", out[0].attributes.get("verification") == "supported"
+              and out[1].attributes.get("verification") == "unsupported")
+        # Second pass: host down, verdicts come from the cache file.
+        out2, flagged2 = verify_relations(rels(), DeadBackend(), names, cache_path=cache)
+        check("cached verdicts survive dead backend", flagged2 == 1
+              and out2[0].attributes.get("verification") == "supported"
+              and out2[1].attributes.get("verification") == "unsupported",
+              f"flagged={flagged2}")
+
 
 def test_relation_guide() -> None:
     import types
@@ -1391,9 +1547,13 @@ def test_type_hint_prompt() -> None:
     hints = relation_signature_hints(["born_in", "employed_by", "promoted_to",
                                       "located_in", "supported"])
     check("born_in signature rendered", hints.get("born_in") == "person->place", str(hints))
-    check("employed_by signature rendered", hints.get("employed_by") == "person->org", "")
+    # Abel-corpus widenings: person employers (apprentice masters), events in places.
+    check("employed_by signature rendered",
+          hints.get("employed_by") == "person->person/org", str(hints.get("employed_by")))
     check("promoted_to signature rendered", hints.get("promoted_to") == "person->rank", "")
-    check("located_in permissive source", hints.get("located_in") == "person/org/place->place", "")
+    check("located_in permissive source",
+          hints.get("located_in") == "person/org/place/event->place",
+          str(hints.get("located_in")))
     check("loose relation has no signature", "supported" not in hints, str(hints))
 
     labels = ["born_in", "supported"]
@@ -2794,6 +2954,9 @@ def main() -> int:
     test_json_repair()
     test_checkpoint_scoring()
     test_dedup_folds()
+    test_alias_canon_enforcement()
+    test_author_placeholders()
+    test_verify_cache()
     test_relation_guide()
     test_evidence_tiers()
     test_exclude_edge_source()

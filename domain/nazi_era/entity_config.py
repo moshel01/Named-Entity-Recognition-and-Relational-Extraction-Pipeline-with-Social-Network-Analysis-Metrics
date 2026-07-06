@@ -29,6 +29,10 @@ STOPWORDS: set[str] = {
     # then promotes to PERSON ("Heran kamen...", "Kehrte ich zurück...").
     "heran", "kehrte", "schlagartig", "straffes", "schwer", "hierauf",
     "daraufhin", "alsdann", "sodann", "nunmehr",
+    # Placeholder "names": archive labels for anonymous letters, never a person.
+    # (Authors are exempt from stopword removal; anonymous authors get a unique
+    # "Narrator [stem]" node via author_from_filename, not one of these.)
+    "unknown", "unbekannt", "anonym", "anonymous",
 }
 
 # Fine-grained subtypes for analysis/interpretation (informational).

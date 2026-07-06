@@ -953,7 +953,9 @@ class Pipeline:
                 relationships, self.backend, id_to_name,
                 batch_size=self.config.quality.verify_batch_size,
                 max_relations=self.config.quality.verify_max,
-                drop=self.config.quality.verify_drop)
+                drop=self.config.quality.verify_drop,
+                cache_path=self.run_dir / "checkpoints"
+                / f"{self.config.run_name}.verify.jsonl")
             if n_unsup:
                 verb = "Dropped" if self.config.quality.verify_drop else "Tagged"
                 console.print(f"[cyan]{verb} {n_unsup} evidence-unsupported relations "
@@ -963,6 +965,13 @@ class Pipeline:
         if self.config.dedup.llm_assist and llm_capable:
             from postprocess.llm_dedup import apply_llm_merges
             entities, relationships = apply_llm_merges(entities, relationships, self.backend)
+
+        # 2c. Curated alias map has the last word on display names. Merge chains
+        # pick names by mention count or by the LLM's own choice, which can crown
+        # a span artifact ("Adolf Hitler Pate") or an odd spacing ("S. P.D.").
+        from postprocess.deduplicator import enforce_alias_canon
+        entities, relationships = enforce_alias_canon(
+            entities, relationships, self.domain.aliases())
 
         # 3. Quality review (rules always; LLM in api/ollama when enabled).
         reviewer = QualityReviewer(self.config.quality, stopwords=self.domain.entity_stopwords())
@@ -1137,6 +1146,40 @@ class Pipeline:
                 n_edges += 1
         console.print(f"[cyan]Metadata: merged onto {merged} authors, "
                       f"added {len(entities) - n_nodes_before} nodes + {n_edges} verified edges.[/cyan]")
+
+        # The rename above happens AFTER dedup's author-fold ran, so a mention
+        # node bearing the author's spreadsheet name is still loose ("Johann
+        # Schnur" the mention next to the author renamed filename->xlsx). Re-run
+        # the fold against the new names and remap edges the mentions carried.
+        # Diacritic-insensitive: xlsx names come ASCII-flat, the text doesn't.
+        from postprocess.deduplicator import Deduplicator, _fold_diacritics, _placeholder_name
+        authors: dict[str, list] = {}
+        for e in entities:
+            if (e.attributes.get("is_author") and e.label == "PERSON"
+                    and not _placeholder_name(e.canonical_name)):
+                authors.setdefault(
+                    _fold_diacritics(normalize_name(e.canonical_name)), []).append(e)
+        id_remap: dict[str, str] = {}
+        kept = []
+        for e in entities:
+            if not e.attributes.get("is_author") and e.label == "PERSON":
+                cands = authors.get(_fold_diacritics(normalize_name(e.canonical_name)))
+                if cands and len(cands) == 1:
+                    Deduplicator._merge_into(cands[0], e, keep_primary_name=True)
+                    id_remap[e.entity_id] = cands[0].entity_id
+                    continue
+            kept.append(e)
+        if id_remap:
+            entities = kept
+            remapped_rels = []
+            for r in relationships:
+                r.source = id_remap.get(r.source, r.source)
+                r.target = id_remap.get(r.target, r.target)
+                if r.source != r.target:
+                    remapped_rels.append(r)
+            relationships = remapped_rels
+            console.print(f"[cyan]Folded {len(id_remap)} stray author-name "
+                          "mentions into their author nodes.[/cyan]")
         return entities, relationships
 
     # Reporting

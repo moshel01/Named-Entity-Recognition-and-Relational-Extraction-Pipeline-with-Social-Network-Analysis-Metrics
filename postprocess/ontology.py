@@ -139,11 +139,17 @@ _PERSON = frozenset({"PERSON"})
 _ORG = frozenset({"ORG", "INSTITUTION"})
 _PLACE = frozenset({"LOCATION", "GPE"})
 _RANK = frozenset({"RANK"})
-CORE_TYPES = _PERSON | _ORG | _PLACE | _RANK | frozenset({"EVENT"})
+_EVENT = frozenset({"EVENT"})
+CORE_TYPES = _PERSON | _ORG | _PLACE | _RANK | _EVENT
 RELATION_TYPE_SIGNATURES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
-    "employed_by": (_PERSON, _ORG),
-    "led":         (_PERSON, _ORG),
-    "studied_at":  (_PERSON, _ORG),
+    # Abel corpus: apprentices/farmhands are employed by an individual master,
+    # so a PERSON employer is legit. A place as employer stays a violation
+    # ("worked in Hamburg" belongs to located_in/resided_in).
+    "employed_by": (_PERSON, _ORG | _PERSON),
+    # Leading an event (a putsch, a march) is real leadership, not a mistype.
+    "led":         (_PERSON, _ORG | _EVENT),
+    # "studierte in München" names the city, not the school. Coarse but true.
+    "studied_at":  (_PERSON, _ORG | _PLACE),
     "founded":     (_PERSON | _ORG, _ORG),
     "founded_by":  (_ORG, _PERSON | _ORG),
     "owns":        (_PERSON | _ORG, _ORG),
@@ -152,11 +158,12 @@ RELATION_TYPE_SIGNATURES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "lived_in":    (_PERSON, _PLACE),
     "resided_in":  (_PERSON, _PLACE),   # domain (nazi_era) vocab alongside lived_in
     "died_in":     (_PERSON, _PLACE),
-    # located_in is permissive on the source (a person, org, or place can all be
-    # "in" a place - the nazi_era domain maps "lived in/wohnte in/from" here and
-    # tie_classes treats person->place as biographical). The real constraint is
-    # the TARGET: located_in pointing at a person/org is the misextraction.
-    "located_in":  (_PERSON | _ORG | _PLACE, _PLACE),
+    # located_in is permissive on the source (a person, org, place, or event can
+    # all be "in" a place - the nazi_era domain maps "lived in/wohnte in/from"
+    # here and tie_classes treats person->place as biographical). The real
+    # constraint is the TARGET: located_in pointing at a person/org is the
+    # misextraction.
+    "located_in":  (_PERSON | _ORG | _PLACE | _EVENT, _PLACE),
     "married_to":  (_PERSON, _PERSON),
     "sibling_of":  (_PERSON, _PERSON),
     "family_of":   (_PERSON, _PERSON),

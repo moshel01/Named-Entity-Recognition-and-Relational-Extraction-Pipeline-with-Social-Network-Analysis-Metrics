@@ -137,6 +137,108 @@ def _function_word_name(name: str) -> bool:
     return any(t in _NAME_FUNCTION_WORDS for t in _tokens(name))
 
 
+def _fold_diacritics(s: str) -> str:
+    # "schönherr" == "schonherr": filename-derived and metadata names come
+    # ASCII-flattened while the text has the umlaut. ß -> ss first (NFKD
+    # doesn't decompose it). Only for matching - display names keep umlauts.
+    import unicodedata
+    s = s.replace("ß", "ss")
+    return "".join(c for c in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(c))
+
+
+# Archive/filename conventions for anonymous authors. These are labels, not
+# names: never a fold key, or every anonymous letter's narrator fuses into one
+# fake hub (six unknown*.rtf Abel letters became a single degree-271 "person").
+_PLACEHOLDER_NAMES = frozenset({
+    "unknown", "unbekannt", "anonym", "anonymous", "nn", "n n", "na", "n a",
+})
+
+
+def _placeholder_name(name: str) -> bool:
+    return normalize_name(name) in _PLACEHOLDER_NAMES
+
+
+def enforce_alias_canon(
+    entities: list[Entity],
+    relationships: list[Relationship],
+    domain_aliases: dict[str, str] | None,
+) -> tuple[list[Entity], list[Relationship]]:
+    """Terminal naming pass: the curated alias map beats whatever display name
+    the merge chain picked. Rule/LLM merges name the surviving node by mention
+    count or by the model's own pick, which loses to junk ("Adolf Hitler Pate"
+    - a 1-mention span artifact - outranked 2000 mentions of "Adolf Hitler";
+    gemma titled the SPD node "S. P.D."). Runs AFTER llm_dedup: rename any
+    non-author node whose canonical or alias hits a map key, then fold exact
+    (name, label) collisions the renames create. Spacing-insensitive lookup
+    catches dotted-acronym spacing ("S. P.D." -> "spd")."""
+    if not domain_aliases:
+        return entities, relationships
+    amap = {normalize_name(k): v for k, v in domain_aliases.items()}
+    squashed = {}
+    for k, v in amap.items():
+        squashed.setdefault(k.replace(" ", ""), v)
+
+    def target_for(name: str) -> str | None:
+        n = normalize_name(name)
+        hit = amap.get(n) or squashed.get(n.replace(" ", ""))
+        if hit is None and len(n) > 4 and n.endswith("s"):  # German genitive
+            hit = amap.get(n[:-1]) or squashed.get(n[:-1].replace(" ", ""))
+        return hit
+
+    renamed = 0
+    for e in entities:
+        if e.attributes.get("is_author"):
+            continue  # authors keep per-letter identity, never map to figures
+        tgt = target_for(e.canonical_name)
+        if tgt is None:
+            # An alias may hit the map even when the canonical missed ("Adolf
+            # Hitler Pate" carries alias "Adolf Hitler"). Ambiguous nodes whose
+            # aliases map to several canons are a bad merge - don't compound it.
+            hits = {t for t in (target_for(a) for a in e.aliases) if t}
+            if len(hits) != 1:
+                continue
+            tgt = hits.pop()
+        if tgt == e.canonical_name:
+            continue
+        names = {e.canonical_name, *e.aliases}
+        names.discard(tgt)
+        e.canonical_name = tgt
+        e.aliases = sorted(names)
+        renamed += 1
+    if not renamed:
+        return entities, relationships
+
+    # Renames can collide with an existing node of the same name+label: fold,
+    # higher-mention node survives and keeps the (now curated) name.
+    by_key: dict[tuple[str, str], Entity] = {}
+    id_remap: dict[str, str] = {}
+    out: list[Entity] = []
+    for e in sorted(entities, key=lambda x: -x.mention_count):
+        if e.attributes.get("is_author"):
+            out.append(e)
+            continue
+        key = (normalize_name(e.canonical_name), e.label)
+        prim = by_key.get(key)
+        if prim is None:
+            by_key[key] = e
+            out.append(e)
+        else:
+            Deduplicator._merge_into(prim, e, keep_primary_name=True)
+            id_remap[e.entity_id] = prim.entity_id
+    logger.info("Alias canon: renamed %d nodes, folded %d collisions.",
+                renamed, len(id_remap))
+    if not id_remap:
+        return out, relationships
+    kept_rels: list[Relationship] = []
+    for r in relationships:
+        r.source = id_remap.get(r.source, r.source)
+        r.target = id_remap.get(r.target, r.target)
+        if r.source != r.target:
+            kept_rels.append(r)
+    return out, kept_rels
+
+
 class Deduplicator:
     """Resolve raw entities into canonical entities with alias collapsing."""
 
@@ -205,12 +307,19 @@ class Deduplicator:
     def _apply_aliases(self, entities: list[Entity]) -> list[Entity]:
         if not self.aliases:
             return entities
+        squashed: dict[str, str] = {}
+        for k, v in self.aliases.items():
+            squashed.setdefault(k.replace(" ", ""), v)
         for e in entities:
             n = normalize_name(e.canonical_name)
             canon = self.aliases.get(n)
             # German genitive: "Hitlers"/"Führers"/"Deutschlands" -> known alias.
             if canon is None and len(n) > 4 and n.endswith("s"):
                 canon = self.aliases.get(n[:-1])
+            # Dotted-acronym spacing: "S. P.D." normalizes to "s pd", missing
+            # the "spd" key. Spacing-insensitive retry.
+            if canon is None:
+                canon = squashed.get(n.replace(" ", ""))
             if canon and canon != e.canonical_name:
                 if e.canonical_name not in e.aliases:
                     e.aliases.append(e.canonical_name)
@@ -394,7 +503,24 @@ class Deduplicator:
                      and len(toks(c)) > len(st) and subseq(st, toks(c))
                      and not self._blocked(c, s)]
             if len(cands) == 1:
-                self._merge_into(cands[0], s, keep_primary_name=True)
+                tgt = cands[0]
+                tt = toks(tgt)
+                # The longer name only earns canonical when its extra tokens are
+                # INTERIOR (middle names: "Theodore Abel" -> "Theodore Fred
+                # Abel"). A long form that extends at either edge is usually a
+                # span-boundary artifact swallowing an appositive/title ("Adolf
+                # Hitler Pate", "Kamerad Hans Meyer") - there the better-attested
+                # name wins, or a 1-mention junk span renames a 2000-mention hub.
+                interior = st[0] == tt[0] and st[-1] == tt[-1]
+                prefer_short = (not interior
+                                and s.mention_count > tgt.mention_count)
+                short_name = s.canonical_name
+                self._merge_into(tgt, s, keep_primary_name=True)
+                if prefer_short:
+                    names = {tgt.canonical_name, *tgt.aliases}
+                    names.discard(short_name)
+                    tgt.canonical_name = short_name
+                    tgt.aliases = sorted(names)
                 folded.add(id(s))
                 alive.discard(id(s))
         if not folded:
@@ -444,15 +570,18 @@ class Deduplicator:
         """
         authors: dict[str, list[Entity]] = defaultdict(list)
         for e in entities:
-            if e.attributes.get("is_author") and e.label == "PERSON":
-                authors[normalize_name(e.canonical_name)].append(e)
+            if (e.attributes.get("is_author") and e.label == "PERSON"
+                    and not _placeholder_name(e.canonical_name)):
+                # Diacritic-insensitive key: filename authors come ASCII-flat
+                # ("Schonherr"), the text mention has the umlaut ("Schönherr").
+                authors[_fold_diacritics(normalize_name(e.canonical_name))].append(e)
         if not authors:
             return entities
         folded: set[int] = set()
         for e in entities:
             if e.attributes.get("is_author") or e.label != "PERSON":
                 continue
-            cands = authors.get(normalize_name(e.canonical_name))
+            cands = authors.get(_fold_diacritics(normalize_name(e.canonical_name)))
             if cands and len(cands) == 1:
                 self._merge_into(cands[0], e, keep_primary_name=True)
                 folded.add(id(e))

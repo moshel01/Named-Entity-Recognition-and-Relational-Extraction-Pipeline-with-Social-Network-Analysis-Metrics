@@ -217,7 +217,7 @@ def quality_pillars(report: dict[str, Any], tables) -> dict[str, Any]:
 
 
 def enrich(tables, *, trust_verification: bool = False,
-           max_constraint_nodes: int = 6000) -> dict[str, Any]:
+           max_constraint_nodes: int = 25000) -> dict[str, Any]:
     """Attach brokerage/bridge columns to ``tables`` and return a QA report.
 
     Mutates ``tables.nodes`` (adds ``sna_constraint``, ``sna_effective_size``,
@@ -248,6 +248,10 @@ def enrich(tables, *, trust_verification: bool = False,
 
     # Brokerage (structural holes) on the substantive graph. Constraint is
     # O(n*deg^2); guard very large graphs so a full corpus never stalls a run.
+    # The substantive layer of a 15k-node corpus run is ~7k active nodes and
+    # sparse (mean degree ~4), which computes in seconds - the old 6000 cap
+    # silently skipped exactly the runs the metric was built for. The cap now
+    # only trips on graphs an order of magnitude denser.
     constraint: dict[str, float] = {}
     effective: dict[str, float] = {}
     sub_nodes = [v for v in g_sub.nodes if g_sub.degree(v) > 0]

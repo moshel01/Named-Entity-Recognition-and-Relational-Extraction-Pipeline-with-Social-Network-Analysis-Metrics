@@ -111,8 +111,14 @@ class ParsedName:
 def author_from_filename(filename: str) -> str | None:
     # Abel files are "<Author Name><hoover_id>.rtf" e.g. "August Spanku239694.rtf".
     # Strip extension + trailing id digits -> author name.
+    # Anonymous letters are filed "unknown<id>.rtf" - that's a label, not a
+    # name. Returning it would hand six different anonymous authors the same
+    # "person" and fuse them into one fake hub; None falls back to the unique
+    # per-doc "Narrator [stem]" placeholder.
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename
     stem = re.sub(r"\d+$", "", stem).strip()
+    if stem.lower() in {"unknown", "unbekannt", "anonym", "anonymous", "nn", "n.n"}:
+        return None
     return stem or None
 
 

@@ -4,6 +4,47 @@ Sequential record of what shipped. Newest first. Terse on purpose.
 
 ---
 
+## abel full-run audit: naming, anonymous authors, verify cache
+
+Audit of the finished abel_ollama_full (gemma4:31b, 539 letters) found five
+defects; all fixed in code and patched into the run output in place
+(scratch/patch_abel_ollama_full.py, original preserved at
+output/abel_ollama_full.bak). The ollama host was down, so re-running analyze
+would have dropped every LLM-derived tag - hence the in-place patch.
+
+- `_fold_subset_persons` kept the LONGER name unconditionally: a 1-mention
+  GLiNER span artifact ("... Adolf Hitler Pate war" -> "Adolf Hitler Pate")
+  renamed the 2042-mention Hitler node. Now the longer form only wins when its
+  extra tokens are interior (middle names); an edge-extension defers to the
+  better-attested name.
+- Curated alias map now has the last word on display names:
+  `enforce_alias_canon` (deduplicator) runs after llm_dedup, renames any
+  non-author node whose canonical OR alias hits a map key, folds the
+  collisions, remaps edges. Alias lookup is also spacing-insensitive
+  ("S. P.D." normalizes to "s pd" and missed the "spd" key). Caught 27 bad
+  display names in the abel run (S. P.D., N S D A P, Hitler-Bewegung, ...).
+- Metadata rename happens after dedup's author-fold, so a mention node bearing
+  the author's xlsx name stayed loose (62 exact author duplicates + diacritic
+  variants: filename "Schonherr" vs text "Schönherr"). `_apply_metadata` now
+  re-folds after the rename; author-fold matching is diacritic-insensitive.
+- Six anonymous letters filed unknown<id>.rtf handed six different authors the
+  literal name "unknown"; aggregation fused them into one degree-271 fake hub
+  (an articulation point). `author_from_filename` returns None for placeholder
+  stems -> unique per-doc "Narrator [stem]" nodes; placeholder names are also
+  barred from author-folding and stopworded.
+- Type signatures widened where the corpus is right and the gate was wrong:
+  employed_by person-target (apprentice masters), studied_at place ("studierte
+  in München"), located_in event-source, led event-target. 581 -> 432 flags;
+  the rest are real misextractions and stay tagged.
+- Brokerage was silently skipped: the substantive layer had 7218 active nodes,
+  over the 6000-node constraint cap. Measured 2.2s at this scale; cap now
+  25000. graph_report.json for the run now carries constraint/effective size
+  for 7169 nodes.
+- Relation verification gets a verdict checkpoint
+  (checkpoints/<run>.verify.jsonl, keyed by names+rel+evidence hash). A
+  --stage analyze re-run reuses verdicts instead of redoing ~700 LLM calls -
+  or losing every tag when the backend is unreachable.
+
 ## extraction throughput + guardrails
 
 - `intelligence.parallel_docs` (default 1 = the old loop, byte-identical): extract N
